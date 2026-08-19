@@ -115,7 +115,7 @@ jobs:
           # artifact-content check: the unpacked archive MUST carry the license file
           [[ -f LICENSE ]] || { echo "::error::packaged archive is missing LICENSE"; exit 1; }
       - name: Attach to release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           draft: true
           # Never replace an asset that is already attached: this action overwrites by
@@ -194,7 +194,7 @@ jobs:
           print("acceptance ok:", hits[0].get("street"), lat, lon, "->", back[0].get("street"))
           PY
       - name: Attach to release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           draft: true
           # Never replace an asset that is already attached: this action overwrites by
@@ -308,7 +308,7 @@ jobs:
           print("extension zip content:", names)
           PY
       - name: Attach to release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           draft: true
           # Never replace an asset that is already attached: this action overwrites by
