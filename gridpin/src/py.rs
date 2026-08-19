@@ -64,7 +64,7 @@ impl Geocoder {
     /// optional housenumber, commune, postcode).
     #[pyo3(signature = (q, k = 10))]
     fn geocode<'py>(&self, py: Python<'py>, q: &str, k: usize) -> PyResult<Bound<'py, PyList>> {
-        let hits = py.allow_threads(|| query::query_cascade(&self.inner, self.poi.as_ref(), q, k));
+        let hits = py.detach(|| query::query_cascade(&self.inner, self.poi.as_ref(), q, k));
         let out = PyList::empty(py);
         for h in &hits {
             out.append(hit_to_dict(py, h)?)?;
@@ -95,7 +95,7 @@ impl Geocoder {
         let out = PyList::empty(py);
         for chunk in queries.chunks(CHUNK) {
             py.check_signals()?;
-            let results: Vec<Vec<query::Hit>> = py.allow_threads(|| {
+            let results: Vec<Vec<query::Hit>> = py.detach(|| {
                 pool.install(|| {
                     chunk
                         .par_iter()
@@ -126,7 +126,7 @@ impl Geocoder {
         // try_reverse is the single strict entry point: a bad coordinate raises here just
         // as in the CLI/DuckDB, not a silent empty list.
         let hits = py
-            .allow_threads(|| self.inner.try_reverse(lat, lon, k))
+            .detach(|| self.inner.try_reverse(lat, lon, k))
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
         let out = PyList::empty(py);
         for h in &hits {

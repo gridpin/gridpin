@@ -7,9 +7,17 @@
 yanked = "deny"
 
 [licenses]
+# Pin the ruleset version: without it, older and newer cargo-deny disagree on licenses carrying
+# a WITH-exception. That divergence bit us on 2026-08-19 — the local run said `licenses ok`
+# while CI rejected the very same lockfile.
+version = 2
 # Engine is Apache-2.0; dependencies must stay permissive.
 allow = [
     "Apache-2.0",
+    # target-lexicon, a BUILD dependency of pyo3 (never linked into a shipped artifact).
+    # The LLVM exception relaxes Apache-2.0 rather than restricting it, so it stays compatible
+    # with an Apache-2.0 engine; cargo-deny requires the exception to be allowed by name.
+    "Apache-2.0 WITH LLVM-exception",
     "MIT",
     "BSD-2-Clause",
     "BSD-3-Clause",
