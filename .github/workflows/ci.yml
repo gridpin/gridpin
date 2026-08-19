@@ -31,7 +31,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: gridpin
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           # ≥21: the test runner expands the `*.test.js` glob ITSELF. On windows-latest the
           # default shell is pwsh, which does not expand globs — with node 20 the pattern
