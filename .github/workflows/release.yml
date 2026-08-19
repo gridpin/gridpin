@@ -172,7 +172,19 @@ jobs:
         shell: bash
         run: |
           python -m pip install --quiet duckdb==1.5.3
-          make mc                                    # tiny Monaco sheet, built from an OSM extract
+          # The sheet is built INLINE instead of `make mc`. That recipe calls `nice`, `shasum`
+          # and `python3` — none of which exist on a Windows runner, so the job died with
+          # "Error 127" (command not found) before the wheel was exercised at all. These are the
+          # same steps, written portably; the fixture digest stays fail-closed.
+          if [ "$RUNNER_OS" = "Windows" ]; then BIN=gridpin/target/release/gridpin.exe;
+          else BIN=gridpin/target/release/gridpin; fi
+          cargo build --release --manifest-path gridpin/Cargo.toml
+          mkdir -p data
+          cp eval/smoke/fixtures/monaco.osm.pbf data/monaco-latest.osm.pbf
+          python -c "import hashlib,pathlib,sys; want='58c25f4f88ae1321bf4fe45b0baf2c67cd1c4fe0441f8fde794c1074db46819a'; got=hashlib.sha256(pathlib.Path('data/monaco-latest.osm.pbf').read_bytes()).hexdigest(); sys.exit(0 if got==want else f'::error::smoke fixture digest {got} != {want}')"
+          python prep/osm.py MC data/monaco-latest.osm.pbf
+          python prep/export_build.py data/mc_norm.parquet data/build_mc.csv.gz
+          GRIDPIN_REQUIRE_META=1 "$BIN" build data/build_mc.csv.gz data/mc.bin --meta data/mc_manifest.json
           python - <<'PY'
           import sys
           import gridpin
@@ -260,11 +272,17 @@ jobs:
           pip install --quiet duckdb==1.5.3
           # Copy into a clean dir under the exact basename users get after unzipping — this
           # reproduces the download/LOAD the release ships, not a build-path convenience name.
-          mkdir -p /tmp/dl && cp duckdb-ext/gridpin_ext.duckdb_extension /tmp/dl/
+          # The directory is workspace-relative and the path is resolved by Python itself.
+          # A bash path like /tmp/dl means nothing to a native Windows interpreter: DuckDB then
+          # cannot find the file and reports unrelated "candidate extensions" instead, which is
+          # how this job failed on windows-latest.
+          mkdir -p dl && cp duckdb-ext/gridpin_ext.duckdb_extension dl/
           python3 - <<'PY'
+          import os
           import duckdb
+          ext = os.path.abspath(os.path.join("dl", "gridpin_ext.duckdb_extension")).replace("\\", "/")
           con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
-          con.execute("LOAD '/tmp/dl/gridpin_ext.duckdb_extension'")
+          con.execute(f"LOAD '{ext}'")
           try:
               con.execute("SELECT gridpin_geocode('test')")
               raise SystemExit("expected a clear no-sheet error")
