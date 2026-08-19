@@ -1,0 +1,38 @@
+# DCO gate: CONTRIBUTING promises that PRs with unsigned commits cannot be merged — this workflow
+# makes that promise enforceable. Add it to the required checks of the main branch, AND pin that
+# required check to this trusted source via a repository ruleset (owner action — see runbook X-5):
+# a required status name alone can be satisfied by any workflow.
+#
+# Runs on `pull_request_target`, i.e. in the BASE repository context: the workflow file itself AND
+# .github/dco_verify.sh are the trusted BASE versions, so a PR cannot modify the gate it must pass
+# (an `on: pull_request` run would use the PR's merge-branch copy of both). It NEVER checks out or
+# executes PR code — it fetches the PR head commit as git OBJECTS only, checks the fetched OID
+# equals the event head SHA, then runs the trusted base checker over the PR's commit range.
+name: dco
+
+on: pull_request_target
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0   # checks out the trusted BASE ref (default for pull_request_target)
+      - name: Verify DCO with trusted base workflow and checker
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Fetch the PR head as OBJECTS only (no checkout, no execution of PR code), verify the
+          # fetched OID equals the event head SHA (so the range cannot be spoofed), then run the
+          # trusted base checker over BASE..HEAD. dco_verify.sh here is the BASE copy.
+          git fetch --no-tags --force origin "+refs/pull/${PR}/head:refs/remotes/pr/head"
+          got="$(git rev-parse refs/remotes/pr/head)"
+          test "$got" = "$HEAD"
+          bash .github/dco_verify.sh . "$BASE..$HEAD"

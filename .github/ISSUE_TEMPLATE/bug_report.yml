@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a wrong or missing geocoding result, a crash, or other misbehavior.
+labels: ["bug"]
+body:
+  - type: input
+    id: query
+    attributes:
+      label: Query (verbatim)
+      description: The exact query you sent, character for character. For reverse geocoding, the exact lat/lon.
+      placeholder: "10 rue de Rivoli, 75004 Paris"
+    validations:
+      required: true
+  - type: input
+    id: country-file
+    attributes:
+      label: Country file and version
+      description: Which country build file you used and its release version.
+      placeholder: "France, release 2026-06"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result (with source)
+      description: What you expected to get, and where the truth comes from (registry entry, official map, on-the-ground knowledge, etc.).
+    validations:
+      required: false
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: What gridpin actually returned. Paste the output as-is.
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: Engine version and OS
+      placeholder: "gridpin 0.x.y, Ubuntu 24.04 / macOS 15"
+    validations:
+      required: false

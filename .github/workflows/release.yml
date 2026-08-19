@@ -1,0 +1,404 @@
+# gridpin release CI: on a vX.Y.Z tag — CLI binaries (3 OSes) + Python wheels (maturin)
+# attached to a draft GitHub Release. PyPI publishing requires a separate manual approval
+# (the "pypi" environment has a required reviewer), so a tag alone never publishes anything.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Default the whole workflow to read-only. `contents: write` is granted per-job ONLY to the jobs
+# that attach assets to the draft release (cli / wheels / duckdb-extension / sha256sums), and
+# `id-token: write` (OIDC) is granted ONLY to the pypi job. A per-job `permissions:` block REPLACES
+# this default for that job, so no other scope leaks in.
+permissions:
+  contents: read
+
+jobs:
+  # Fuse: the tag must match the versions in the manifests, or the
+  # release would carry a wheel/binary that reports a different version than its tag.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Tag matches Cargo.toml and pyproject.toml
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_v=$(grep -m1 '^version' gridpin/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          py_v=$(grep -m1 '^version' gridpin/pyproject.toml | sed 's/.*"\(.*\)"/\1/' || true)
+          echo "tag=$tag cargo=$cargo_v pyproject=${py_v:-<from Cargo.toml>}"
+          [ "$tag" = "$cargo_v" ] || { echo "::error::tag v$tag != gridpin/Cargo.toml $cargo_v"; exit 1; }
+          if [ -n "$py_v" ]; then
+            [ "$tag" = "$py_v" ] || { echo "::error::tag v$tag != gridpin/pyproject.toml $py_v"; exit 1; }
+          fi
+
+  ci-passed:
+    # a matching version string is NOT proof the code was tested, and a
+    # merely-"successful" run is not enough either. A CI run triggered by a `pull_request` (or on a
+    # fork, or on a non-main branch) can pass for the same SHA WITHOUT the code ever being on main —
+    # so require the trusted run to be a `push` to `main` in THIS repository, not any green run.
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require a successful push-to-main CI run for ${{ github.sha }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          n=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&per_page=100" \
+                --jq '[.workflow_runs[]
+                       | select(.status=="completed" and .conclusion=="success"
+                                and .event=="push" and .head_branch=="main"
+                                and .head_repository.full_name==env.REPO)] | length')
+          echo "trusted (push→main, this repo) successful ci.yml runs for $SHA: ${n:-0}"
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "::error::no successful ci.yml run from a push to main of $REPO for $SHA — a PR/fork/branch run does not count; tag a commit that passed CI on main"; exit 1
+          fi
+
+  cli:
+    needs: [check, ci-passed]
+    permissions:
+      contents: write  # attaches CLI archives to the draft release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.93.0"  # pinned: a floating input can change the build between runs
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: gridpin
+      - name: Build CLI
+        run: cargo build --release --manifest-path gridpin/Cargo.toml --target ${{ matrix.target }}
+      - name: Package (tar.gz / zip)
+        shell: bash
+        # The Apache LICENSE (and NOTICE, if the repo ever adds one) travels INSIDE every archive,
+        # not just next to the download.
+        run: |
+          cd gridpin/target/${{ matrix.target }}/release
+          cp "$GITHUB_WORKSPACE/LICENSE" .
+          legal="LICENSE"
+          if [[ -f "$GITHUB_WORKSPACE/NOTICE" ]]; then cp "$GITHUB_WORKSPACE/NOTICE" .; legal="$legal NOTICE"; fi
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            7z a gridpin-${{ matrix.target }}.zip gridpin.exe $legal
+          else
+            tar czf gridpin-${{ matrix.target }}.tar.gz gridpin $legal
+          fi
+      - name: Smoke — the packaged binary runs, reports the tag version, and ships LICENSE
+        shell: bash
+        run: |
+          cd gridpin/target/${{ matrix.target }}/release
+          mkdir -p _smoke && cd _smoke
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            7z x ../gridpin-${{ matrix.target }}.zip
+            v=$(./gridpin.exe --version)
+          else
+            tar xzf ../gridpin-${{ matrix.target }}.tar.gz
+            v=$(./gridpin --version)
+          fi
+          echo "$v"
+          [[ "$v" == *"${GITHUB_REF_NAME#v}"* ]] || { echo "::error::binary reports '$v', tag is $GITHUB_REF_NAME"; exit 1; }
+          # artifact-content check: the unpacked archive MUST carry the license file
+          [[ -f LICENSE ]] || { echo "::error::packaged archive is missing LICENSE"; exit 1; }
+      - name: Attach to release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          draft: true
+          # Never replace an asset that is already attached: this action overwrites by
+          # default, so re-running the tag would swap bytes inside the same published
+          # release — the one thing a signed, checksummed release must never do.
+          overwrite_files: false
+          files: |
+            gridpin/target/${{ matrix.target }}/release/gridpin-*.tar.gz
+            gridpin/target/${{ matrix.target }}/release/gridpin-*.zip
+
+  wheels:
+    needs: [check, ci-passed]
+    permissions:
+      contents: write  # attaches wheels to the draft release
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel (maturin)
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          working-directory: gridpin
+          command: build
+          args: --release --features python
+          # pinned: the wheel job must not float while the CLI/DuckDB jobs are pinned
+          rust-toolchain: "1.93.0"
+          maturin-version: "1.14.0"
+      - name: Smoke — the built wheel installs, imports, and ships LICENSE
+        shell: bash
+        run: |
+          pip install --quiet gridpin/target/wheels/*.whl
+          python -c "import gridpin; gridpin.Geocoder"
+          # artifact-content check: the wheel is a zip — it MUST contain a LICENSE entry
+          # (bundled via [tool.maturin] include from the committed gridpin/LICENSE).
+          python - <<'PY'
+          import glob, sys, zipfile
+          whl = glob.glob("gridpin/target/wheels/*.whl")[0]
+          names = zipfile.ZipFile(whl).namelist()
+          if not any(n.rsplit("/", 1)[-1] == "LICENSE" for n in names):
+              sys.exit(f"::error::wheel {whl} is missing a LICENSE file; entries={names}")
+          print("wheel bundles LICENSE:", [n for n in names if "LICENSE" in n.upper()])
+          PY
+      - name: Acceptance — the published wheel answers a real query on a real sheet
+        # The steps above prove the wheel INSTALLS and IMPORTS. That is not a customer scenario:
+        # a buyer installs the package, points it at a country file and expects coordinates back.
+        # Here the EXACT artifact that will be published opens a
+        # freshly built sheet and answers forward AND reverse; empty or off-map output fails.
+        shell: bash
+        run: |
+          python -m pip install --quiet duckdb==1.5.3
+          make mc                                    # tiny Monaco sheet, built from an OSM extract
+          python - <<'PY'
+          import sys
+          import gridpin
+          # The binding hands back an ALREADY PARSED list of dicts (gridpin/src/py.rs returns a
+          # PyList). Passing it through json.loads would raise TypeError and this job would never
+          # reach the attach step — the first draft of this check did exactly that.
+          g = gridpin.Geocoder("data/mc.bin")
+          hits = g.geocode("1 Avenue des Citronniers, Monaco", 1)
+          if not isinstance(hits, list):
+              sys.exit(f"::error::geocode returned {type(hits).__name__}, expected a list")
+          if not hits:
+              sys.exit("::error::forward query returned nothing — the wheel is not usable")
+          lat, lon = hits[0]["lat"], hits[0]["lon"]
+          if not (43.6 < lat < 43.8 and 7.3 < lon < 7.5):
+              sys.exit(f"::error::forward answer is outside Monaco: {lat},{lon}")
+          back = g.reverse(lat, lon, 1)
+          if not isinstance(back, list) or not back:
+              sys.exit("::error::reverse query returned nothing — the wheel is not usable")
+          print("acceptance ok:", hits[0].get("street"), lat, lon, "->", back[0].get("street"))
+          PY
+      - name: Attach to release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          draft: true
+          # Never replace an asset that is already attached: this action overwrites by
+          # default, so re-running the tag would swap bytes inside the same published
+          # release — the one thing a signed, checksummed release must never do.
+          overwrite_files: false
+          files: gridpin/target/wheels/*.whl
+
+  duckdb-extension:
+    needs: [check, ci-passed]
+    permissions:
+      contents: write  # attaches the DuckDB extension zips to the draft release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux_amd64
+            libname: libgridpin_ext.so
+          - os: macos-latest
+            platform: osx_arm64
+            libname: libgridpin_ext.dylib
+          - os: windows-latest
+            platform: windows_amd64
+            libname: gridpin_ext.dll
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.93.0"  # pinned: a floating input can change the build between runs
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: duckdb-ext
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Fetch DuckDB metadata tooling (not vendored)
+        run: |
+          git clone https://github.com/duckdb/extension-ci-tools duckdb-ext/extension-ci-tools
+          git -C duckdb-ext/extension-ci-tools checkout 5cad6aa9886a8ec6c9dbb772bed6fdae67c42d64  # pinned: a floating input can change the build between runs
+      - name: Build extension
+        run: cargo build --release --manifest-path duckdb-ext/Cargo.toml
+      - name: Append DuckDB metadata
+        shell: bash
+        run: |
+          cd duckdb-ext
+          # extension version = its own Cargo.toml , NOT the engine tag;
+          # -dv v1.2.0 is the C_STRUCT ABI floor, not the dependency version
+          EXT_V=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          # The output BASENAME must stay `gridpin_ext`: DuckDB derives the init symbol
+          # (`gridpin_ext_init_c_api`) from the loaded file's basename, so a platform suffix
+          # in the FILENAME makes the asset unloadable — "symbol gridpin_ext-osx_arm64_init_c_api
+          # not found". The platform is carried by the ZIP wrapper below, not
+          # the extension's own name.
+          python3 extension-ci-tools/scripts/append_extension_metadata.py \
+            -l target/release/${{ matrix.libname }} -n gridpin_ext \
+            -o gridpin_ext.duckdb_extension \
+            -p ${{ matrix.platform }} -dv v1.2.0 -ev "v$EXT_V" --abi-type C_STRUCT
+      - name: Smoke — the SHIPPED basename actually LOADs
+        shell: bash
+        run: |
+          pip install --quiet duckdb==1.5.3
+          # Copy into a clean dir under the exact basename users get after unzipping — this
+          # reproduces the download/LOAD the release ships, not a build-path convenience name.
+          mkdir -p /tmp/dl && cp duckdb-ext/gridpin_ext.duckdb_extension /tmp/dl/
+          python3 - <<'PY'
+          import duckdb
+          con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
+          con.execute("LOAD '/tmp/dl/gridpin_ext.duckdb_extension'")
+          try:
+              con.execute("SELECT gridpin_geocode('test')")
+              raise SystemExit("expected a clear no-sheet error")
+          except duckdb.Error as e:
+              assert "gridpin_load" in str(e), e
+          print("extension loads under the shipped basename; functions registered")
+          PY
+      - name: Package per-platform ZIP (keeps the loadable basename inside)
+        shell: bash
+        # asset name carries the platform; the file INSIDE stays gridpin_ext.duckdb_extension.
+        # Zip via Python (installed on every runner) — `zip` is absent on Windows bash.
+        # The Apache LICENSE (and NOTICE, if present) is added to the ZIP too.
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          cd duckdb-ext
+          python3 - <<'PY'
+          import os, zipfile
+          root = os.environ["GITHUB_WORKSPACE"]
+          plat = os.environ["PLATFORM"]
+          with zipfile.ZipFile(f"gridpin_ext-{plat}.zip", "w", zipfile.ZIP_DEFLATED) as z:
+              z.write("gridpin_ext.duckdb_extension", "gridpin_ext.duckdb_extension")
+              for name in ("LICENSE", "NOTICE"):
+                  p = os.path.join(root, name)
+                  if os.path.exists(p):
+                      z.write(p, name)
+          PY
+      - name: Artifact-content check — the ZIP ships the extension AND LICENSE
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          cd duckdb-ext
+          python3 - <<'PY'
+          import os, sys, zipfile
+          plat = os.environ["PLATFORM"]
+          names = zipfile.ZipFile(f"gridpin_ext-{plat}.zip").namelist()
+          for required in ("gridpin_ext.duckdb_extension", "LICENSE"):
+              if required not in names:
+                  sys.exit(f"::error::gridpin_ext-{plat}.zip is missing {required}; entries={names}")
+          print("extension zip content:", names)
+          PY
+      - name: Attach to release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          draft: true
+          # Never replace an asset that is already attached: this action overwrites by
+          # default, so re-running the tag would swap bytes inside the same published
+          # release — the one thing a signed, checksummed release must never do.
+          overwrite_files: false
+          files: duckdb-ext/gridpin_ext-*.zip
+
+  # A single SHA256SUMS asset covering EVERY other release asset, so a downloader can verify the
+  # bytes they got. It runs after all builders have attached their assets, downloads the complete
+  # asset set back from the draft release, hashes them, and attaches SHA256SUMS.
+  # Provenance fuse: a tag must NOT be able to produce a release that carries no signed
+  # attestation. The sheets themselves are served from dl.gridpin.dev, so this job checks what IS
+  # on the GitHub release — the owner's signature over attestation.json, that the document covers
+  # the whole public sheet set, and that it names a concrete public snapshot. Missing or unsigned
+  # means the release fails here, before SHA256SUMS is attached.
+  provenance:
+    needs: [cli, wheels, duckdb-extension]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Download EVERY asset attached to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p prov
+          gh release download "${{ github.ref_name }}" --repo "${{ github.repository }}" --dir prov
+          for required in attestation.json attestation.json.sig SHA256SUMS; do
+            test -f "prov/$required" || {
+              echo "::error::the draft release has no $required. The owner signs the finished asset"
+              echo "::error::set: download the draft assets, run release_assemble + release_attest,"
+              echo "::error::then upload attestation.json, its .sig and SHA256SUMS and re-run this job."
+              exit 1; }
+          done
+      - name: Verify the owner signature over the WHOLE asset graph
+        # Full mode, not signature-only: every archive, wheel and extension in the draft must be
+        # covered by the owner's signature. Otherwise a binary can be swapped and the unsigned
+        # SHA256SUMS recomputed. The expected commit is mandatory too — an ssh signature stays
+        # valid forever, so without it an older attestation would sail through on a new tag.
+        run: |
+          cp gridpin-release-signers prov/ 2>/dev/null || true
+          python3 verify_release.py --dir prov --channel github \
+            --allowed-signers gridpin-release-signers \
+            --expected-public-sha "${{ github.sha }}"
+
+  # SHA256SUMS is NOT generated here any more. CI used to build its own unsigned checksum file over
+  # the draft assets — a SECOND graph, competing with the one the owner signs, and exactly the file
+  # an attacker would recompute after swapping a binary. The single graph now
+  # comes from `release_assemble.py` and is covered by the owner's signature; the `provenance` job
+  # above verifies it against every downloaded asset. This job only refuses a release whose
+  # checksum file or attestation is absent.
+  sums-are-signed:
+    needs: [provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Refuse an absent SHA256SUMS or attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          gh release download "${{ github.ref_name }}" --repo "${{ github.repository }}" \
+            --dir dist --pattern 'SHA256SUMS' --pattern 'attestation.json*'
+          for required in SHA256SUMS attestation.json attestation.json.sig; do
+            test -f "dist/$required" || { echo "::error::draft release has no $required"; exit 1; }
+          done
+          echo "SHA256SUMS present; it was verified against the signed graph by the provenance job"
+
+  # PyPI publishing is manual-only: the "pypi" environment is configured with a required
+  # reviewer, so this job does not start without approval. Publishing uses Trusted
+  # Publishing (OIDC, plan-security stage 1): PyPI verifies the workflow identity and
+  # issues a short-lived token — no long-lived PYPI_API_TOKEN to steal from secrets.
+  # One-time setup on PyPI: project "gridpin" -> Publishing -> add GitHub publisher
+  # (owner gridpin, repo gridpin, workflow release.yml, environment pypi).
+  pypi:
+    needs: [wheels, provenance]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download wheels from release
+        run: gh release download ${{ github.ref_name }} --repo ${{ github.repository }} --pattern "*.whl" --dir wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Publish (Trusted Publishing / OIDC)
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          packages-dir: wheels

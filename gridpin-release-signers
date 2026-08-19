@@ -1,0 +1,18 @@
+# GridPin release signers — the public half of the provenance chain.
+#
+# `verify_release.py` checks the owner's signature over `attestation.json` against this file.
+# OpenSSH allowed_signers(5) format:
+#     <principal> <key-type> <base64-public-key> [comment]
+#
+# Fixed by the tooling and not configurable at verification time:
+#   * principal = gridpin-release
+#   * namespace = gridpin-g02
+#
+# The key line below is identical to the one in the lab's own signer list, so the two never drift
+# apart. The private half is never committed and never leaves the owner's machine.
+#
+# Published 2026-08-15. Until this line existed, verification was RED by construction:
+# `ssh-keygen -Y verify` found no signer, so an attestation could not be confirmed. That was
+# deliberate — a release is not verifiable until the owner publishes the key they sign with.
+
+gridpin-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBiyFder9jnbM/dwF11p5wLMWOcG2UfWEV7TrFtiVOKd gridpin-g02

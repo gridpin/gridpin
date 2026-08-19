@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.5"]
+build-backend = "maturin"
+
+[project]
+name = "gridpin"
+version = "0.1.0"
+description = "Offline forward and reverse geocoder: country files, no server or database import, no per-request fees; queries stay local"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+keywords = ["geocoding", "geocoder", "offline", "reverse-geocoding", "gis", "overture", "openstreetmap"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: GIS",
+]
+
+[project.urls]
+Homepage = "https://gridpin.dev"
+Documentation = "https://gridpin.dev/docs.html"
+Benchmark = "https://gridpin.dev/bench.html"
+Repository = "https://github.com/gridpin/gridpin"
+Issues = "https://github.com/gridpin/gridpin/issues"
+
+[tool.maturin]
+features = ["python"]
+# Ship the Apache license text INSIDE the wheel (the `license = {text=...}` field only records the
+# SPDX id in metadata, it does not bundle the file). gridpin/LICENSE is a committed copy of the
+# repo-root LICENSE, so the build never depends on a CI-time copy.
+include = [{ path = "LICENSE", format = "wheel" }]

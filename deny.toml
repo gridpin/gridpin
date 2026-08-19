@@ -1,0 +1,32 @@
+# cargo-deny: supply-chain gate (plan-security stage 1).
+# Checks dependency advisories (RustSec), license allowlist, and sources.
+# Run locally: cargo deny check --manifest-path gridpin/Cargo.toml
+# CI runs it for both crates (gridpin, duckdb-ext).
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+# Engine is Apache-2.0; dependencies must stay permissive.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0", # webpki-roots (the same license our Overture sheets carry)
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

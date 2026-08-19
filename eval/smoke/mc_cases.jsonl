@@ -1,0 +1,23 @@
+{"q": "6 Rue Grimaldi Monaco", "expect": {"commune": "Monaco", "street": "Rue Grimaldi", "lat": 43.733000, "lon": 7.418862, "max_m": 150}}
+{"q": "1 rond point du portier monaco", "note": "hyphens/punctuation stripped", "expect": {"commune": "Monaco", "street": "Rond-Point du Portier", "lat": 43.741104, "lon": 7.430063, "max_m": 150}}
+{"q": "2 Avenue de la Costa, Monaco", "expect": {"street": "Avenue de la Costa", "lat": 43.737480, "lon": 7.423792, "max_m": 150}}
+{"q": "37 Boulevard du Jardin Exotique 98000 Monaco", "expect": {"street": "Boulevard du Jardin Exotique", "lat": 43.737224, "lon": 7.416946, "max_m": 150}}
+{"q": "2 Boulevard des Moulins Monte-Carlo", "expect": {"street": "Boulevard des Moulins", "lat": 43.740763, "lon": 7.426028, "max_m": 150}}
+{"q": "1 Rue des Roses Monte-Carlo", "expect": {"street": "Rue des Roses", "lat": 43.740553, "lon": 7.422117, "max_m": 150}}
+{"q": "8 Quai Jean-Charles Rey Monaco", "expect": {"street": "Quai Jean-Charles Rey", "lat": 43.729121, "lon": 7.418496, "max_m": 150}}
+{"q": "2 Avenue Albert II Monaco", "expect": {"street": "Avenue Albert II", "lat": 43.729382, "lon": 7.416400, "max_m": 150}}
+{"q": "1 Rue du Gabian Monaco", "expect": {"street": "Rue du Gabian", "lat": 43.727756, "lon": 7.412840, "max_m": 150}}
+{"q": "3 Boulevard de Belgique Monaco", "expect": {"street": "Boulevard de Belgique", "lat": 43.736525, "lon": 7.418478, "max_m": 150}}
+{"q": "1 Avenue Princesse Grace Monaco", "expect": {"street": "Avenue Princesse Grace", "lat": 43.741433, "lon": 7.429682, "max_m": 150}}
+{"q": "2 Avenue des Papalins Monaco", "expect": {"street": "Avenue des Papalins", "lat": 43.729671, "lon": 7.417222, "max_m": 150}}
+{"q": "6 rue grimaldy monaco", "note": "street typo (1 edit)", "expect": {"street": "Rue Grimaldi", "lat": 43.733000, "lon": 7.418862, "max_m": 150}}
+{"q": "8 quai jean charles rey monako", "note": "city typo", "expect": {"street": "Quai Jean-Charles Rey", "lat": 43.729121, "lon": 7.418496, "max_m": 150}}
+{"q": "Grimaldi 6 Monaco", "note": "number after name, no street type", "expect": {"street": "Rue Grimaldi", "lat": 43.733000, "lon": 7.418862, "max_m": 150}}
+{"q": "1 rue des rozes monte carlo", "note": "street typo, lowercase", "expect": {"street": "Rue des Roses", "lat": 43.740553, "lon": 7.422117, "max_m": 150}}
+{"q": "Boulevard des Moulins Monte-Carlo", "note": "street without number — street centre", "expect": {"street": "Boulevard des Moulins", "lat": 43.740763, "lon": 7.426028, "max_m": 400}}
+{"q": "Monaco", "note": "bare city — city-level precision", "expect": {"precision": ["city"], "lat": 43.733, "lon": 7.42, "max_m": 1500}}
+{"q": "  8   Quai  Jean-Charles   Rey ,, Monaco ", "note": "junk whitespace and punctuation", "expect": {"street": "Quai Jean-Charles Rey", "lat": 43.729121, "lon": 7.418496, "max_m": 150}}
+{"q": "1 Avenue de La Quarantaine 98000", "note": "postcode instead of city", "expect": {"street": "Avenue de La Quarantaine", "lat": 43.732190, "lon": 7.422747, "max_m": 150}}
+{"reverse": [43.733000, 7.418862], "note": "reverse: house point -> street", "expect": {"street": "Rue Grimaldi", "max_m": 120}}
+{"reverse": [43.746118, 7.430424], "expect": {"street": "Boulevard d'Italie", "max_m": 120}}
+{"reverse": [43.729121, 7.418496], "expect": {"street": "Quai Jean-Charles Rey", "max_m": 120}}

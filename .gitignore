@@ -1,0 +1,15 @@
+data/
+eval/eval_set.parquet
+eval/queries.jsonl
+gridpin/target/
+*.bin
+# ML weights ship in the repo (the sheet builder reads them) — exempt from *.bin
+!ml/parser_v0.bin
+!ml/rank_v0.bin
+__pycache__/
+.DS_Store
+eval/control/*.csv
+data/wof/
+duckdb-ext/target/
+.wrangler/
+public-bench-work/

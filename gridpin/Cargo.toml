@@ -1,0 +1,38 @@
+[package]
+name = "gridpin"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "gridpin"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "gridpin"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+blake2 = "0.10"
+clap = { version = "4", features = ["derive"] }
+csv = "1"
+flate2 = "1"
+fst = { version = "0.4", features = ["levenshtein"] }
+memmap2 = "0.9"
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"], optional = true }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-normalization = "0.1"
+
+[features]
+default = []
+python = ["dep:pyo3"]
+
+[profile.release]
+lto = "thin"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("watermark"))'] }

@@ -1,0 +1,17 @@
+# Keep GitHub Actions (and Cargo deps) current so pinned versions don't rot so they don't rot.
+# Actions should ultimately be pinned to a commit SHA (e.g. actions/checkout@<sha> # v4.2.2);
+# dependabot then bumps the SHA + comment in a reviewable PR.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: "/gridpin"
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: "/duckdb-ext"
+    schedule:
+      interval: weekly
