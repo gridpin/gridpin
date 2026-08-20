@@ -5,9 +5,7 @@ manifest and diagnostics, and one complete run measuring GridPin, Photon and
 Nominatim together are retained.** That run's `not_run` record is empty: every
 service was measured, on one truth corpus, one metric, one runner and one set
 of GridPin artifacts. No value from another corpus is substituted. Earlier
-partial runs are kept as history and are marked as superseded. The future
-release-asset route below remains intentionally unavailable until release
-`v0.1.0` is published.
+partial runs are kept as history and are marked as superseded. The release-asset route below is available from release `v0.1.0`.
 
 ## Intended metric and truth contract
 
@@ -614,8 +612,7 @@ status-evidence hash.
 
 ## Post-release clean-clone asset route
 
-**Unavailable today.** The following command is the exact intended route only
-after release `v0.1.0` publishes its assets. The two channels are **not**
+The following command is the exact route from release `v0.1.0` onward. The two channels are **not**
 interchangeable: the CLI archive and `SHA256SUMS` come from the GitHub release,
 while the country sheets are served from `dl.gridpin.dev` — GitHub carries no
 sheet at all. It must fail until those assets exist; no clean-clone transcript is
@@ -693,7 +690,7 @@ No third-party benchmark corpus is embedded in this repository.
 | [Wikidata structured data](https://www.wikidata.org/wiki/Wikidata:Licensing) | CC0-1.0 | Corpus stays outside Git | Optional legacy helper | Not used by `make public-bench` and not the primary recipe. A Wikidata publication layer alone does not prove factual lineage or sufficient four-country volume. |
 | [Photon](https://github.com/komoot/photon) software and service data | Apache-2.0 code; OSM-derived data under ODbL | No service database or responses | Selected self-hosted query only | Runtime comparator. Public `photon.komoot.io` is rejected; status evidence, raw responses and attribution stay in the external run directory. |
 | [Nominatim](https://github.com/osm-search/Nominatim) software and service data | GPL code; OSM-derived data under ODbL | No service database or responses | Selected query only | Self-hosting is preferred. A one-time public-service run requires the explicit allow flag, policy-compliant rate/contact and retained cache. |
-| GridPin country sheets | Per-country data license in sheet manifest | Not in benchmark | Operator-supplied local release-candidate artifact | Required at runtime and country/layer/release/license/hash checked. The exact `v0.1.0` download/checksum route remains unavailable until those assets are published. |
+| GridPin country sheets | Per-country data license in sheet manifest | Not in benchmark | Operator-supplied local release-candidate artifact | Required at runtime and country/layer/release/license/hash checked. The exact `v0.1.0` route is available across the published GitHub and `dl.gridpin.dev` release channels. |
 
 ## What is still unverified
 

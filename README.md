@@ -36,7 +36,7 @@ whoever can replace one can replace both. The four extra lines are what makes it
 
 Or build from source with stable Rust: `cargo build --release --manifest-path gridpin/Cargo.toml`.
 
-**Python** — `pip install gridpin` (pre-release: currently a 0.0.1 name-reservation stub). This one
+**Python** — `pip install gridpin`. This one
 rests on PyPI's own integrity, not on the signature above: the attestation covers the artifacts we
 publish ourselves. If you need the signed chain, take the wheel from the GitHub release and verify
 it the same way as the CLI archive.
@@ -79,8 +79,6 @@ $ gridpin batch france.bin queries.jsonl results.jsonl -k 1
 ```console
 $ pip install gridpin
 ```
-
-> Pre-release: the `gridpin` package on PyPI is currently a 0.0.1 name-reservation stub — the working wheel ships with v0.1; see [Status](#status--roadmap).
 
 ```python
 import gridpin
@@ -182,7 +180,7 @@ We report quality in two tiers, because they measure different things.
 
 **Tier 2 — real, messy human queries.** Curated live cases (checked against independently sourced coordinates where available, expected street/commune text otherwise) and stress sets that gate on the expected street/commune in the top answers. Results here are country-dependent: registry-backed countries are strongest, and corpora dominated by bare area names ("the market square", a village name, a district) are hard for every geocoder, including this one.
 
-GridPin is pre-release; per-release numbers for both tiers will be published on the [test bench page](https://gridpin.dev/bench.html) with each release.
+Per-release numbers for both tiers are published on the [test bench page](https://gridpin.dev/bench.html) with each release.
 
 CI runs `cargo test` on three operating systems, plus a public smoke test that builds a tiny Monaco sheet from an OSM extract and runs live queries against it. The full quality lab — stress sets, live corpora, coordinate-truth oracles — is private so that releases cannot be tuned to the test.
 
@@ -214,12 +212,11 @@ One thousand rows are OSM-derived, so Nominatim has a disclosed
 `same_dataset_family` relationship to those slices. Mixed and source-specific
 scores are descriptive and explicitly ineligible for a winner headline.
 
-The pre-release measurement binds every GridPin number to each local sheet's
-SHA-256 and embedded `source_release`. A separate clean-clone reproduction
-command will become usable only after the `v0.1.0` binary, sheets, and checksum
-manifest are published as release assets. That unavailable post-release step
-was removed from this pre-release acceptance criterion by the owner and is not
-simulated today.
+The August 2026 measurement binds every GridPin number to each local sheet's
+SHA-256 and embedded `source_release`. The clean-clone route is in
+`docs-public/BENCHMARK.md`, and the sheet builds it pins are the ones `v0.1.0`
+ships: the four SHA-256 values match byte for byte, so a run against the
+released sheets reproduces these numbers exactly.
 
 The current retained result (SHA-256
 `4158865253d072f40bc1f2cacfe1c7f3380d11e84c54356b527ab12ad7851ac9`, generated
@@ -379,7 +376,7 @@ This also matters for GDPR: the addresses you geocode are often customer data, a
 
 ## Status & roadmap
 
-**Pre-release.** v0.1 is not yet published; interfaces and file formats may still change. Sheets are tied to the engine's format major version — keep the engine build that shipped alongside your sheets; before v1.0 a newer engine may require newer sheets.
+**v0.1.0 is published.** Interfaces and file formats may still change before v1.0. Sheets are tied to the engine's format major version — keep the engine build that shipped alongside your sheets; before v1.0 a newer engine may require newer sheets.
 
 Planned distribution:
 

@@ -587,7 +587,7 @@ house-postcode grammar in `SEC_HOUSE_BLOCKS`).
 
 ## 8. Stability
 
-**This format is pre-release.** Until the project reaches v1.0, the
+**This format is not yet stable.** Until the project reaches v1.0, the
 format may change in incompatible ways between any two builds, and the
 version byte will be bumped without a deprecation period. Do not
 archive index files as long-term artifacts and do not write third-party
