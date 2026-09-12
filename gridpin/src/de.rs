@@ -1842,7 +1842,9 @@ mod tests {
         assert!(!postal_tail_eligible("Postallee 17/2 12345 Unbekannt"));
         assert!(postal_tail_eligible("Postallee 80/82/84 12345 Unbekannt"));
 
-        let rules_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../rules");
+        let rules_dir = crate::rules::tests::write_fixture_rules(&std::env::temp_dir().join(
+            format!("gridpin-de-postal-tail-rules-{}", std::process::id()),
+        ));
         let entries = crate::rules::entries_from_tsv_dir(&rules_dir).unwrap();
         let section = crate::rules::serialize_entries(&entries);
         let installed = crate::rules::from_section(&section);

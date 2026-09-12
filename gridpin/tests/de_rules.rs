@@ -1,13 +1,48 @@
 //! Germany F3: live-pattern micro-index tests.
 //!
-//! Every query/base pair below is anchored in `eval/scrape/real_de.csv` and
-//! `eval/adversarial/de.csv`; the tiny sheet only isolates parser behavior from
-//! the still-unapproved Overture download.  The public DE sheet will be measured
-//! separately against the frozen 300+75 fixture after owner approval.
+//! Query/base pairs exercise realistic German address forms. The tiny synthetic
+//! sheet isolates parser behavior from the production data pipeline; these tests
+//! do not measure the quality or coverage of a released country sheet.
 
 use gridpin::query::{Hit, Index};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+// Explicit witness vocabulary: no dependency on the private release rule tree.
+fn write_fixture_rules(dir: &Path) -> std::path::PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    for (name, rows) in [
+        (
+            "city_alias.tsv",
+            "de\tmunich\tmunchen\nde\tcologne\tkoln\nde\tnuremberg\tnurnberg\nde\tfrankfurt main\tfrankfurt am main\n",
+        ),
+        (
+            "abbrev2.tsv",
+            "de\ta\tm\tam main\nde\ta\td\tan der\nde\ta\trh\tam rhein\nde\ti\tbay\tin bayern\n",
+        ),
+        (
+            "street_types_latin.tsv",
+            "de\tstraße\nde\tstrasse\nde\tstr\nde\tweg\nde\tallee\nde\tplatz\nde\tgasse\nde\tdamm\nde\tufer\n",
+        ),
+        ("countries_mid.tsv", "de\tdeutschland\nde\tgermany\n"),
+        ("countries_tail.tsv", "de\tdeutschland\nde\tgermany\n"),
+        ("place_prefix.tsv", "de\tot\nde\tortsteil\n"),
+        ("place_type_strip.tsv", "de\tot\nde\tortsteil\n"),
+    ] {
+        std::fs::write(dir.join(name), rows).unwrap();
+    }
+    dir.to_path_buf()
+}
+
+fn fixture_rules() -> &'static Path {
+    static RULES: OnceLock<PathBuf> = OnceLock::new();
+    RULES.get_or_init(|| {
+        write_fixture_rules(
+            &std::env::temp_dir()
+                .join(format!("gridpin-de-f3-rule-fixture-{}", std::process::id())),
+        )
+    })
+}
 
 const HEADER: &str = "nom_voie_norm,code_insee,nom_commune_norm,code_postal,code_postal_display,numero,rep,lon,lat,nom_voie,nom_commune\n";
 
@@ -144,8 +179,7 @@ fn build_fixture_with_rules(country: &str, tag: &str, rules: &Path) -> PathBuf {
 }
 
 fn build_fixture(country: &str, tag: &str) -> PathBuf {
-    let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rules");
-    build_fixture_with_rules(country, tag, &rules)
+    build_fixture_with_rules(country, tag, fixture_rules())
 }
 
 fn build_official_commune_alias_target_absent_fixture() -> PathBuf {
@@ -168,9 +202,9 @@ fn build_official_commune_alias_target_absent_fixture() -> PathBuf {
         r#"{"country":"de","layer":"addresses","license":"test","source_release":"test"}"#,
     )
     .unwrap();
-    let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rules");
+    let rules = fixture_rules();
     let bin = dir.join("addresses.bin");
-    gridpin::builder::build(&csv, &bin, None, None, Some(&rules), None, Some(&manifest)).unwrap();
+    gridpin::builder::build(&csv, &bin, None, None, Some(rules), None, Some(&manifest)).unwrap();
     bin
 }
 
@@ -228,9 +262,9 @@ fn build_missing_postcode_comma_fixture() -> PathBuf {
         r#"{"country":"de","layer":"addresses","license":"test","source_release":"test"}"#,
     )
     .unwrap();
-    let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rules");
+    let rules = fixture_rules();
     let bin = dir.join("addresses.bin");
-    gridpin::builder::build(&csv, &bin, None, None, Some(&rules), None, Some(&manifest)).unwrap();
+    gridpin::builder::build(&csv, &bin, None, None, Some(rules), None, Some(&manifest)).unwrap();
     bin
 }
 
@@ -403,13 +437,13 @@ fn build_postal_tail_named_fixture(
     )
     .unwrap();
     let bin = dir.join("addresses.bin");
-    let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rules");
+    let rules = fixture_rules();
     gridpin::builder::build(
         &csv,
         &bin,
         None,
         Some(&rank),
-        Some(&rules),
+        Some(rules),
         None,
         Some(&manifest),
     )
@@ -489,7 +523,7 @@ fn build_postal_capital_order_fixture() -> PathBuf {
 }
 
 fn mutant_rules(tag: &str, removed_lines: &[&str]) -> PathBuf {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rules");
+    let source = fixture_rules();
     let target = std::env::temp_dir().join(format!(
         "gridpin-de-f3-mutant-rules-{tag}-{}",
         std::process::id()

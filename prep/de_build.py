@@ -408,7 +408,7 @@ class SystemServices:
         path = code_root / "prep" / "de_sources.py"
         spec = importlib.util.spec_from_file_location("gridpin_de_sources", path)
         if spec is None or spec.loader is None:
-            raise BuildRefused(f"не удалось загрузить {path}")
+            raise BuildRefused(f"could not load {path}")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
@@ -461,7 +461,7 @@ def _fsync_dir(path: pathlib.Path) -> None:
 def _fd_is_regular_single(fd: int, label: str) -> os.stat_result:
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-        raise BuildRefused(f"{label}: нужен regular single-link файл")
+        raise BuildRefused(f"{label}: requires a regular single-link file")
     return info
 
 
@@ -469,13 +469,13 @@ def _path_is_regular_single(path: pathlib.Path, *, nonempty: bool = False) -> os
     try:
         info = path.lstat()
     except FileNotFoundError as exc:
-        raise BuildRefused(f"не создан обязательный файл {path}") from exc
+        raise BuildRefused(f"required file was not created: {path}") from exc
     if path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise BuildRefused(
-            f"{path}: нужен regular single-link файл, symlink/hardlink запрещён"
+            f"{path}: requires a regular single-link file; symlinks/hardlinks are forbidden"
         )
     if nonempty and info.st_size <= 0:
-        raise BuildRefused(f"{path}: пустой артефакт")
+        raise BuildRefused(f"{path}: empty artifact")
     return info
 
 
@@ -484,7 +484,7 @@ def _exclusive_file(path: pathlib.Path, payload: bytes) -> None:
     try:
         fd = os.open(path, flags, 0o600)
     except FileExistsError as exc:
-        raise ReceiptExists(f"one-shot receipt уже существует: {path}") from exc
+        raise ReceiptExists(f"one-shot receipt already exists: {path}") from exc
     try:
         _fd_is_regular_single(fd, str(path))
         _write_all(fd, payload)
@@ -520,12 +520,12 @@ def _stable_regular_bytes(path: pathlib.Path, max_bytes: int) -> tuple[bytes, di
     try:
         fd = os.open(path, flags)
     except OSError as exc:
-        raise BuildRefused(f"recovery evidence недоступен: {path}: {exc}") from exc
+        raise BuildRefused(f"recovery evidence unavailable: {path}: {exc}") from exc
     try:
         before = _fd_is_regular_single(fd, str(path))
         if before.st_size < 0 or before.st_size > max_bytes:
             raise BuildRefused(
-                f"{path}: размер {before.st_size} вне допустимых 0..{max_bytes} bytes"
+                f"{path}: size {before.st_size} outside the allowed 0..{max_bytes} bytes"
             )
         chunks: list[bytes] = []
         remaining = before.st_size
@@ -536,7 +536,7 @@ def _stable_regular_bytes(path: pathlib.Path, max_bytes: int) -> tuple[bytes, di
             chunks.append(chunk)
             remaining -= len(chunk)
         if os.read(fd, 1):
-            raise BuildRefused(f"{path}: файл вырос во время recovery snapshot")
+            raise BuildRefused(f"{path}: file grew during recovery snapshot")
         after = os.fstat(fd)
         if (
             before.st_dev,
@@ -551,13 +551,13 @@ def _stable_regular_bytes(path: pathlib.Path, max_bytes: int) -> tuple[bytes, di
             after.st_mtime_ns,
             after.st_ctime_ns,
         ):
-            raise BuildRefused(f"{path}: файл изменился во время recovery snapshot")
+            raise BuildRefused(f"{path}: file changed during recovery snapshot")
         try:
             named = path.lstat()
         except OSError as exc:
-            raise BuildRefused(f"{path}: имя исчезло во время recovery snapshot") from exc
+            raise BuildRefused(f"{path}: path disappeared during recovery snapshot") from exc
         if (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino):
-            raise BuildRefused(f"{path}: имя было подменено во время recovery snapshot")
+            raise BuildRefused(f"{path}: path was replaced during recovery snapshot")
         raw = b"".join(chunks)
         return raw, {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
     finally:
@@ -570,13 +570,13 @@ def _exclusive_evidence_copy(path: pathlib.Path, payload: bytes) -> dict[str, An
     try:
         fd = os.open(path, flags, 0o600)
     except FileExistsError as exc:
-        raise BuildRefused(f"recovery snapshot уже существует: {path}") from exc
+        raise BuildRefused(f"recovery snapshot already exists: {path}") from exc
     try:
         info = _fd_is_regular_single(fd, str(path))
         _write_all(fd, payload)
         os.fsync(fd)
         if info.st_nlink != 1:
-            raise BuildRefused(f"recovery snapshot не независим: {path}")
+            raise BuildRefused(f"recovery snapshot is not independent: {path}")
     finally:
         os.close(fd)
     _fsync_dir(path.parent)
@@ -590,17 +590,17 @@ def _exclusive_evidence_copy(path: pathlib.Path, payload: bytes) -> dict[str, An
 def held_build_lock(common_dir: pathlib.Path) -> Iterator[pathlib.Path]:
     """Acquire the shared DE lock without following links and without waiting."""
     if not common_dir.is_absolute():
-        raise BuildRefused(f"git common dir не абсолютный: {common_dir}")
+        raise BuildRefused(f"git common dir is not absolute: {common_dir}")
     common_info = common_dir.lstat()
     if common_dir.is_symlink() or not stat.S_ISDIR(common_info.st_mode):
-        raise BuildRefused(f"git common dir не настоящий каталог: {common_dir}")
+        raise BuildRefused(f"git common dir is not a real directory: {common_dir}")
     lock = common_dir / f"{_STATE_STEM}.lock"
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(lock, flags, 0o600)
     except OSError as exc:
         raise BuildRefused(
-            f"не удалось безопасно открыть lock {lock}: {exc}"
+            f"could not safely open lock {lock}: {exc}"
         ) from exc
     acquired = False
     try:
@@ -610,13 +610,13 @@ def held_build_lock(common_dir: pathlib.Path) -> Iterator[pathlib.Path]:
             acquired = True
         except BlockingIOError as exc:
             raise BuildAlreadyRunning(
-                "DE build уже выполняется: shared flock занят"
+                "DE build is already running: shared flock is held"
             ) from exc
         named = lock.lstat()
         if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
-            raise BuildRefused("lock path был подменён после open")
+            raise BuildRefused("lock path was replaced after open")
         if not stat.S_ISREG(named.st_mode) or named.st_nlink != 1:
-            raise BuildRefused("lock path перестал быть regular single-link файлом")
+            raise BuildRefused("lock path is no longer a regular single-link file")
         yield lock
     finally:
         if acquired:
@@ -651,17 +651,17 @@ def _git_common_dir(services: SystemServices, code_root: pathlib.Path) -> pathli
     )
     path = pathlib.Path(raw)
     if not path.is_absolute():
-        raise BuildRefused(f"git вернул не абсолютный common dir: {raw!r}")
+        raise BuildRefused(f"git returned a common dir that is not absolute: {raw!r}")
     try:
         return path.resolve(strict=True)
     except OSError as exc:
-        raise BuildRefused(f"git common dir недоступен: {path}") from exc
+        raise BuildRefused(f"git common dir unavailable: {path}") from exc
 
 
 def _validate_expected_sha(expected_sha: str) -> str:
     value = expected_sha.strip().lower()
     if _SHA40.fullmatch(value) is None:
-        raise BuildRefused("--expected-sha обязан быть полным 40-hex commit")
+        raise BuildRefused("--expected-sha must be a full 40-hex commit")
     return value
 
 
@@ -670,13 +670,13 @@ def _require_initial_clean_head(
 ) -> None:
     head = _git_text(services, code_root, ["rev-parse", "--verify", "HEAD"]).lower()
     if head != expected_sha:
-        raise BuildRefused(f"HEAD={head!r}, ожидался {expected_sha}")
+        raise BuildRefused(f"HEAD={head!r}, expected {expected_sha}")
     status_text = _git_text(
         services, code_root, ["status", "--porcelain=v1", "--untracked-files=no"]
     )
     if status_text:
         raise BuildRefused(
-            "tracked/index дерево не чистое; one-shot build требует clean HEAD"
+            "tracked/index tree is not clean; one-shot build requires a clean HEAD"
         )
 
 
@@ -703,7 +703,7 @@ def _require_recovery_base(
     )
     if result.returncode != 0:
         raise BuildRefused(
-            f"recovery HEAD {expected_sha} не является потомком принятого fix {accepted_base}"
+            f"recovery HEAD {expected_sha} is not a descendant of the accepted fix {accepted_base}"
         )
 
 
@@ -712,7 +712,7 @@ def _require_git_unchanged(
 ) -> None:
     head = _git_text(services, code_root, ["rev-parse", "--verify", "HEAD"]).lower()
     if head != expected_sha:
-        raise BuildRefused("HEAD сменился во время one-shot build")
+        raise BuildRefused("HEAD changed during one-shot build")
     for args in (
         ["diff", "--quiet", "--ignore-submodules", "--"],
         ["diff", "--cached", "--quiet", "--ignore-submodules", "--"],
@@ -720,7 +720,7 @@ def _require_git_unchanged(
         result = _checked_capture(services, ["git", "-C", str(code_root), *args], code_root)
         if result.returncode != 0:
             raise BuildRefused(
-                "tracked/index состояние изменилось во время one-shot build"
+                "tracked/index state changed during one-shot build"
             )
 
 
@@ -735,7 +735,7 @@ def _require_free(
     free = _free_bytes(services, data_dir)
     if free < required:
         raise LowDisk(
-            f"{label}: свободно {free / GIB:.3f} GiB, требуется {required / GIB:.3f} GiB"
+            f"{label}: free {free / GIB:.3f} GiB, required {required / GIB:.3f} GiB"
         )
     return free
 
@@ -744,13 +744,13 @@ def _ensure_real_directory(path: pathlib.Path, label: str) -> pathlib.Path:
     resolved = path.resolve(strict=True)
     info = path.lstat()
     if path.is_symlink() or not stat.S_ISDIR(info.st_mode):
-        raise BuildRefused(f"{label} не настоящий каталог: {path}")
+        raise BuildRefused(f"{label} is not a real directory: {path}")
     return resolved
 
 
 def _make_paths(code_root: pathlib.Path, common: pathlib.Path, run_id: str) -> BuildPaths:
     if _RUN_ID.fullmatch(run_id) is None:
-        raise BuildRefused("run id обязан быть 32 lowercase hex")
+        raise BuildRefused("run id must be 32 lowercase hex")
     code = _ensure_real_directory(code_root, "code root")
     data = _ensure_real_directory(code / "data", "data dir")
     scratch = data / f".de-build-{run_id}"
@@ -795,16 +795,16 @@ def _decode_json_object(raw: bytes, label: str) -> dict[str, Any]:
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise BuildRefused(f"{label}: невалидный JSON: {exc}") from exc
+        raise BuildRefused(f"{label}: invalid JSON: {exc}") from exc
     if not isinstance(value, dict):
-        raise BuildRefused(f"{label}: JSON root обязан быть object")
+        raise BuildRefused(f"{label}: JSON root must be an object")
     return value
 
 
 def _require_sha(evidence: Mapping[str, Any], expected: str, label: str) -> None:
     if evidence.get("sha256") != expected:
         raise BuildRefused(
-            f"{label}: SHA-256={evidence.get('sha256')!r}, ожидался {expected}"
+            f"{label}: SHA-256={evidence.get('sha256')!r}, expected {expected}"
         )
 
 
@@ -831,7 +831,7 @@ def _assert_recovery_outputs_state(paths: BuildPaths) -> None:
             path.lstat()
         except FileNotFoundError:
             continue
-        raise BuildRefused(f"recovery output уже существует (включая symlink): {path}")
+        raise BuildRefused(f"recovery output already exists (including symlinks): {path}")
     _path_is_regular_single(paths.stats, nonempty=True)
 
 
@@ -839,12 +839,12 @@ def _first_evidence_inventory(paths: BuildPaths) -> dict[str, Any]:
     evidence_dir = paths.common / f"gridpin-de-build-evidence-{FIRST_RUN_ID}"
     resolved = _ensure_real_directory(evidence_dir, "attempt-1 evidence dir")
     if resolved.parent != paths.common:
-        raise BuildRefused("attempt-1 evidence dir вышел за git common dir")
+        raise BuildRefused("attempt-1 evidence dir escaped git common dir")
     actual = {entry.name for entry in evidence_dir.iterdir()}
     expected = set(FIRST_EVIDENCE_SHA256)
     if actual != expected:
         raise BuildRefused(
-            "attempt-1 evidence inventory изменён: "
+            "attempt-1 evidence inventory changed: "
             f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
         )
     files: dict[str, Any] = {}
@@ -888,9 +888,9 @@ def _verify_recovery_predecessor(
     try:
         declared_evidence = pathlib.Path(str(receipt_obj["evidence_dir"])).resolve(strict=True)
     except (KeyError, OSError) as exc:
-        raise BuildRefused("attempt-1 receipt не связывает исходный evidence dir") from exc
+        raise BuildRefused("attempt-1 receipt does not bind the original evidence dir") from exc
     if declared_evidence != expected_evidence.resolve(strict=True):
-        raise BuildRefused("attempt-1 receipt evidence_dir не равен закреплённому пути")
+        raise BuildRefused("attempt-1 receipt evidence_dir does not match the pinned path")
     expected_scratch = paths.data / f".de-build-{FIRST_RUN_ID}"
     try:
         declared_scratch = pathlib.Path(str(receipt_obj["scratch_dir"]))
@@ -898,10 +898,10 @@ def _verify_recovery_predecessor(
             declared_scratch, "attempt-1 scratch dir"
         )
     except (KeyError, OSError) as exc:
-        raise BuildRefused("attempt-1 receipt не связывает исходный scratch dir") from exc
+        raise BuildRefused("attempt-1 receipt does not bind the original scratch dir") from exc
     if resolved_scratch != expected_scratch.resolve(strict=True):
         raise BuildRefused(
-            "attempt-1 receipt scratch_dir не принадлежит текущему исходному worktree"
+            "attempt-1 receipt scratch_dir does not belong to the current original worktree"
         )
 
     evidence = _first_evidence_inventory(paths)
@@ -952,7 +952,7 @@ def _create_recovery_snapshot(
     try:
         snapshot.mkdir(mode=0o700, parents=False, exist_ok=False)
     except FileExistsError as exc:
-        raise BuildRefused(f"recovery snapshot уже существует: {snapshot}") from exc
+        raise BuildRefused(f"recovery snapshot already exists: {snapshot}") from exc
     _fsync_dir(snapshot.parent)
     evidence_copy = snapshot / "evidence"
     evidence_copy.mkdir(mode=0o700, parents=False, exist_ok=False)
@@ -961,7 +961,7 @@ def _create_recovery_snapshot(
     receipt_raw = predecessor.get("receipt_raw")
     stats_raw = predecessor.get("stats_raw")
     if not isinstance(receipt_raw, bytes) or not isinstance(stats_raw, bytes):
-        raise BuildRefused("recovery snapshot source bytes не закреплены")
+        raise BuildRefused("recovery snapshot source bytes are not pinned")
     copies: dict[str, Any] = {}
     copies["attempt-1.receipt.json"] = _exclusive_evidence_copy(
         snapshot / "attempt-1.receipt.json", receipt_raw
@@ -971,7 +971,7 @@ def _create_recovery_snapshot(
         key: predecessor["receipt"][key] for key in ("bytes", "sha256")
     }
     if copies["attempt-1.receipt.json"] != expected_receipt_copy:
-        raise BuildRefused("recovery receipt copy не равна authorized predecessor")
+        raise BuildRefused("recovery receipt copy does not match the authorized predecessor")
     copies["attempt-1.de_stats.json"] = _exclusive_evidence_copy(
         snapshot / "attempt-1.de_stats.json", stats_raw
     )
@@ -979,14 +979,14 @@ def _create_recovery_snapshot(
         key: predecessor["stats"][key] for key in ("bytes", "sha256")
     }
     if copies["attempt-1.de_stats.json"] != expected_stats_copy:
-        raise BuildRefused("recovery stats copy не равна authorized predecessor")
+        raise BuildRefused("recovery stats copy does not match the authorized predecessor")
     first_evidence = pathlib.Path(str(predecessor["evidence"]["path"]))
     evidence_copies: dict[str, Any] = {}
     for name in sorted(FIRST_EVIDENCE_SHA256):
         raw, source_ev = _stable_regular_bytes(first_evidence / name, _RECOVERY_COPY_LIMIT)
         if source_ev != predecessor["evidence"]["files"][name]:
             raise BuildRefused(
-                f"attempt-1 evidence изменён перед recovery snapshot: {name}"
+                f"attempt-1 evidence changed before recovery snapshot: {name}"
             )
         copy_ev = _exclusive_evidence_copy(evidence_copy / name, raw)
         if copy_ev != source_ev:
@@ -1030,27 +1030,27 @@ def _verify_recovery_snapshot(snapshot_state: Mapping[str, Any]) -> None:
         "manifest.json",
     }
     if actual_top != expected_top:
-        raise BuildRefused("recovery snapshot inventory изменён")
+        raise BuildRefused("recovery snapshot inventory changed")
     for name, expected in snapshot_state["files"].items():
         _raw, measured = _stable_regular_bytes(snapshot / name, _RECOVERY_COPY_LIMIT)
         if measured != expected:
-            raise BuildRefused(f"recovery snapshot изменён: {name}")
+            raise BuildRefused(f"recovery snapshot changed: {name}")
     evidence_dir = _ensure_real_directory(snapshot / "evidence", "recovery evidence copy")
     if {entry.name for entry in evidence_dir.iterdir()} != set(FIRST_EVIDENCE_SHA256):
-        raise BuildRefused("recovery evidence copy inventory изменён")
+        raise BuildRefused("recovery evidence copy inventory changed")
     for name, expected in snapshot_state["evidence_files"].items():
         _raw, measured = _stable_regular_bytes(evidence_dir / name, _RECOVERY_COPY_LIMIT)
         if measured != expected:
-            raise BuildRefused(f"recovery evidence copy изменён: {name}")
+            raise BuildRefused(f"recovery evidence copy changed: {name}")
     manifest_raw, measured_manifest = _stable_regular_bytes(
         snapshot / "manifest.json", _RECOVERY_COPY_LIMIT
     )
     if measured_manifest != snapshot_state["manifest"]:
-        raise BuildRefused("recovery snapshot manifest изменён")
+        raise BuildRefused("recovery snapshot manifest changed")
     if _decode_json_object(manifest_raw, "recovery snapshot manifest") != snapshot_state[
         "manifest_object"
     ]:
-        raise BuildRefused("recovery snapshot manifest потерял source linkage")
+        raise BuildRefused("recovery snapshot manifest lost source linkage")
 
 
 def _verify_recovery_history(
@@ -1061,7 +1061,7 @@ def _verify_recovery_history(
     latest = _verify_recovery_predecessor(paths, require_failed_stats=False)
     for key in ("receipt", "evidence", "authorization"):
         if latest[key] != predecessor[key]:
-            raise BuildRefused(f"attempt-1 {key} изменён после recovery authorization")
+            raise BuildRefused(f"attempt-1 {key} changed after recovery authorization")
     _verify_recovery_snapshot(snapshot_state)
 
 
@@ -1080,7 +1080,7 @@ def _assert_recovery3_outputs_state(paths: BuildPaths) -> None:
             path.lstat()
         except FileNotFoundError:
             continue
-        raise BuildRefused(f"attempt-3 output уже существует (включая symlink): {path}")
+        raise BuildRefused(f"attempt-3 output already exists (including symlinks): {path}")
     _path_is_regular_single(paths.stats, nonempty=True)
 
 
@@ -1088,12 +1088,12 @@ def _second_evidence_inventory(paths: BuildPaths) -> dict[str, Any]:
     evidence_dir = paths.common / f"gridpin-de-build-evidence-{SECOND_RUN_ID}"
     resolved = _ensure_real_directory(evidence_dir, "attempt-2 evidence dir")
     if resolved.parent != paths.common:
-        raise BuildRefused("attempt-2 evidence dir вышел за git common dir")
+        raise BuildRefused("attempt-2 evidence dir escaped git common dir")
     actual = {entry.name for entry in evidence_dir.iterdir()}
     expected = set(SECOND_EVIDENCE_SHA256)
     if actual != expected:
         raise BuildRefused(
-            "attempt-2 evidence inventory изменён: "
+            "attempt-2 evidence inventory changed: "
             f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
         )
     files: dict[str, Any] = {}
@@ -1103,7 +1103,7 @@ def _second_evidence_inventory(paths: BuildPaths) -> dict[str, Any]:
         files[name] = item
     tree_sha = hashlib.sha256(_canonical_json_bytes(files)).hexdigest()
     if tree_sha != SECOND_EVIDENCE_TREE_SHA256:
-        raise BuildRefused("attempt-2 evidence tree SHA-256 не равен закреплённому")
+        raise BuildRefused("attempt-2 evidence tree SHA-256 does not match the pinned value")
     return {"path": str(evidence_dir), "files": files, "tree_sha256": tree_sha}
 
 
@@ -1112,15 +1112,15 @@ def _verify_attempt1_snapshot(
 ) -> dict[str, Any]:
     declared = attempt2_receipt.get("snapshot")
     if not isinstance(declared, dict) or declared.get("status") != "complete":
-        raise BuildRefused("attempt-2 receipt не связывает complete snapshot попытки №1")
+        raise BuildRefused("attempt-2 receipt does not bind the complete snapshot of attempt 1")
     snapshot = _recovery_snapshot_dir(paths)
     resolved = _ensure_real_directory(snapshot, "attempt-1 snapshot dir")
     try:
         declared_path = pathlib.Path(str(declared["path"])).resolve(strict=True)
     except (KeyError, OSError) as exc:
-        raise BuildRefused("attempt-1 snapshot path недоступен") from exc
+        raise BuildRefused("attempt-1 snapshot path unavailable") from exc
     if declared_path != resolved:
-        raise BuildRefused("attempt-1 snapshot path не равен закреплённому")
+        raise BuildRefused("attempt-1 snapshot path does not match the pinned value")
     expected_top = {
         "attempt-1.receipt.json",
         "attempt-1.de_stats.json",
@@ -1128,33 +1128,33 @@ def _verify_attempt1_snapshot(
         "manifest.json",
     }
     if {entry.name for entry in snapshot.iterdir()} != expected_top:
-        raise BuildRefused("attempt-1 snapshot inventory изменён")
+        raise BuildRefused("attempt-1 snapshot inventory changed")
 
     expected_files = declared.get("files")
     expected_evidence = declared.get("evidence_files")
     if not isinstance(expected_files, dict) or not isinstance(expected_evidence, dict):
-        raise BuildRefused("attempt-1 snapshot receipt inventory невалиден")
+        raise BuildRefused("attempt-1 snapshot receipt inventory invalid")
     measured_files: dict[str, Any] = {}
     for name in ("attempt-1.receipt.json", "attempt-1.de_stats.json"):
         _raw, item = _stable_regular_bytes(snapshot / name, _RECOVERY_COPY_LIMIT)
         if item != expected_files.get(name):
-            raise BuildRefused(f"attempt-1 snapshot изменён: {name}")
+            raise BuildRefused(f"attempt-1 snapshot changed: {name}")
         measured_files[name] = item
     evidence_dir = _ensure_real_directory(snapshot / "evidence", "attempt-1 snapshot evidence")
     if {entry.name for entry in evidence_dir.iterdir()} != set(FIRST_EVIDENCE_SHA256):
-        raise BuildRefused("attempt-1 snapshot evidence inventory изменён")
+        raise BuildRefused("attempt-1 snapshot evidence inventory changed")
     measured_evidence: dict[str, Any] = {}
     for name in sorted(FIRST_EVIDENCE_SHA256):
         _raw, item = _stable_regular_bytes(evidence_dir / name, _RECOVERY_COPY_LIMIT)
         if item != expected_evidence.get(name):
-            raise BuildRefused(f"attempt-1 snapshot evidence изменён: {name}")
+            raise BuildRefused(f"attempt-1 snapshot evidence changed: {name}")
         measured_evidence[name] = item
 
     manifest_raw, manifest_ev = _stable_regular_bytes(
         snapshot / "manifest.json", _RECOVERY_COPY_LIMIT
     )
     if manifest_ev != declared.get("manifest"):
-        raise BuildRefused("attempt-1 snapshot manifest изменён")
+        raise BuildRefused("attempt-1 snapshot manifest changed")
     _require_sha(
         manifest_ev, ATTEMPT1_SNAPSHOT_MANIFEST_SHA256, "attempt-1 snapshot manifest"
     )
@@ -1172,7 +1172,7 @@ def _verify_attempt1_snapshot(
     }
     manifest_obj = _decode_json_object(manifest_raw, "attempt-1 snapshot manifest")
     if manifest_obj != expected_manifest:
-        raise BuildRefused("attempt-1 snapshot manifest потерял lineage")
+        raise BuildRefused("attempt-1 snapshot manifest lost lineage")
     return {
         "path": str(snapshot),
         "manifest": manifest_ev,
@@ -1212,27 +1212,27 @@ def _verify_attempt2_predecessor(
 
     evidence = _second_evidence_inventory(paths)
     if receipt_obj.get("run_evidence") != evidence:
-        raise BuildRefused("attempt-2 receipt run_evidence не равен закреплённым уликам")
+        raise BuildRefused("attempt-2 receipt run_evidence does not match the pinned evidence")
     expected_evidence_dir = pathlib.Path(str(evidence["path"])).resolve(strict=True)
     try:
         declared_evidence = pathlib.Path(str(receipt_obj["evidence_dir"])).resolve(strict=True)
     except (KeyError, OSError) as exc:
-        raise BuildRefused("attempt-2 receipt не связывает evidence dir") from exc
+        raise BuildRefused("attempt-2 receipt does not bind the evidence dir") from exc
     if declared_evidence != expected_evidence_dir:
-        raise BuildRefused("attempt-2 receipt evidence_dir не равен закреплённому")
+        raise BuildRefused("attempt-2 receipt evidence_dir does not match the pinned value")
     expected_scratch = paths.data / f".de-build-{SECOND_RUN_ID}"
     try:
         declared_scratch = _ensure_real_directory(
             pathlib.Path(str(receipt_obj["scratch_dir"])), "attempt-2 scratch dir"
         )
     except (KeyError, OSError) as exc:
-        raise BuildRefused("attempt-2 receipt не связывает scratch dir") from exc
+        raise BuildRefused("attempt-2 receipt does not bind the scratch dir") from exc
     if declared_scratch != expected_scratch.resolve(strict=True):
-        raise BuildRefused("attempt-2 receipt scratch_dir не принадлежит исходному worktree")
+        raise BuildRefused("attempt-2 receipt scratch_dir does not belong to the original worktree")
 
     recovery_of = receipt_obj.get("recovery_of")
     if not isinstance(recovery_of, dict):
-        raise BuildRefused("attempt-2 receipt потерял lineage попытки №1")
+        raise BuildRefused("attempt-2 receipt lost lineage of attempt 1")
     if (
         recovery_of.get("attempt") != 1
         or recovery_of.get("run_id") != FIRST_RUN_ID
@@ -1241,9 +1241,9 @@ def _verify_attempt2_predecessor(
         or recovery_of.get("evidence") != attempt1["evidence"]
         or recovery_of.get("failed_stats", {}).get("sha256") != FIRST_STATS_SHA256
     ):
-        raise BuildRefused("attempt-2 receipt lineage попытки №1 изменён")
+        raise BuildRefused("attempt-2 receipt lineage of attempt 1 changed")
     if receipt_obj.get("authorization") != attempt1["authorization"]:
-        raise BuildRefused("attempt-2 receipt authorization изменён")
+        raise BuildRefused("attempt-2 receipt authorization changed")
     attempt1_snapshot = _verify_attempt1_snapshot(paths, receipt_obj)
 
     auth_path = paths.code.parent / RECOVERY3_AUTH_RELATIVE
@@ -1332,7 +1332,7 @@ def _create_recovery3_snapshot(
     try:
         snapshot.mkdir(mode=0o700, parents=False, exist_ok=False)
     except FileExistsError as exc:
-        raise BuildRefused(f"attempt-2 recovery snapshot уже существует: {snapshot}") from exc
+        raise BuildRefused(f"attempt-2 recovery snapshot already exists: {snapshot}") from exc
     _fsync_dir(snapshot.parent)
     evidence_copy = snapshot / "evidence"
     evidence_copy.mkdir(mode=0o700, parents=False, exist_ok=False)
@@ -1341,7 +1341,7 @@ def _create_recovery3_snapshot(
     receipt_raw = predecessor.get("receipt_raw")
     stats_raw = predecessor.get("stats_raw")
     if not isinstance(receipt_raw, bytes) or not isinstance(stats_raw, bytes):
-        raise BuildRefused("attempt-2 snapshot source bytes не закреплены")
+        raise BuildRefused("attempt-2 snapshot source bytes are not pinned")
     copies = {
         "attempt-2.receipt.json": _exclusive_evidence_copy(
             snapshot / "attempt-2.receipt.json", receipt_raw
@@ -1364,7 +1364,7 @@ def _create_recovery3_snapshot(
             evidence_source / name, _RECOVERY_COPY_LIMIT
         )
         if source_ev != predecessor["evidence"]["files"][name]:
-            raise BuildRefused(f"attempt-2 evidence изменён перед snapshot: {name}")
+            raise BuildRefused(f"attempt-2 evidence changed before snapshot: {name}")
         copy_ev = _exclusive_evidence_copy(evidence_copy / name, raw)
         if copy_ev != source_ev:
             raise BuildRefused(f"attempt-2 evidence snapshot mismatch: {name}")
@@ -1397,29 +1397,29 @@ def _verify_recovery3_snapshot(
         "manifest.json",
     }
     if {entry.name for entry in snapshot.iterdir()} != expected_top:
-        raise BuildRefused("attempt-2 recovery snapshot inventory изменён")
+        raise BuildRefused("attempt-2 recovery snapshot inventory changed")
     measured_files: dict[str, Any] = {}
     for name, expected in snapshot_state["files"].items():
         _raw, measured = _stable_regular_bytes(snapshot / name, _RECOVERY_COPY_LIMIT)
         if measured != expected:
-            raise BuildRefused(f"attempt-2 recovery snapshot изменён: {name}")
+            raise BuildRefused(f"attempt-2 recovery snapshot changed: {name}")
         measured_files[name] = measured
     evidence_dir = _ensure_real_directory(
         snapshot / "evidence", "attempt-2 recovery evidence copy"
     )
     if {entry.name for entry in evidence_dir.iterdir()} != set(SECOND_EVIDENCE_SHA256):
-        raise BuildRefused("attempt-2 recovery evidence inventory изменён")
+        raise BuildRefused("attempt-2 recovery evidence inventory changed")
     measured_evidence: dict[str, Any] = {}
     for name, expected in snapshot_state["evidence_files"].items():
         _raw, measured = _stable_regular_bytes(evidence_dir / name, _RECOVERY_COPY_LIMIT)
         if measured != expected:
-            raise BuildRefused(f"attempt-2 recovery evidence изменён: {name}")
+            raise BuildRefused(f"attempt-2 recovery evidence changed: {name}")
         measured_evidence[name] = measured
     manifest_raw, measured_manifest = _stable_regular_bytes(
         snapshot / "manifest.json", _RECOVERY_COPY_LIMIT
     )
     if measured_manifest != snapshot_state["manifest"]:
-        raise BuildRefused("attempt-2 recovery snapshot manifest изменён")
+        raise BuildRefused("attempt-2 recovery snapshot manifest changed")
     expected_manifest = _recovery3_snapshot_manifest_object(
         predecessor, measured_files, measured_evidence
     )
@@ -1428,7 +1428,7 @@ def _verify_recovery3_snapshot(
     if _decode_json_object(
         manifest_raw, "attempt-2 recovery snapshot manifest"
     ) != expected_manifest:
-        raise BuildRefused("attempt-2 recovery snapshot manifest потерял lineage")
+        raise BuildRefused("attempt-2 recovery snapshot manifest lost lineage")
 
 
 def _verify_recovery3_history(
@@ -1445,7 +1445,7 @@ def _verify_recovery3_history(
         "attempt1",
     ):
         if latest[key] != predecessor[key]:
-            raise BuildRefused(f"attempt-3 lineage {key} изменён")
+            raise BuildRefused(f"attempt-3 lineage {key} changed")
     _verify_recovery3_snapshot(snapshot_state, predecessor)
 
 
@@ -1463,7 +1463,7 @@ def _assert_outputs_absent(paths: BuildPaths) -> None:
             path.lstat()
         except FileNotFoundError:
             continue
-        raise BuildRefused(f"output уже существует (включая symlink): {path}")
+        raise BuildRefused(f"output already exists (including symlinks): {path}")
 
 
 def _assert_receipt_absent(path: pathlib.Path) -> None:
@@ -1471,7 +1471,7 @@ def _assert_receipt_absent(path: pathlib.Path) -> None:
         path.lstat()
     except FileNotFoundError:
         return
-    raise ReceiptExists(f"one-shot receipt уже существует: {path}")
+    raise ReceiptExists(f"one-shot receipt already exists: {path}")
 
 
 def _prepare_run_dirs(paths: BuildPaths) -> None:
@@ -1483,7 +1483,7 @@ def _prepare_run_dirs(paths: BuildPaths) -> None:
     for child in (paths.scratch, paths.extract_scratch, paths.export_scratch):
         resolved = _ensure_real_directory(child, "run-scoped scratch")
         if paths.data not in resolved.parents:
-            raise BuildRefused(f"scratch вышел за data/: {resolved}")
+            raise BuildRefused(f"scratch escaped data/: {resolved}")
 
 
 def _manifest_plan(services: SystemServices, code_root: pathlib.Path) -> tuple[Any, str]:
@@ -1492,21 +1492,21 @@ def _manifest_plan(services: SystemServices, code_root: pathlib.Path) -> tuple[A
         manifest = api.build_manifest(DE_RELEASE)
         api.validate_manifest(manifest, DE_RELEASE)
     except (ValueError, SystemExit, TypeError, KeyError) as exc:
-        raise BuildRefused(f"DE source manifest не прошёл preflight: {exc}") from exc
+        raise BuildRefused(f"DE source manifest failed preflight: {exc}") from exc
     if not isinstance(manifest, dict):
-        raise BuildRefused("build_manifest обязан вернуть dict")
+        raise BuildRefused("build_manifest must return a dict")
     if str(manifest.get("country", "")).lower() != "de":
-        raise BuildRefused("DE manifest объявляет не country=de")
+        raise BuildRefused("DE manifest does not declare country=de")
     if manifest.get("source_release") != DE_RELEASE:
-        raise BuildRefused("DE manifest объявляет неверный source_release")
+        raise BuildRefused("DE manifest declares an incorrect source_release")
     try:
         catalog_sha = str(api.canonical_catalog_sha256())
     except (AttributeError, TypeError, ValueError) as exc:
-        raise BuildRefused(f"de_sources не отдал canonical catalog hash: {exc}") from exc
+        raise BuildRefused(f"de_sources did not return the canonical catalog hash: {exc}") from exc
     if not re.fullmatch(r"[0-9a-f]{64}", catalog_sha):
-        raise BuildRefused("canonical DE source catalog hash обязан быть 64 lowercase hex")
+        raise BuildRefused("canonical DE source catalog hash must be 64 lowercase hex")
     if manifest.get("source_catalog_sha256") != catalog_sha:
-        raise BuildRefused("DE manifest не связан с canonical source catalog hash")
+        raise BuildRefused("DE manifest is not bound to the canonical source catalog hash")
     digest = hashlib.sha256(_canonical_json_bytes(manifest)).hexdigest()
     return manifest, digest
 
@@ -1518,7 +1518,7 @@ def _read_regular(path: pathlib.Path, max_bytes: int) -> bytes:
         info = _fd_is_regular_single(fd, str(path))
         if info.st_size <= 0 or info.st_size > max_bytes:
             raise BuildRefused(
-                f"{path}: размер {info.st_size} вне допустимых 1..{max_bytes} bytes"
+                f"{path}: size {info.st_size} outside the allowed 1..{max_bytes} bytes"
             )
         chunks = []
         remaining = info.st_size
@@ -1540,7 +1540,7 @@ def _file_evidence(path: pathlib.Path, max_bytes: int) -> dict[str, Any]:
         info = _fd_is_regular_single(fd, str(path))
         if info.st_size <= 0 or info.st_size > max_bytes:
             raise BuildRefused(
-                f"{path}: размер {info.st_size} вне допустимых 1..{max_bytes} bytes"
+                f"{path}: size {info.st_size} outside the allowed 1..{max_bytes} bytes"
             )
         digest = hashlib.sha256()
         while True:
@@ -1558,9 +1558,9 @@ def _json_file(path: pathlib.Path) -> tuple[dict[str, Any], dict[str, Any]]:
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise BuildRefused(f"{path}: невалидный JSON: {exc}") from exc
+        raise BuildRefused(f"{path}: invalid JSON: {exc}") from exc
     if not isinstance(value, dict):
-        raise BuildRefused(f"{path}: JSON root обязан быть object")
+        raise BuildRefused(f"{path}: JSON root must be an object")
     return value, {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
 
 
@@ -1573,7 +1573,7 @@ def _preflight_file(
     """Hash one immutable local dependency without accepting links or empties."""
     info = _path_is_regular_single(path, nonempty=True)
     if executable and info.st_mode & 0o111 == 0:
-        raise BuildRefused(f"local preflight: файл не executable: {path}")
+        raise BuildRefused(f"local preflight: file is not executable: {path}")
     evidence = _file_evidence(path, max_bytes)
     if executable:
         evidence["executable"] = True
@@ -1599,14 +1599,14 @@ def _local_resource_evidence(paths: BuildPaths) -> dict[str, Any]:
     rules = paths.code / "rules"
     resolved_rules = _ensure_real_directory(rules, "local preflight rules dir")
     if resolved_rules.parent != paths.code:
-        raise BuildRefused(f"local preflight: rules dir вышел за code root: {resolved_rules}")
+        raise BuildRefused(f"local preflight: rules dir escaped code root: {resolved_rules}")
     required = set(_REQUIRED_RULE_TSV)
     actual = {entry.name for entry in rules.iterdir() if entry.name.endswith(".tsv")}
     missing = sorted(required - actual)
     extra = sorted(actual - required)
     if missing or extra:
         raise BuildRefused(
-            "local preflight: набор rules/*.tsv не равен известным 17; "
+            "local preflight: rules/*.tsv set does not match the known 17 files; "
             f"missing={missing}, extra={extra}"
         )
     for name in _REQUIRED_RULE_TSV:
@@ -1647,7 +1647,7 @@ def _local_capture(
             timeout=_PREFLIGHT_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise BuildRefused(f"local preflight {label} не запустился: {exc}") from exc
+        raise BuildRefused(f"local preflight {label} could not start: {exc}") from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise BuildRefused(
@@ -1660,9 +1660,9 @@ def _json_stdout(result: subprocess.CompletedProcess[Any], label: str) -> dict[s
     try:
         value = json.loads(str(result.stdout))
     except (TypeError, json.JSONDecodeError) as exc:
-        raise BuildRefused(f"local preflight {label}: stdout не JSON object") from exc
+        raise BuildRefused(f"local preflight {label}: stdout is not a JSON object") from exc
     if not isinstance(value, dict):
-        raise BuildRefused(f"local preflight {label}: stdout JSON root обязан быть object")
+        raise BuildRefused(f"local preflight {label}: stdout JSON root must be an object")
     return value
 
 
@@ -1687,14 +1687,14 @@ def _duckdb_local_preflight(
         "autoload_known_extensions": "false",
     }
     if evidence.get("settings") != expected_settings:
-        raise BuildRefused("local preflight duckdb: automatic extension loading не выключен")
+        raise BuildRefused("local preflight duckdb: automatic extension loading is not disabled")
     extensions = evidence.get("extensions")
     if not isinstance(extensions, dict) or set(extensions) != {"httpfs", "spatial"}:
-        raise BuildRefused("local preflight duckdb: нет точного набора httpfs+spatial")
+        raise BuildRefused("local preflight duckdb: the exact httpfs+spatial set is missing")
     for name in ("httpfs", "spatial"):
         item = extensions.get(name)
         if not isinstance(item, dict) or item.get("loaded") is not True or item.get("installed") is not True:
-            raise BuildRefused(f"local preflight duckdb: {name} не доказан как locally loaded")
+            raise BuildRefused(f"local preflight duckdb: {name} was not proven to be locally loaded")
     return {
         **evidence,
         "python": sys.executable,
@@ -1737,7 +1737,7 @@ def _mini_build_local_preflight(
         temp = pathlib.Path(temp_text)
         resolved_temp = _ensure_real_directory(temp, "local preflight scratch")
         if paths.data not in resolved_temp.parents:
-            raise BuildRefused(f"local preflight scratch вышел за data/: {resolved_temp}")
+            raise BuildRefused(f"local preflight scratch escaped data/: {resolved_temp}")
         csv_path = temp / "mini.csv"
         manifest_path = temp / "mini_manifest.json"
         sheet_path = temp / "mini.bin"
@@ -1823,7 +1823,7 @@ def _local_preflight(
         resources_after = _local_resource_evidence(paths)
         if resources_after != resources:
             raise BuildRefused(
-                "local preflight: scripts/models/binary/rules изменились во время проверки"
+                "local preflight: scripts/models/binary/rules changed during the check"
             )
     except BuildRefused:
         raise
@@ -1845,17 +1845,17 @@ def _validate_extract(
     if str(stats_obj.get("country", "")).upper() != "DE":
         raise BuildRefused("de_stats.json: country != DE")
     if stats_obj.get("release") != DE_RELEASE:
-        raise BuildRefused("de_stats.json: release не равен hard-pin")
+        raise BuildRefused("de_stats.json: release does not match the hard pin")
     if stats_obj.get("rows_src") != EXPECTED_ROWS:
         raise BuildRefused(
-            f"de_stats.json: rows_src={stats_obj.get('rows_src')!r}, ожидалось {EXPECTED_ROWS}"
+            f"de_stats.json: rows_src={stats_obj.get('rows_src')!r}, expected {EXPECTED_ROWS}"
         )
     kept = stats_obj.get("rows_kept")
     dropped = stats_obj.get("rows_dropped")
     if isinstance(kept, bool) or not isinstance(kept, int) or not 0 < kept <= EXPECTED_ROWS:
-        raise BuildRefused("de_stats.json: rows_kept вне допустимого диапазона")
+        raise BuildRefused("de_stats.json: rows_kept outside the allowed range")
     if isinstance(dropped, bool) or not isinstance(dropped, int) or dropped != EXPECTED_ROWS - kept:
-        raise BuildRefused("de_stats.json: rows_dropped не согласован с rows_src/rows_kept")
+        raise BuildRefused("de_stats.json: rows_dropped is inconsistent with rows_src/rows_kept")
     api = services.load_de_sources(paths.code)
     try:
         if hasattr(api, "validate_stats_witness"):
@@ -1863,10 +1863,10 @@ def _validate_extract(
         api.validate_manifest(manifest_obj, DE_RELEASE)
     except (ValueError, SystemExit, TypeError, KeyError) as exc:
         raise BuildRefused(
-            f"DE stats/manifest witness не прошёл canonical validation: {exc}"
+            f"DE stats/manifest witness failed canonical validation: {exc}"
         ) from exc
     if manifest_obj != dict(planned_manifest):
-        raise BuildRefused("de_manifest.json отличается от pre-receipt manifest plan")
+        raise BuildRefused("de_manifest.json differs from the pre-receipt manifest plan")
     return {"de_norm.parquet": norm, "de_stats.json": stats_ev, "de_manifest.json": manifest_ev}
 
 
@@ -1959,8 +1959,8 @@ def _stop_child(process: Any) -> None:
 def _terminate_for_low_disk(process: Any, stage: str) -> None:
     _stop_child(process)
     raise LowDisk(
-        f"{stage}: свободное место упало ниже неснижаемого пола 5 GiB; "
-        "child остановлен"
+        f"{stage}: free space fell below the non-negotiable 5 GiB floor; "
+        "child stopped"
     )
 
 
@@ -2083,7 +2083,7 @@ def _run_evidence_inventory(
     invalid_inventory = actual != allowed if require_complete else not actual.issubset(allowed)
     if "events.jsonl" not in actual or invalid_inventory:
         raise BuildRefused(
-            "attempt evidence inventory недопустим: "
+            "attempt evidence inventory is invalid: "
             f"missing={sorted(allowed - actual)}, extra={sorted(actual - allowed)}"
         )
     files: dict[str, Any] = {}
@@ -2554,7 +2554,7 @@ def run_recovery_once(
             "authorization",
         ):
             if predecessor_after[key] != predecessor[key]:
-                raise BuildRefused(f"attempt-1 {key} изменён во время recovery preflight")
+                raise BuildRefused(f"attempt-1 {key} changed during recovery preflight")
         _require_git_unchanged(services, paths.code, expected)
 
         receipt = _recovery_receipt_payload(
@@ -2595,7 +2595,7 @@ def run_recovery_once(
             for key in ("receipt", "stats", "evidence", "authorization"):
                 if latest[key] != predecessor[key]:
                     raise BuildRefused(
-                        f"attempt-1 {key} изменён до первого recovery child"
+                        f"attempt-1 {key} changed before the first recovery child"
                     )
             _verify_recovery_snapshot(snapshot_state)
             _append_event(
@@ -2691,7 +2691,7 @@ def run_recovery_attempt3_once(
             "attempt1",
         ):
             if predecessor_after[key] != predecessor[key]:
-                raise BuildRefused(f"attempt-3 predecessor {key} изменён во время preflight")
+                raise BuildRefused(f"attempt-3 predecessor {key} changed during preflight")
         _require_git_unchanged(services, paths.code, expected)
 
         receipt = _recovery3_receipt_payload(
@@ -2738,7 +2738,7 @@ def run_recovery_attempt3_once(
             ):
                 if latest[key] != predecessor[key]:
                     raise BuildRefused(
-                        f"attempt-3 predecessor {key} изменён до первого child"
+                        f"attempt-3 predecessor {key} changed before the first child"
                     )
             _verify_recovery3_snapshot(snapshot_state, predecessor)
             _append_event(

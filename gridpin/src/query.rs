@@ -10273,7 +10273,7 @@ mod tests {
         )
         .unwrap();
         let bin = dir.join("addresses.bin");
-        let rules_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../rules");
+        let rules_dir = crate::rules::tests::write_fixture_rules(&dir.join("rules"));
         crate::builder::build(
             &csv,
             &bin,

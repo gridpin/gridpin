@@ -1,7 +1,7 @@
 //! Ignored, test-only trace for Germany F3 rule counters.
 //!
 //! This module is deliberately absent from release builds.  It invokes the
-//! real private DE transformations over the pinned fixtures before `de.bin`
+//! real DE transformations over explicitly supplied fixtures before a sheet
 //! exists.  It can prove that a retry/observer was emitted and show the changed
 //! text; it cannot claim that the retry won or improved a coordinate result.
 
@@ -308,17 +308,16 @@ fn build_parser_trace_index(rules_dir: &Path) -> crate::query::Index {
     crate::query::Index::open(&bin).expect("open one-row DE parser trace index")
 }
 
-fn fixture_path(env_name: &str, default: &str) -> PathBuf {
-    std::env::var_os(env_name).map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(default),
-        PathBuf::from,
-    )
+fn fixture_path(env_name: &str) -> PathBuf {
+    std::env::var_os(env_name)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("{env_name} is required for the ignored trace"))
 }
 
 #[test]
 #[ignore = "explicit F3 trace: verifies B and traces the frozen 300+75 inputs"]
 fn frozen_effect_trace() {
-    let rules_dir = fixture_path("GRIDPIN_DE_TRACE_RULES", "../rules");
+    let rules_dir = fixture_path("GRIDPIN_DE_TRACE_RULES");
     let entries = crate::rules::entries_from_tsv_dir(&rules_dir).expect("read rule tables");
     let section = crate::rules::serialize_entries(&entries);
     let installed = crate::rules::from_section(&section);
@@ -326,24 +325,21 @@ fn frozen_effect_trace() {
     let parser_index = build_parser_trace_index(&rules_dir);
 
     let real = read_inputs(
-        &fixture_path("GRIDPIN_DE_TRACE_REAL", "../eval/scrape/real_de.csv"),
+        &fixture_path("GRIDPIN_DE_TRACE_REAL"),
         b',',
         "address",
         None,
         Some("source"),
     );
     let sample = read_inputs(
-        &fixture_path(
-            "GRIDPIN_DE_TRACE_SAMPLE",
-            "../eval/work/de_bench_20260820/de_bench2_sample.csv",
-        ),
+        &fixture_path("GRIDPIN_DE_TRACE_SAMPLE"),
         b',',
         "address",
         None,
         None,
     );
     let adversarial = read_inputs(
-        &fixture_path("GRIDPIN_DE_TRACE_ADVERSARIAL", "../eval/adversarial/de.csv"),
+        &fixture_path("GRIDPIN_DE_TRACE_VARIANTS"),
         b';',
         "query",
         Some("base_address"),

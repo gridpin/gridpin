@@ -619,8 +619,34 @@ pub fn entries_from_tsv_dir(dir: &Path) -> std::io::Result<Vec<(u8, String, Stri
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    // Explicit witness inputs, not the private release tables.
+    pub(crate) fn write_fixture_rules(dir: &Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        for (name, rows) in [
+            (
+                "city_alias.tsv",
+                "de\tmunich\tmunchen\nde\tcologne\tkoln\nde\tnuremberg\tnurnberg\nde\tfrankfurt main\tfrankfurt am main\n",
+            ),
+            (
+                "abbrev2.tsv",
+                "de\ta\tm\tam main\nde\ta\td\tan der\nde\ta\trh\tam rhein\nde\ti\tbay\tin bayern\n",
+            ),
+            (
+                "street_types_latin.tsv",
+                "de\tstraße\nde\tstrasse\nde\tstr\nde\tweg\nde\tallee\nde\tplatz\nde\tgasse\nde\tdamm\nde\tufer\n",
+            ),
+            ("countries_mid.tsv", "de\tdeutschland\nde\tgermany\n"),
+            ("countries_tail.tsv", "de\tdeutschland\nde\tgermany\n"),
+            ("place_prefix.tsv", "de\tot\nde\tortsteil\n"),
+            ("place_type_strip.tsv", "de\tot\nde\tortsteil\n"),
+        ] {
+            std::fs::write(dir.join(name), rows).unwrap();
+        }
+        dir.to_path_buf()
+    }
 
     fn sample_entries() -> Vec<(u8, String, String)> {
         let s = |x: &str| x.to_string();
@@ -689,7 +715,10 @@ mod tests {
 
     #[test]
     fn country_scoped_de_rows_never_enter_generic_rule_families() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rules");
+        let dir = write_fixture_rules(&std::env::temp_dir().join(format!(
+            "gridpin-de-rule-family-fixture-{}",
+            std::process::id()
+        )));
         let entries = entries_from_tsv_dir(&dir).unwrap();
         let rules = rules_from_entries(entries);
 
