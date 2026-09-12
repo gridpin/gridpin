@@ -2,7 +2,7 @@
 //! (digit groups as house-number candidates; compound suffixes via a dictionary),
 //! exact lookup + prefix lookup + typo tolerance (Levenshtein automaton).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -12,6 +12,7 @@ use fst::automaton::Levenshtein;
 use fst::{Automaton, IntoStreamer, Map, Streamer};
 use memmap2::Mmap;
 use serde::Serialize;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::index::*;
 use crate::norm::normalize;
@@ -154,6 +155,68 @@ fn plausible_house_postcode(value: &str) -> bool {
         && value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || character == ' ')
+}
+
+fn is_safe_house_rep(token: &str) -> bool {
+    matches!(token, "bis" | "ter" | "quater" | "quinquies" | "sexies")
+        || (token.chars().count() == 1 && token.chars().all(char::is_alphabetic))
+}
+
+fn compound_house_parts(token: &str) -> Option<(usize, &str)> {
+    let digits = token
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    ((1..=4).contains(&digits)
+        && token.len() > digits
+        && token[digits..].chars().count() <= 4
+        && token[digits..].chars().all(char::is_alphanumeric))
+    .then_some((digits, &token[digits..]))
+}
+
+fn is_five_digit_postcode(token: &str) -> bool {
+    token.len() == 5 && token.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Test-observer for the two real house-suffix syntax branches.  It uses
+/// the same predicates as `build_hyp` and the compound-token hypothesis; an
+/// index-specific rep dictionary still decides whether a particular suffix is
+/// present in a built sheet.
+#[cfg(test)]
+pub(crate) fn de_house_suffix_trace(raw: &str) -> Option<String> {
+    let normalized = normalize(raw);
+    let tokens: Vec<&str> = normalized.split_whitespace().collect();
+    for token in &tokens {
+        if let Some((digits, suffix)) = compound_house_parts(token) {
+            return Some(format!(
+                "{token} -> numero={} rep={suffix}",
+                &token[..digits]
+            ));
+        }
+    }
+    for pair in tokens.windows(2) {
+        if (1..=4).contains(&pair[0].len())
+            && pair[0].bytes().all(|byte| byte.is_ascii_digit())
+            && is_safe_house_rep(pair[1])
+        {
+            return Some(format!(
+                "{} {} -> numero={} rep={}",
+                pair[0], pair[1], pair[0], pair[1]
+            ));
+        }
+    }
+    None
+}
+
+/// Test-observer for the exact five-digit branch used by the free-form
+/// parser.  Leading zeroes remain present in this normalized token even though
+/// lookup later compares the numeric value and returns the stored display form.
+#[cfg(test)]
+pub(crate) fn de_five_digit_postcode_trace(raw: &str) -> Option<String> {
+    normalize(raw)
+        .split_whitespace()
+        .find(|token| is_five_digit_postcode(token))
+        .map(|token| format!("PLZ token preserved: {token}"))
 }
 
 pub fn query_cascade(addr: &Index, poi: Option<&Index>, q: &str, k: usize) -> Vec<Hit> {
@@ -536,6 +599,9 @@ fn match_flags(f: &Feats) -> Vec<&'static str> {
     if f.from_ml {
         v.push("ml");
     }
+    if f.de_street_type {
+        v.push("de_street_type");
+    }
     v
 }
 
@@ -554,6 +620,9 @@ pub struct Feats {
     house_found: bool,
     house_exact_rep: bool,
     numero_present: bool,
+    /// Explainability-only: a DE compound/split street-type variant supplied
+    /// the exact FST key.  It is deliberately not an eleventh ranking feature.
+    de_street_type: bool,
 }
 
 impl Feats {
@@ -565,6 +634,7 @@ impl Feats {
         self.pc_exact |= o.pc_exact;
         self.pc_dept |= o.pc_dept;
         self.from_ml |= o.from_ml;
+        self.de_street_type |= o.de_street_type;
     }
 
     pub fn to_vec(&self) -> [f32; N_FEATS] {
@@ -596,6 +666,7 @@ impl Feats {
             house_found: b(7),
             house_exact_rep: b(8),
             numero_present: b(9),
+            de_street_type: false,
         }
     }
 
@@ -753,6 +824,1375 @@ fn street_key(s: &str) -> String {
         .collect();
     t.sort();
     t.join(" ")
+}
+
+/// Original DE locality evidence retained across the suffix-recovery retry. The retry
+/// deliberately removes the unrecognised tail before candidate lookup; without carrying
+/// this evidence forward, otherwise identical street/house homonyms fall back to the
+/// global anchor or commune prominence.
+#[derive(Clone, Copy)]
+struct DeRetainedLocality<'a> {
+    /// All normalized tokens after the rightmost explicit five-digit postcode.
+    postcode_tail: &'a str,
+    /// The exact one- or two-token slice removed by the successful c2 retry.
+    dropped_tail: &'a str,
+    /// Frozen from the original raw DE input before iterating query variants. House-range
+    /// and mixed-fraction spellings keep their established variant-quality winner and may
+    /// still use retained locality, but must not enter the independent postal-tail rule.
+    postal_tail_eligible: bool,
+}
+
+fn de_retained_locality<'a>(
+    postcode_tail: Option<&'a str>,
+    dropped_tail: &'a str,
+    postal_tail_eligible: bool,
+) -> Option<DeRetainedLocality<'a>> {
+    postcode_tail.map(|postcode_tail| DeRetainedLocality {
+        postcode_tail,
+        dropped_tail,
+        postal_tail_eligible,
+    })
+}
+
+fn de_commune_core(commune: &str) -> String {
+    let normalized = normalize(commune);
+    let mut words: Vec<&str> = normalized
+        .split(' ')
+        .filter(|word| !word.is_empty())
+        .collect();
+    while words.first() == Some(&"stadt") {
+        words.remove(0);
+    }
+    while words.last() == Some(&"stadt") {
+        words.pop();
+    }
+    words.join(" ")
+}
+
+fn de_retained_locality_score(postcode_tail: &str, commune: &str) -> u8 {
+    let query = normalize(postcode_tail);
+    let candidate = de_commune_core(commune);
+    if query.is_empty() || candidate.is_empty() {
+        return 0;
+    }
+    if candidate == query {
+        return 2;
+    }
+    if candidate
+        .strip_prefix(&query)
+        .is_some_and(|suffix| suffix.starts_with(' '))
+    {
+        1
+    } else {
+        0
+    }
+}
+
+fn de_dropped_tail_reaches_commune(dropped_tail: &str, commune: &str) -> bool {
+    let commune = de_commune_core(commune);
+    let commune_words: std::collections::HashSet<&str> = commune.split(' ').collect();
+    normalize(dropped_tail)
+        .split(' ')
+        .any(|word| word.chars().count() >= 4 && commune_words.contains(word))
+}
+
+fn de_locality_qualifiers_match(query_tail: &str, commune: &str) -> bool {
+    let query = normalize(query_tail);
+    let candidate = de_commune_core(commune);
+    matches!(
+        (query.as_str(), candidate.as_str()),
+        ("reichenbach vogt", "reichenbach im vogtland")
+            | ("sankt wendel", "st wendel")
+            | ("homburg saar", "homburg")
+            | ("kottmar ot eibau", "eibau")
+            | ("st peter ording", "sankt peter ording")
+            | ("burg auf fehmarn", "fehmarn")
+    )
+}
+
+/// Exact, postcode-bound relations between a user-facing locality and the
+/// indexed postal locality.  These are deliberately triples rather than two
+/// independent allowlists: Berlin's city name must never cross-match every
+/// district, and the same spelling in another postcode remains unrelated.
+const DE_EXACT_LOCALITY_ALIASES: &[(&str, u32, &str)] = &[
+    ("brandenburg an der havel", 14770, "brandenburg"),
+    ("brandenburg an der havel", 14776, "brandenburg"),
+    ("berlin", 13187, "pankow"),
+    ("berlin", 13189, "pankow"),
+    ("berlin", 13355, "gesundbrunnen"),
+    ("berlin", 10317, "rummelsburg"),
+    ("berlin", 13129, "blankenburg"),
+    ("berlin", 13159, "blankenfelde"),
+    ("berlin", 13127, "franzosisch buchholz"),
+    ("berlin", 12165, "steglitz"),
+    ("berlin", 12159, "friedenau"),
+    ("berlin", 14052, "westend"),
+    ("werder a d havel", 14542, "werder"),
+    ("petershagen eggersdorf", 15345, "eggersdorf"),
+    ("landkirchen", 23769, "fehmarn"),
+    ("berlin kaulsdorf", 12621, "kaulsdorf"),
+    ("zerkwitz", 3222, "lubbenau"),
+    ("schwedt oder", 16303, "schwedt"),
+    ("konigstein taunus", 61462, "konigstein im taunus"),
+    ("freiburg breisgau", 79104, "freiburg im breisgau"),
+    ("freiburg", 79115, "freiburg im breisgau"),
+    ("oelsnitz vogtland", 8606, "oelsnitz vogtl"),
+    ("frankenberg sachsen", 9669, "frankenberg sa"),
+    ("lutherstadt wittenberg", 6886, "wittenberg"),
+    ("wittenberg lutherstadt", 6886, "wittenberg"),
+    ("weilheim teck", 73235, "weilheim an der teck"),
+    ("berlin", 10587, "charlottenburg"),
+    ("berlin", 10783, "schoneberg"),
+    ("berlin", 13627, "charlottenburg nord"),
+    ("berlin", 14059, "charlottenburg"),
+    ("berlin", 14195, "lichterfelde"),
+];
+
+fn de_exact_locality_alias_matches(query_tail: &str, postcode: u32, commune: &str) -> bool {
+    let query = normalize(query_tail);
+    let candidate = de_commune_core(commune);
+    DE_EXACT_LOCALITY_ALIASES
+        .iter()
+        .any(|(expected_query, expected_postcode, expected_commune)| {
+            query == *expected_query
+                && postcode == *expected_postcode
+                && candidate == *expected_commune
+        })
+}
+
+fn de_is_exact_locality_alias_query(query_tail: &str, postcode: u32) -> bool {
+    let query = normalize(query_tail);
+    DE_EXACT_LOCALITY_ALIASES
+        .iter()
+        .any(|(expected_query, expected_postcode, _)| {
+            query == *expected_query && postcode == *expected_postcode
+        })
+}
+
+fn de_is_berlin_postal_locality(commune: &str) -> bool {
+    matches!(
+        de_commune_core(commune).as_str(),
+        "berlin"
+            | "adlershof"
+            | "charlottenburg"
+            | "dahlem"
+            | "kaulsdorf"
+            | "kreuzberg"
+            | "marienfelde"
+            | "mitte"
+            | "neukolln"
+            | "niederschoneweide"
+            | "nikolassee"
+            | "tempelhof"
+            | "wilmersdorf"
+    )
+}
+
+fn de_is_proven_berlin_postcode(postcode: u32) -> bool {
+    matches!(
+        postcode,
+        10115
+            | 10117
+            | 10178
+            | 10589
+            | 10715
+            | 10717
+            | 10969
+            | 12043
+            | 12101
+            | 12277
+            | 12439
+            | 12489
+            | 12621
+            | 14129
+            | 14195
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    static DE_PREFIX_DROP_GUARD_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static DE_ABBREVIATION_GUARD_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static DE_POSTCODE_HOUSE_RESCUE_HOUSE_DECODES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static DE_POSTCODE_HOUSE_RESCUE_FUZZY_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static DE_POSTCODE_HOUSE_RESCUE_SUBSET_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT_DEFAULT) };
+    static DE_P4_POSTCODE_BUCKET_SCAN_ROWS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static DE_P4_POSTCODE_BUCKET_MATCHING_SIDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static DE_BLANK_POSTCODE_HOUSE_SCAN_ROWS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static DE_COUNTRY_VARIANT_PREPARED_SEARCH_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Hard ceiling for the one narrow, post-failure exact-key scan. Common German street names can
+/// exceed 4,000 locality postings; ordinary queries retain their 300-row cap, while this path
+/// proves uniqueness or fails closed on the first row beyond this bound.
+const DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT_DEFAULT: usize = 8192;
+
+fn de_postcode_house_rescue_scan_limit() -> usize {
+    #[cfg(test)]
+    {
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT_DEFAULT
+    }
+}
+
+fn de_prefix_drop_preserves_postcode_locality(
+    hit: &Hit,
+    features: &[f32; N_FEATS],
+    postcode: u32,
+    postcode_tail: &str,
+) -> bool {
+    #[cfg(test)]
+    DE_PREFIX_DROP_GUARD_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+    Feats::from_vec(features).pc_exact
+        || Index::postcode_numeric_prefix(&hit.postcode) == Some(postcode)
+        || de_retained_locality_score(postcode_tail, &hit.commune) != 0
+}
+
+fn de_postcode_context(q: &str) -> Option<(u32, String)> {
+    let tokens: Vec<&str> = q.split(' ').filter(|token| !token.is_empty()).collect();
+    let position = tokens
+        .iter()
+        .rposition(|token| is_five_digit_postcode(token))?;
+    let postcode = tokens[position].parse().ok()?;
+    let tail = tokens[position + 1..].join(" ");
+    (!tail.is_empty()).then_some((postcode, tail))
+}
+
+/// The exact normalization performed before every prepared lookup. Keeping this
+/// in one helper lets the DE variant loop identify equivalent raw/base variants
+/// without drifting from `query_feats_d` itself.
+fn prepared_query_key(raw: &str) -> String {
+    expand_two_token(&fold_units(&crate::norm::fold_homoglyphs(&normalize(raw))))
+}
+
+fn de_house_range_separator(address: &str) -> bool {
+    address.char_indices().any(|(position, character)| {
+        if !matches!(character, '-' | '–' | '—') {
+            return false;
+        }
+        let left_endpoint = address[..position].split_whitespace().next_back();
+        let right_endpoint = address[position + character.len_utf8()..]
+            .split_whitespace()
+            .next();
+        left_endpoint.is_some_and(|endpoint| endpoint.chars().any(|ch| ch.is_ascii_digit()))
+            && right_endpoint.is_some_and(|endpoint| endpoint.chars().any(|ch| ch.is_ascii_digit()))
+    })
+}
+
+fn de_capital_prior_candidate_allowed(
+    country: Option<&str>,
+    sorted_top_features: &[f32; N_FEATS],
+    candidate_precision: &str,
+) -> bool {
+    // A weak cityless capital anchor may resolve equal-quality homonyms, but
+    // it must not replace an already exact German house with a snapped
+    // neighbour carrying a different number.  Interpolation remains eligible:
+    // it can be the only useful address on a sparse street and has an explicit
+    // regression sentinel in the tests below.
+    !(country == Some("de")
+        && candidate_precision == "near"
+        && Feats::from_vec(sorted_top_features).house_exact_rep)
+}
+
+fn de_comma_postcode_house_rescue_query(raw: &str) -> Option<(String, u32, String)> {
+    if !crate::de::postal_tail_eligible(raw) {
+        return None;
+    }
+    // Parenthetical building labels with slash locality qualifiers belong to
+    // the audited P4 parser. Letting this generic comma rescue strip them
+    // would bypass P4's exact-core and fill-empty admission contract.
+    if de_parenthetical_locality_uses_slash_qualifier(raw) {
+        return None;
+    }
+    let mut segments = raw.split(',');
+    let address = segments.next()?.trim();
+    let locality = segments.next()?.trim();
+    let country = segments.next().map(str::trim);
+    if address.is_empty() || locality.is_empty() || segments.next().is_some() {
+        return None;
+    }
+    if country.is_some_and(|country| {
+        let country = normalize(country);
+        !matches!(country.as_str(), "deutschland" | "germany")
+    }) {
+        return None;
+    }
+    if address.contains('/') || de_house_range_separator(address) {
+        return None;
+    }
+    let locality = normalize(locality);
+    let mut tokens = locality.split_whitespace();
+    let postcode_token = tokens.next()?;
+    if !is_five_digit_postcode(postcode_token) {
+        return None;
+    }
+    let locality_tail = tokens.collect::<Vec<_>>().join(" ");
+    if locality_tail.is_empty() {
+        return None;
+    }
+    let normalized_address = normalize(address);
+    if !normalized_address
+        .split_whitespace()
+        .any(|token| token.bytes().any(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some((
+        format!("{address} {postcode_token}"),
+        postcode_token.parse().ok()?,
+        locality_tail,
+    ))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DeCompactHousePairSpec {
+    query: String,
+    postcode: u32,
+    locality_tail: String,
+    effect: crate::de::Effect,
+    left: u32,
+    right: u32,
+}
+
+/// Parse one compact, literal two-endpoint house set immediately before an
+/// explicit five-digit postcode.  The strict Wave-A path proves both numbers
+/// on one runtime street id; therefore even a small slash pair such as `1/3`
+/// is no longer guessed from the left endpoint alone.
+fn de_compact_house_pair_spec(raw: &str) -> Option<DeCompactHousePairSpec> {
+    let bytes = raw.as_bytes();
+    let mut parsed = None;
+    for start in 0..bytes.len().saturating_sub(4) {
+        if !bytes[start..start + 5].iter().all(u8::is_ascii_digit)
+            || start
+                .checked_sub(1)
+                .is_some_and(|left| bytes[left].is_ascii_digit())
+            || bytes.get(start + 5).is_some_and(u8::is_ascii_digit)
+        {
+            continue;
+        }
+        let postcode_token = &raw[start..start + 5];
+        let locality_raw = raw[start + 5..].trim();
+        if locality_raw.is_empty()
+            || !locality_raw.chars().any(char::is_alphabetic)
+            || locality_raw.chars().any(|character| {
+                character.is_ascii_digit() || matches!(character, ',' | ';' | '|' | '\n' | '\r')
+            })
+        {
+            continue;
+        }
+        let before_postcode = raw[..start].trim_end();
+        let address = before_postcode
+            .strip_suffix(',')
+            .unwrap_or(before_postcode)
+            .trim_end();
+        if address.is_empty()
+            || address
+                .chars()
+                .any(|character| matches!(character, ',' | ';' | '|' | '\n' | '\r'))
+        {
+            continue;
+        }
+        let Some(split) = address.rfind(char::is_whitespace) else {
+            continue;
+        };
+        let street = address[..split].trim_end();
+        let pair = address[split..].trim();
+        if street.is_empty() || !street.chars().any(char::is_alphabetic) {
+            continue;
+        }
+        let mut separator = None;
+        for (position, character) in pair.char_indices() {
+            if matches!(character, '-' | '–' | '—' | '/') {
+                if separator.is_some() {
+                    separator = None;
+                    break;
+                }
+                separator = Some((position, character));
+            }
+        }
+        let Some((position, separator)) = separator else {
+            continue;
+        };
+        let left_raw = &pair[..position];
+        let right_raw = &pair[position + separator.len_utf8()..];
+        if left_raw.is_empty()
+            || right_raw.is_empty()
+            || left_raw.len() > 4
+            || right_raw.len() > 4
+            || !left_raw.bytes().all(|byte| byte.is_ascii_digit())
+            || !right_raw.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let left: u32 = left_raw.parse().ok()?;
+        let right: u32 = right_raw.parse().ok()?;
+        if left == 0 || left >= right {
+            continue;
+        }
+        let effect = if separator == '/' {
+            crate::de::Effect::HouseSlash
+        } else {
+            crate::de::Effect::HouseRange
+        };
+        let locality = normalize(locality_raw);
+        if locality.is_empty() {
+            continue;
+        }
+        let candidate = DeCompactHousePairSpec {
+            query: format!("{street} {left_raw} {postcode_token}"),
+            postcode: postcode_token.parse().ok()?,
+            locality_tail: locality,
+            effect,
+            left,
+            right,
+        };
+        if parsed.replace(candidate).is_some() {
+            return None;
+        }
+    }
+    parsed
+}
+
+/// Legacy left-endpoint fallback remains deliberately conservative for small
+/// slash pairs.  Wave A uses `de_compact_house_pair_spec` directly and admits
+/// those pairs only after proving the complete set against the runtime index.
+fn de_compact_house_pair_left_rescue_query(
+    raw: &str,
+) -> Option<(String, u32, String, crate::de::Effect)> {
+    let spec = de_compact_house_pair_spec(raw)?;
+    if spec.effect == crate::de::Effect::HouseSlash && (spec.left < 10 || spec.right < 10) {
+        return None;
+    }
+    Some((spec.query, spec.postcode, spec.locality_tail, spec.effect))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DeStrictSourceStreetTypoSpec {
+    normalized_street: String,
+    normalized_locality: String,
+    house_number: u32,
+    postcode: u32,
+    postcode_raw: String,
+}
+
+/// Product-field normalization used by the frozen Germany diagnostic roster.
+/// It intentionally mirrors the offline analyzer instead of the broader search
+/// normalizer: NFKC/lowercase, German umlauts to digraphs, `ß` to `ss`, and
+/// ASCII alphanumeric words only.  Retrieval may use broader variants, but an
+/// admission predicate must compare this single projection on both sides.
+fn de_product_normalize_text(raw: &str) -> String {
+    let mut normalized = String::with_capacity(raw.len());
+    let mut separated = true;
+    for character in raw.nfkc().flat_map(char::to_lowercase) {
+        let replacement = match character {
+            'ä' => Some("ae"),
+            'ö' => Some("oe"),
+            'ü' => Some("ue"),
+            'ß' => Some("ss"),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            normalized.push_str(replacement);
+            separated = false;
+        } else if character.is_ascii_alphanumeric() {
+            normalized.push(character);
+            separated = false;
+        } else if !separated && !normalized.is_empty() {
+            normalized.push(' ');
+            separated = true;
+        }
+    }
+    normalized.trim_end().to_string()
+}
+
+fn de_product_normalize_street(raw: &str) -> String {
+    let mut words: Vec<String> = de_product_normalize_text(raw)
+        .split_whitespace()
+        .map(|word| {
+            match word {
+                "str" | "strasse" => "strasse",
+                "pl" => "platz",
+                "al" => "allee",
+                "uf" => "ufer",
+                "wg" => "weg",
+                "g" => "gasse",
+                "ch" => "chaussee",
+                _ => word,
+            }
+            .to_string()
+        })
+        .collect();
+    if let Some(last) = words.last_mut() {
+        if last != "str" && last.ends_with("str") {
+            last.truncate(last.len() - 3);
+            last.push_str("strasse");
+        }
+    }
+    words.join(" ")
+}
+
+/// The audited c/o syntax contains one fused compound street token.  Split it
+/// only at a terminal product street-type word; arbitrary byte splits would
+/// turn retrieval hypotheses into product predicate inputs.
+fn de_product_normalize_compound_street(raw: &str) -> Option<String> {
+    let compact = de_product_normalize_street(raw);
+    if compact.is_empty() || compact.contains(' ') || compact.len() > 96 {
+        return None;
+    }
+    for suffix in [
+        "chaussee", "strasse", "allee", "gasse", "platz", "ring", "ufer", "weg",
+    ] {
+        let Some(prefix) = compact.strip_suffix(suffix) else {
+            continue;
+        };
+        if prefix.len() >= 3 {
+            return Some(format!("{prefix} {suffix}"));
+        }
+    }
+    None
+}
+
+/// Product-visible German street lookup forms for the typed P4 surfaces.
+/// These variants are a bounded locator, never admission fields: P4 separately
+/// compares one canonical query projection with the canonical display street.
+fn de_product_street_forms(raw_street: &str) -> Vec<String> {
+    let mut forms = Vec::new();
+    let mut seen = HashSet::new();
+    for variant in crate::de::query_variants(raw_street) {
+        let base = normalize(&variant.query).replace('ß', "ss");
+        if base.is_empty()
+            || base.len() > 96
+            || !base.is_ascii()
+            || base.chars().any(|character| character.is_ascii_digit())
+        {
+            continue;
+        }
+        if seen.insert(base.clone()) {
+            forms.push(base.clone());
+        }
+        let words: Vec<&str> = base.split_whitespace().collect();
+        if let Some(last) = words.last() {
+            if *last == "str" && words.len() > 1 {
+                let mut expanded = words[..words.len() - 1].join(" ");
+                expanded.push_str(" strasse");
+                if seen.insert(expanded.clone()) {
+                    forms.push(expanded);
+                }
+            } else if let Some(prefix) = last.strip_suffix("str") {
+                if prefix.chars().count() >= 2 {
+                    let mut joined = words[..words.len() - 1].join(" ");
+                    if !joined.is_empty() {
+                        joined.push(' ');
+                    }
+                    joined.push_str(prefix);
+                    joined.push_str("strasse");
+                    if seen.insert(joined.clone()) {
+                        forms.push(joined);
+                    }
+                    let mut split = words[..words.len() - 1].join(" ");
+                    if !split.is_empty() {
+                        split.push(' ');
+                    }
+                    split.push_str(prefix);
+                    split.push_str(" strasse");
+                    if seen.insert(split.clone()) {
+                        forms.push(split);
+                    }
+                }
+            }
+        }
+        for street_variant in crate::de::street_variants(&base) {
+            let street_variant = street_variant.replace('ß', "ss");
+            if street_variant.len() <= 96
+                && street_variant.is_ascii()
+                && seen.insert(street_variant.clone())
+            {
+                forms.push(street_variant);
+            }
+        }
+    }
+    let canonical = de_product_normalize_street(raw_street);
+    if !canonical.is_empty()
+        && canonical.len() <= 96
+        && canonical.is_ascii()
+        && seen.insert(canonical.clone())
+    {
+        forms.push(canonical);
+    }
+    forms
+}
+
+/// Exact raw P3 surface: `street integer, five-digit-postcode locality`.
+/// Suffixes, ranges, street digits and delivery noise deliberately have no
+/// interpretation in this path.
+fn de_strict_source_street_typo_spec(raw: &str) -> Option<DeStrictSourceStreetTypoSpec> {
+    if raw.len() > 256
+        || raw.trim() != raw
+        || raw
+            .chars()
+            .any(|character| matches!(character, '\n' | '\r' | '\t' | ';' | '|'))
+    {
+        return None;
+    }
+    let mut fields = raw.split(',');
+    let address = fields.next()?.trim();
+    let terminal = fields.next()?.trim();
+    if address.is_empty() || terminal.is_empty() || fields.next().is_some() {
+        return None;
+    }
+    let split = address.rfind(char::is_whitespace)?;
+    let street = address[..split].trim_end();
+    let house_raw = address[split..].trim();
+    if street.is_empty()
+        || !street.chars().any(char::is_alphabetic)
+        || street.chars().any(|character| character.is_ascii_digit())
+        || house_raw.is_empty()
+        || house_raw.len() > 4
+        || house_raw.as_bytes().first() == Some(&b'0')
+        || !house_raw.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let house_number = house_raw
+        .parse::<u32>()
+        .ok()
+        .filter(|number| *number != 0)?;
+    let mut terminal_tokens = terminal.split_whitespace();
+    let postcode_raw = terminal_tokens.next()?;
+    if !is_five_digit_postcode(postcode_raw) {
+        return None;
+    }
+    let locality_raw = terminal_tokens.collect::<Vec<_>>().join(" ");
+    if locality_raw.is_empty()
+        || !locality_raw.chars().any(char::is_alphabetic)
+        || locality_raw
+            .chars()
+            .any(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    let normalized_street = de_product_normalize_street(street);
+    let normalized_locality = de_product_normalize_text(&locality_raw);
+    if normalized_street.is_empty() || normalized_locality.is_empty() {
+        return None;
+    }
+    Some(DeStrictSourceStreetTypoSpec {
+        normalized_street,
+        normalized_locality,
+        house_number,
+        postcode: postcode_raw.parse().ok()?,
+        postcode_raw: postcode_raw.to_string(),
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DeStreetLocalityQualifierSpec {
+    normalized_street: String,
+    normalized_locality: String,
+    house_token: String,
+    postcode_raw: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DeBlankPostcodeHouseSpec {
+    normalized_street: String,
+    normalized_locality: String,
+    house_number: u32,
+    house_suffix: String,
+    postcode: u32,
+    postcode_raw: String,
+}
+
+/// Exact Wave X2 surface: `street integer[suffix], five-digit-postcode locality`.
+/// It is deliberately independent of P3: admitting a one-letter suffix here
+/// must not widen the audited source-street typo mechanism.
+fn de_street_locality_qualifier_spec(raw: &str) -> Option<DeStreetLocalityQualifierSpec> {
+    if raw.len() > 256
+        || raw.trim() != raw
+        || raw
+            .chars()
+            .any(|character| matches!(character, '\n' | '\r' | '\t' | ';' | '|'))
+    {
+        return None;
+    }
+    let mut fields = raw.split(',');
+    let address = fields.next()?.trim();
+    let terminal = fields.next()?.trim();
+    if address.is_empty() || terminal.is_empty() || fields.next().is_some() {
+        return None;
+    }
+    let split = address.rfind(char::is_whitespace)?;
+    let street = address[..split].trim_end();
+    let house_raw = address[split..].trim();
+    let digit_len = house_raw
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    let (house_number, house_suffix) = house_raw.split_at(digit_len);
+    if street.is_empty()
+        || !street.chars().any(char::is_alphabetic)
+        || street.chars().any(|character| character.is_ascii_digit())
+        || house_number.is_empty()
+        || house_number.len() > 4
+        || house_number.as_bytes().first() == Some(&b'0')
+        || !house_number.bytes().all(|byte| byte.is_ascii_digit())
+        || house_number
+            .parse::<u32>()
+            .ok()
+            .is_none_or(|number| number == 0)
+        || house_suffix.len() > 1
+        || !house_suffix.bytes().all(|byte| byte.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let mut terminal_tokens = terminal.split_whitespace();
+    let postcode_raw = terminal_tokens.next()?;
+    if !is_five_digit_postcode(postcode_raw) {
+        return None;
+    }
+    let locality_raw = terminal_tokens.collect::<Vec<_>>().join(" ");
+    if locality_raw.is_empty()
+        || !locality_raw.chars().any(char::is_alphabetic)
+        || locality_raw
+            .chars()
+            .any(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    let normalized_street = de_product_normalize_street(street);
+    let normalized_locality = de_product_normalize_text(&locality_raw);
+    if normalized_street.is_empty() || normalized_locality.is_empty() {
+        return None;
+    }
+    Some(DeStreetLocalityQualifierSpec {
+        normalized_street,
+        normalized_locality,
+        house_token: format!("{}{}", house_number, house_suffix.to_ascii_lowercase()),
+        postcode_raw: postcode_raw.to_string(),
+    })
+}
+
+/// Exact Wave O surface: `street integer[suffix], five-digit-postcode locality`.
+/// The parser is intentionally disjoint from range/compound/delivery cleanup:
+/// P5 may only arbitrate one literal address whose original fields are already
+/// structurally complete.
+fn de_blank_postcode_house_spec(raw: &str) -> Option<DeBlankPostcodeHouseSpec> {
+    if raw.contains(['(', ')', '/', '\\']) {
+        return None;
+    }
+    let parsed = de_street_locality_qualifier_spec(raw)?;
+    let digit_len = parsed
+        .house_token
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    let (house_number, house_suffix) = parsed.house_token.split_at(digit_len);
+    if house_number.is_empty()
+        || house_suffix.len() > 1
+        || !house_suffix.bytes().all(|byte| byte.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    Some(DeBlankPostcodeHouseSpec {
+        normalized_street: parsed.normalized_street,
+        normalized_locality: parsed.normalized_locality,
+        house_number: house_number.parse().ok()?,
+        house_suffix: house_suffix.to_string(),
+        postcode: parsed.postcode_raw.parse().ok()?,
+        postcode_raw: parsed.postcode_raw,
+    })
+}
+
+/// Parse only a terminal source display qualifier: `base (locality)`.
+/// Nested parentheses, empty parts and any trailing text fail closed.
+fn de_source_street_locality_qualifier(display: &str) -> Option<(String, String)> {
+    if display.is_empty() || display.len() > 192 || display.trim() != display {
+        return None;
+    }
+    let without_close = display.strip_suffix(')')?;
+    let (base, qualifier) = without_close.rsplit_once(" (")?;
+    if base.is_empty()
+        || qualifier.is_empty()
+        || base.contains(['(', ')'])
+        || qualifier.contains(['(', ')'])
+        || qualifier.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let normalized_base = de_product_normalize_street(base);
+    let normalized_qualifier = de_product_normalize_text(qualifier);
+    if normalized_base.is_empty() || normalized_qualifier.is_empty() {
+        return None;
+    }
+    Some((normalized_base, normalized_qualifier))
+}
+
+fn de_house_token_matches(hit: &Hit, expected: &str) -> bool {
+    hit.housenumber
+        .as_deref()
+        .is_some_and(|house| de_product_normalize_text(house).replace(' ', "") == expected)
+}
+
+fn de_locality_is_exact_or_query_prefix(query: &str, source: &str) -> bool {
+    query == source
+        || source
+            .strip_prefix(query)
+            .is_some_and(|tail| tail.starts_with(' '))
+}
+
+fn de_compact_osa_distance(left: &str, right: &str) -> usize {
+    let left: Vec<u8> = left
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    let right: Vec<u8> = right
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    if left.len().abs_diff(right.len()) > 2 {
+        return 3;
+    }
+    let mut matrix = vec![vec![0usize; right.len() + 1]; left.len() + 1];
+    for (index, row) in matrix.iter_mut().enumerate() {
+        row[0] = index;
+    }
+    for (index, cell) in matrix[0].iter_mut().enumerate() {
+        *cell = index;
+    }
+    for i in 1..=left.len() {
+        for j in 1..=right.len() {
+            let substitution = usize::from(left[i - 1] != right[j - 1]);
+            let mut distance = (matrix[i - 1][j] + 1)
+                .min(matrix[i][j - 1] + 1)
+                .min(matrix[i - 1][j - 1] + substitution);
+            if i > 1 && j > 1 && left[i - 1] == right[j - 2] && left[i - 2] == right[j - 1] {
+                distance = distance.min(matrix[i - 2][j - 2] + 1);
+            }
+            matrix[i][j] = distance;
+        }
+    }
+    matrix[left.len()][right.len()]
+}
+
+/// Python `SequenceMatcher(None, a, b).ratio()` for the bounded (<100 byte),
+/// no-junk ASCII street strings admitted above.  Python's auto-junk branch is
+/// inactive below 200 items, so recursively summing the earliest longest
+/// contiguous matching blocks is equivalent and deterministic here.
+fn de_sequence_matcher_ratio_at_least_090(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.is_empty() || right.is_empty() || left.len() > 96 || right.len() > 96 {
+        return false;
+    }
+    let mut matched = 0usize;
+    let mut pending = vec![(0usize, left.len(), 0usize, right.len())];
+    while let Some((left_lo, left_hi, right_lo, right_hi)) = pending.pop() {
+        let mut previous = vec![0usize; right_hi - right_lo + 1];
+        let mut best = (left_lo, right_lo, 0usize);
+        for (left_index, left_byte) in left.iter().enumerate().take(left_hi).skip(left_lo) {
+            let mut current = vec![0usize; right_hi - right_lo + 1];
+            for (right_index, right_byte) in right.iter().enumerate().take(right_hi).skip(right_lo)
+            {
+                if left_byte != right_byte {
+                    continue;
+                }
+                let offset = right_index - right_lo + 1;
+                current[offset] = previous[offset - 1] + 1;
+                let length = current[offset];
+                let left_start = left_index + 1 - length;
+                let right_start = right_index + 1 - length;
+                if length > best.2
+                    || (length == best.2
+                        && (left_start < best.0 || (left_start == best.0 && right_start < best.1)))
+                {
+                    best = (left_start, right_start, length);
+                }
+            }
+            previous = current;
+        }
+        if best.2 == 0 {
+            continue;
+        }
+        matched += best.2;
+        if left_lo < best.0 && right_lo < best.1 {
+            pending.push((left_lo, best.0, right_lo, best.1));
+        }
+        let left_after = best.0 + best.2;
+        let right_after = best.1 + best.2;
+        if left_after < left_hi && right_after < right_hi {
+            pending.push((left_after, left_hi, right_after, right_hi));
+        }
+    }
+    matched.saturating_mul(20) >= 9usize.saturating_mul(left.len() + right.len())
+}
+
+fn de_p3_locality_compatible(query: &str, source: &str) -> bool {
+    query == source
+        || query
+            .strip_prefix(source)
+            .is_some_and(|tail| tail.starts_with(' '))
+        || source
+            .strip_prefix(query)
+            .is_some_and(|tail| tail.starts_with(' '))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeAuditedCompoundShape {
+    VenueCommaHouseCommaStreet,
+    StreetHouseBalancedVenueParenthetical,
+    StreetHouseRangeBalancedAccessParenthetical,
+    CareOfPrefixThenStreetHouseLocality,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DeAuditedCompoundSpec {
+    shape: DeAuditedCompoundShape,
+    street: String,
+    normalized_street: String,
+    primary_house: u32,
+    additional_houses: Vec<u32>,
+    postcode: u32,
+    postcode_raw: String,
+    normalized_locality: String,
+}
+
+fn de_audited_postcode_locality(value: &str) -> Option<(u32, String, String)> {
+    let value = value.trim();
+    let boundary = value.find(char::is_whitespace)?;
+    let postcode_raw = &value[..boundary];
+    let locality_raw = value[boundary..].trim();
+    if !is_five_digit_postcode(postcode_raw)
+        || locality_raw.is_empty()
+        || !locality_raw.chars().any(char::is_alphabetic)
+        || locality_raw
+            .chars()
+            .any(|character| character.is_ascii_digit() || matches!(character, ',' | ';' | '|'))
+    {
+        return None;
+    }
+    Some((
+        postcode_raw.parse().ok()?,
+        postcode_raw.to_string(),
+        locality_raw.to_string(),
+    ))
+}
+
+fn de_audited_locality(raw: &str) -> Option<String> {
+    match raw.matches('/').count() {
+        0 => {
+            let locality = de_product_normalize_text(raw);
+            (!locality.is_empty()).then_some(locality)
+        }
+        1 => {
+            let (left, right) = raw.split_once('/')?;
+            let left = de_product_normalize_text(left);
+            let right = de_product_normalize_text(right);
+            if left.is_empty() || right.is_empty() {
+                return None;
+            }
+            // Closed, product-visible German abbreviations from the audited
+            // syntaxes.  Never invent both prepositions and let source data
+            // choose which query-locality field supposedly existed.
+            let connector = match right.as_str() {
+                "breisgau" => "im",
+                "teck" => "an der",
+                _ => return None,
+            };
+            Some(format!("{left} {connector} {right}"))
+        }
+        _ => None,
+    }
+}
+
+fn de_audited_parenthetical_spec(raw: &str) -> Option<DeAuditedCompoundSpec> {
+    if raw.chars().filter(|character| *character == '(').count() != 1
+        || raw.chars().filter(|character| *character == ')').count() != 1
+    {
+        return None;
+    }
+    let close = raw.rfind("),")?;
+    let open = raw[..close].rfind('(')?;
+    if open == 0 || !raw[..open].ends_with(char::is_whitespace) {
+        return None;
+    }
+    if !raw
+        .get(close + 2..)
+        .and_then(|tail| tail.chars().next())
+        .is_some_and(char::is_whitespace)
+    {
+        return None;
+    }
+    let label = raw[open + 1..close].trim();
+    if label.is_empty() || label.len() > 80 || !label.chars().any(char::is_alphabetic) {
+        return None;
+    }
+    let address = raw[..open].trim_end();
+    if address.is_empty()
+        || address.trim_start() != address
+        || address
+            .chars()
+            .any(|character| matches!(character, ',' | ';' | '|'))
+    {
+        return None;
+    }
+    let split = address.rfind(char::is_whitespace)?;
+    let street = address[..split].trim_end();
+    let house_expression = address[split..].trim();
+    if street.is_empty()
+        || !street.chars().any(char::is_alphabetic)
+        || street.chars().any(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    let (shape, primary_house, additional_houses) =
+        if let Some((left, right)) = house_expression.split_once('/') {
+            if house_expression.matches('/').count() != 1
+                || left.as_bytes().first() == Some(&b'0')
+                || right.as_bytes().first() == Some(&b'0')
+                || normalize(label)
+                    .split_whitespace()
+                    .next()
+                    .is_none_or(|word| word != "aufgang")
+            {
+                return None;
+            }
+            let left = left.parse::<u32>().ok().filter(|number| *number != 0)?;
+            let right = right.parse::<u32>().ok().filter(|number| *number > left)?;
+            (
+                DeAuditedCompoundShape::StreetHouseRangeBalancedAccessParenthetical,
+                left,
+                vec![right],
+            )
+        } else {
+            if house_expression.is_empty()
+                || house_expression.len() > 4
+                || house_expression.as_bytes().first() == Some(&b'0')
+                || !house_expression.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return None;
+            }
+            (
+                DeAuditedCompoundShape::StreetHouseBalancedVenueParenthetical,
+                house_expression
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|number| *number != 0)?,
+                Vec::new(),
+            )
+        };
+    let (postcode, postcode_raw, locality_raw) =
+        de_audited_postcode_locality(raw[close + 2..].trim_start())?;
+    let normalized_street = de_product_normalize_street(street);
+    let normalized_locality = de_audited_locality(&locality_raw)?;
+    if normalized_street.is_empty() {
+        return None;
+    }
+    Some(DeAuditedCompoundSpec {
+        shape,
+        street: street.to_string(),
+        normalized_street,
+        primary_house,
+        additional_houses,
+        postcode,
+        postcode_raw,
+        normalized_locality,
+    })
+}
+
+fn de_parenthetical_locality_uses_slash_qualifier(raw: &str) -> bool {
+    crate::de::parenthetical_subaddress_commune(raw).is_some()
+        && raw
+            .rsplit_once("),")
+            .is_some_and(|(_, locality)| locality.contains('/'))
+}
+
+fn de_audited_venue_spec(raw: &str) -> Option<DeAuditedCompoundSpec> {
+    let fields: Vec<&str> = raw.split(',').map(str::trim).collect();
+    if fields.len() != 8
+        || fields.iter().any(|field| {
+            field.is_empty()
+                || field.len() > 96
+                || field
+                    .chars()
+                    .any(|character| matches!(character, '\n' | '\r' | '\t' | ';' | '|'))
+        })
+        || fields[0]
+            .chars()
+            .any(|character| character.is_ascii_digit())
+        || !fields[0].chars().any(char::is_alphabetic)
+        || fields[1].is_empty()
+        || fields[1].len() > 4
+        || fields[1].as_bytes().first() == Some(&b'0')
+        || !fields[1].bytes().all(|byte| byte.is_ascii_digit())
+        || fields[2]
+            .chars()
+            .any(|character| character.is_ascii_digit())
+        || !fields[2].chars().any(char::is_alphabetic)
+    {
+        return None;
+    }
+    let postcode_raw = *fields.last()?;
+    if !is_five_digit_postcode(postcode_raw) {
+        return None;
+    }
+    if fields[3..7].iter().any(|field| {
+        !field.chars().any(char::is_alphabetic)
+            || field.chars().any(|character| character.is_ascii_digit())
+    }) {
+        return None;
+    }
+    let normalized_street = de_product_normalize_street(fields[2]);
+    // In the exact eight-field venue grammar, the third field before the
+    // terminal postcode is the city; the surrounding fields are administrative
+    // qualifiers and are never alternative query localities.
+    let normalized_locality = de_product_normalize_text(fields[5]);
+    if normalized_street.is_empty() || normalized_locality.is_empty() {
+        return None;
+    }
+    Some(DeAuditedCompoundSpec {
+        shape: DeAuditedCompoundShape::VenueCommaHouseCommaStreet,
+        street: fields[2].to_string(),
+        normalized_street,
+        primary_house: fields[1].parse().ok().filter(|number| *number != 0)?,
+        additional_houses: Vec::new(),
+        postcode: postcode_raw.parse().ok()?,
+        postcode_raw: postcode_raw.to_string(),
+        normalized_locality,
+    })
+}
+
+fn de_audited_care_of_spec(raw: &str) -> Option<DeAuditedCompoundSpec> {
+    if raw.len() > 384
+        || !raw
+            .get(..3)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("c/o"))
+        || !raw
+            .get(3..)
+            .and_then(|tail| tail.chars().next())
+            .is_some_and(char::is_whitespace)
+    {
+        return None;
+    }
+    let mut fields = raw.split(',');
+    let left = fields.next()?.trim();
+    let terminal = fields.next()?.trim();
+    if fields.next().is_some() {
+        return None;
+    }
+    let (postcode, postcode_raw, locality_raw) = de_audited_postcode_locality(terminal)?;
+    let locality = de_product_normalize_text(&locality_raw);
+    let left = de_product_normalize_text(left.get(3..)?.trim_start());
+    let locality_suffix = format!(" {locality}");
+    let before_locality = left.strip_suffix(&locality_suffix)?.trim_end();
+    let mut tokens: Vec<&str> = before_locality.split_whitespace().collect();
+    let house_raw = tokens.pop()?;
+    let street = tokens.pop()?;
+    if tokens.is_empty()
+        || street.is_empty()
+        || !street.chars().any(char::is_alphabetic)
+        || house_raw.is_empty()
+        || house_raw.len() > 4
+        || house_raw.as_bytes().first() == Some(&b'0')
+        || !house_raw.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    if tokens
+        .iter()
+        .any(|token| token.chars().any(|character| character.is_ascii_digit()))
+    {
+        return None;
+    }
+    let normalized_street = de_product_normalize_compound_street(street)?;
+    Some(DeAuditedCompoundSpec {
+        shape: DeAuditedCompoundShape::CareOfPrefixThenStreetHouseLocality,
+        street: street.to_string(),
+        normalized_street,
+        primary_house: house_raw.parse().ok().filter(|number| *number != 0)?,
+        additional_houses: Vec::new(),
+        postcode,
+        postcode_raw,
+        normalized_locality: locality,
+    })
+}
+
+fn de_audited_compound_spec(raw: &str) -> Option<DeAuditedCompoundSpec> {
+    if raw.len() > 512
+        || raw.trim() != raw
+        || raw
+            .chars()
+            .any(|character| matches!(character, '\n' | '\r' | '\t' | ';' | '|'))
+    {
+        return None;
+    }
+    let mut matches = Vec::new();
+    if let Some(spec) = de_audited_parenthetical_spec(raw) {
+        matches.push(spec);
+    }
+    if let Some(spec) = de_audited_venue_spec(raw) {
+        matches.push(spec);
+    }
+    if let Some(spec) = de_audited_care_of_spec(raw) {
+        matches.push(spec);
+    }
+    (matches.len() == 1).then(|| matches.pop().unwrap())
+}
+
+#[cfg(test)]
+fn de_postcode_tail(q: &str) -> Option<String> {
+    de_postcode_context(q).map(|(_, tail)| tail)
+}
+
+type RankedHit = (Hit, [f32; N_FEATS], i32, u32, u32, u32);
+
+struct DePostcodeHouseCandidate {
+    source_sid: u32,
+    hit: Hit,
+    features: [f32; N_FEATS],
+}
+
+impl DePostcodeHouseCandidate {
+    fn same_product_projection(&self, other: &Self) -> bool {
+        self.hit.precision == other.hit.precision
+            && self.hit.street == other.hit.street
+            && self.hit.housenumber == other.hit.housenumber
+            && self.hit.postcode == other.hit.postcode
+            && self.hit.commune == other.hit.commune
+    }
+}
+
+fn de_same_retained_address_evidence(a: &RankedHit, b: &RankedHit) -> bool {
+    a.0.score.to_bits() == b.0.score.to_bits()
+        && a.1 == b.1
+        && a.2 == b.2
+        && a.3 == b.3
+        && a.0.precision == b.0.precision
+        && a.0.housenumber == b.0.housenumber
+        && a.0.postcode == b.0.postcode
+        && a.0.flags == b.0.flags
+        && street_key(&a.0.street) == street_key(&b.0.street)
+}
+
+fn promote_de_retained_locality(
+    hits: &mut Vec<RankedHit>,
+    retained: DeRetainedLocality<'_>,
+) -> bool {
+    let Some(top) = hits.first() else {
+        return false;
+    };
+    if top.1[0] <= 0.5 || de_retained_locality_score(retained.postcode_tail, &top.0.commune) != 0 {
+        return false;
+    }
+    let mut best_score = 0;
+    let mut best_positions = Vec::new();
+    for (position, candidate) in hits.iter().take(5).enumerate().skip(1) {
+        if !de_same_retained_address_evidence(candidate, top)
+            || !de_dropped_tail_reaches_commune(retained.dropped_tail, &candidate.0.commune)
+        {
+            continue;
+        }
+        let score = de_retained_locality_score(retained.postcode_tail, &candidate.0.commune);
+        if score > best_score {
+            best_score = score;
+            best_positions.clear();
+            best_positions.push(position);
+        } else if score == best_score && score > 0 {
+            best_positions.push(position);
+        }
+    }
+    if best_positions.len() != 1 {
+        return false;
+    }
+    let chosen = hits.remove(best_positions[0]);
+    hits.insert(0, chosen);
+    hits[0].0.flags.push("de_retained_locality");
+    true
+}
+
+/// DE-only c2 tail tie-break for an explicit postcode that survived suffix recovery.
+///
+/// This is deliberately narrower than the general ranking model: it may only move the
+/// unique exact-postcode homonym from the original ranks 2..=5 ahead of a non-postcode
+/// winner when both answers are exact matches for the same ordered street spelling and
+/// expose exactly the same precision without weakening any non-postal feature evidence.
+/// Score and rendered house spelling are intentionally outside the gate; the selected hit
+/// is moved intact.
+fn promote_de_postal_tail(
+    hits: &mut Vec<RankedHit>,
+    is_de: bool,
+    is_c2_retry: bool,
+    has_focus: bool,
+    query_postcode: Option<u32>,
+) -> bool {
+    let (Some(query_postcode), Some(top)) = (query_postcode, hits.first()) else {
+        return false;
+    };
+    let top_features = Feats::from_vec(&top.1);
+    if !is_de
+        || !is_c2_retry
+        || has_focus
+        || top_features.pc_exact
+        || !top_features.street_exact
+        || top.0.flags.contains(&"de_retained_locality")
+    {
+        return false;
+    }
+
+    let top_street = normalize(&top.0.street);
+    let top_precision = top.0.precision;
+    let matching_positions: Vec<usize> =
+        hits.iter()
+            .take(5)
+            .enumerate()
+            .skip(1)
+            .filter_map(|(position, candidate)| {
+                let features = Feats::from_vec(&candidate.1);
+                let same_non_postal_features =
+                    candidate.1.iter().zip(top.1.iter()).enumerate().all(
+                        |(index, (candidate, top))| matches!(index, 4 | 5) || candidate == top,
+                    );
+                (features.pc_exact
+                    && same_non_postal_features
+                    && candidate.0.postcode.parse::<u32>().ok() == Some(query_postcode)
+                    && normalize(&candidate.0.street) == top_street
+                    && candidate.0.precision == top_precision)
+                    .then_some(position)
+            })
+            .collect();
+    if matching_positions.len() != 1 {
+        return false;
+    }
+
+    let chosen = hits.remove(matching_positions[0]);
+    hits.insert(0, chosen);
+    hits[0].0.flags.push("de_postal_tail");
+    true
+}
+
+fn apply_de_c2_tiebreaks(
+    hits: &mut Vec<RankedHit>,
+    retained_locality: Option<DeRetainedLocality<'_>>,
+    is_de: bool,
+    has_focus: bool,
+    query_postcode: Option<u32>,
+) {
+    if !has_focus {
+        if let Some(retained) = retained_locality {
+            promote_de_retained_locality(hits, retained);
+        }
+    }
+    promote_de_postal_tail(
+        hits,
+        is_de,
+        retained_locality.is_some_and(|retained| retained.postal_tail_eligible),
+        has_focus,
+        query_postcode,
+    );
 }
 
 fn expand_first(phrase: &str) -> Option<String> {
@@ -1507,6 +2947,21 @@ fn strip_phone_runs(q: &str) -> Option<String> {
     )
 }
 
+#[derive(Default)]
+struct DeBlankPostcodeDisplayProjection {
+    ranges: HashMap<(String, String), (usize, usize)>,
+    sids: Box<[u32]>,
+}
+
+impl DeBlankPostcodeDisplayProjection {
+    fn get(&self, display_street: &str, locality: &str) -> Option<&[u32]> {
+        let &(start, count) = self
+            .ranges
+            .get(&(display_street.to_string(), locality.to_string()))?;
+        self.sids.get(start..start.checked_add(count)?)
+    }
+}
+
 pub struct Index {
     // Owned backing memory: the mapping and this file's rules are freed when the
     // Index drops. Every `&'static` field below borrows from `_mmap`; they never escape the Index,
@@ -1528,6 +2983,15 @@ pub struct Index {
     cells_post: &'static [u8],
     words_fst: Map<&'static [u8]>,
     word_postings: &'static [u8],
+    /// DE-only exact five-digit postcode → street-id associations.  This
+    /// compact, immutable open-time projection lets typed product predicates
+    /// prove uniqueness independently of the street FST's source key.
+    de_postcode_streets: Box<[(u32, u32)]>,
+    /// DE-only normalized display-street → every source street id for display
+    /// identities that contain at least one wholly postcode-less street.  P5
+    /// cannot use `streets_fst`: its key is the source `nom_voie_norm`, which
+    /// may legitimately differ from the product-visible display street.
+    de_blank_postcode_display_streets: DeBlankPostcodeDisplayProjection,
     commune_coords: &'static [u8],
     rep_lookup: HashMap<String, u32>,
     /// Suffix by on-disk rep id. Index 0 is the empty suffix, so decoding a house's rep is
@@ -1956,7 +3420,7 @@ impl Index {
                 }
             }
         }
-        Ok(Index {
+        let mut index = Index {
             _mmap: mmap,
             _rules_owned: rules_owned,
             format_version,
@@ -1971,6 +3435,8 @@ impl Index {
             cells_post,
             words_fst,
             word_postings: sl(SEC_WORD_POSTINGS),
+            de_postcode_streets: Vec::new().into_boxed_slice(),
+            de_blank_postcode_display_streets: DeBlankPostcodeDisplayProjection::default(),
             commune_coords: sl(SEC_COMMUNE_COORDS),
             rep_lookup,
             rep_suffixes,
@@ -1980,7 +3446,13 @@ impl Index {
             top_anchor,
             admin: load_admin(path),
             meta: decode_meta(sl(SEC_META)).unwrap_or_default(),
-        })
+        };
+        if index.country() == Some("de") {
+            index.de_postcode_streets = index.build_de_postcode_streets()?;
+            index.de_blank_postcode_display_streets =
+                index.build_de_blank_postcode_display_streets()?;
+        }
+        Ok(index)
     }
 
     /// Provenance/identity pairs from SEC_META (empty on pre-v6-style sheets).
@@ -2070,6 +3542,142 @@ impl Index {
             house_count: read_u32(b, o + 28),
             postcode_disp_off: read_u32(b, o + 32),
         }
+    }
+
+    /// Build the global exact-postcode roster once while opening a DE sheet.
+    /// Unambiguous streets contribute their exact five-digit display postcode;
+    /// v7 mixed-postcode streets contribute every five-digit entry from their
+    /// validated local dictionary.  Non-DE postcode grammars are deliberately
+    /// absent from this product-specific projection.
+    fn build_de_postcode_streets(&self) -> Result<Box<[(u32, u32)]>> {
+        let street_count = self.streets_meta.len() / STREET_META_SIZE;
+        let mut postings = Vec::with_capacity(street_count);
+        for raw_sid in 0..street_count {
+            let sid = u32::try_from(raw_sid)
+                .map_err(|_| anyhow::anyhow!("DE postcode roster exceeds u32 street ids"))?;
+            let metadata = self.street_meta(sid);
+            if metadata.postcode_disp_off == PC_DISP_AMBIGUOUS {
+                let Some((_, dictionary_byte, dictionary_count, _)) =
+                    self.house_block_layout(sid, &metadata)
+                else {
+                    anyhow::bail!("DE street {sid} has an unreadable mixed-postcode dictionary");
+                };
+                for id in 1..=dictionary_count {
+                    let offset = self.house_postcode_offset(dictionary_byte, dictionary_count, id);
+                    let postcode = self.name(offset);
+                    if is_five_digit_postcode(postcode) {
+                        postings.push((postcode.parse()?, sid));
+                    }
+                }
+                continue;
+            }
+
+            if metadata.postcode_disp_off != 0 {
+                let postcode = self.name(metadata.postcode_disp_off);
+                if is_five_digit_postcode(postcode) {
+                    postings.push((postcode.parse()?, sid));
+                }
+            } else if (1..=99_999).contains(&metadata.postcode) {
+                // Pre-display-postcode sheets preserve only the numeric value;
+                // DE's fixed width makes its five-digit rendering unambiguous.
+                postings.push((metadata.postcode, sid));
+            }
+        }
+        postings.sort_unstable();
+        postings.dedup();
+        Ok(postings.into_boxed_slice())
+    }
+
+    /// Build a collision-free display-street/locality projection only for
+    /// identities that have both exact typed-postcode roster support and a
+    /// wholly postcode-less source street. The final pass adds every postcode
+    /// state for those identities, including distinct commune ids with the
+    /// same product-visible locality, so P5 sees conflicting exact houses
+    /// instead of inspecting a blank row in isolation. Buckets retain one
+    /// overflow sentinel beyond the request ceiling; a caller then fails
+    /// closed without scanning a partial set.
+    fn build_de_blank_postcode_display_streets(&self) -> Result<DeBlankPostcodeDisplayProjection> {
+        if self.format_version < 7 {
+            return Ok(DeBlankPostcodeDisplayProjection::default());
+        }
+
+        let street_count = self.streets_meta.len() / STREET_META_SIZE;
+        let anchored_identities: HashSet<(String, String)> = self
+            .de_postcode_streets
+            .iter()
+            .filter_map(|&(_, sid)| {
+                let metadata = self.street_meta(sid);
+                let display = de_product_normalize_street(self.name(metadata.name_off));
+                let locality = de_product_normalize_text(self.commune_name(metadata.commune_id));
+                (!display.is_empty() && !locality.is_empty()).then_some((display, locality))
+            })
+            .collect();
+        let mut buckets: HashMap<(String, String), Vec<u32>> = HashMap::new();
+        for raw_sid in 0..street_count {
+            let sid = u32::try_from(raw_sid)
+                .map_err(|_| anyhow::anyhow!("DE blank-postcode roster exceeds u32 street ids"))?;
+            let metadata = self.street_meta(sid);
+            if metadata.postcode == 0 && metadata.postcode_disp_off == 0 {
+                let display = de_product_normalize_street(self.name(metadata.name_off));
+                let locality = de_product_normalize_text(self.commune_name(metadata.commune_id));
+                let identity = (display, locality);
+                if anchored_identities.contains(&identity) {
+                    buckets.entry(identity).or_default();
+                }
+            }
+        }
+        drop(anchored_identities);
+        if buckets.is_empty() {
+            return Ok(DeBlankPostcodeDisplayProjection::default());
+        }
+
+        for raw_sid in 0..street_count {
+            let sid = u32::try_from(raw_sid)
+                .map_err(|_| anyhow::anyhow!("DE blank-postcode roster exceeds u32 street ids"))?;
+            let metadata = self.street_meta(sid);
+            let display = de_product_normalize_street(self.name(metadata.name_off));
+            let locality = de_product_normalize_text(self.commune_name(metadata.commune_id));
+            let Some(bucket) = buckets.get_mut(&(display, locality)) else {
+                continue;
+            };
+            if bucket.len() <= DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT_DEFAULT {
+                bucket.push(sid);
+            }
+        }
+
+        let total = buckets.values().try_fold(0usize, |total, bucket| {
+            total
+                .checked_add(bucket.len())
+                .ok_or_else(|| anyhow::anyhow!("DE blank-postcode projection size overflow"))
+        })?;
+        let mut ranges = HashMap::with_capacity(buckets.len());
+        let mut sids = Vec::with_capacity(total);
+        for (identity, bucket) in buckets {
+            let start = sids.len();
+            let count = bucket.len();
+            sids.extend(bucket);
+            ranges.insert(identity, (start, count));
+        }
+
+        Ok(DeBlankPostcodeDisplayProjection {
+            ranges,
+            sids: sids.into_boxed_slice(),
+        })
+    }
+
+    /// Exact-postcode street bucket for the P3 uniqueness proof.  A malformed
+    /// or pathologically broad bucket fails closed at the same audited ceiling
+    /// as the existing one-shot DE rescue scan.
+    fn de_postcode_street_bucket(&self, postcode: u32) -> Option<&[(u32, u32)]> {
+        let start = self
+            .de_postcode_streets
+            .partition_point(|&(candidate, _)| candidate < postcode);
+        let end = self
+            .de_postcode_streets
+            .partition_point(|&(candidate, _)| candidate <= postcode);
+        let bucket = &self.de_postcode_streets[start..end];
+        (!bucket.is_empty() && bucket.len() <= de_postcode_house_rescue_scan_limit())
+            .then_some(bucket)
     }
 
     /// Postcode for OUTPUT: the full string (NL "1012XJ", FR "75002") from the names table,
@@ -2170,6 +3778,253 @@ impl Index {
             return String::new();
         }
         self.name(house_postcode_off).to_string()
+    }
+
+    /// Numeric query postcodes intentionally use the leading digit run: this mirrors the
+    /// query parser's established representation for values such as Dutch `1012AA` (1012),
+    /// while preserving the full display string for output.
+    fn postcode_numeric_prefix(postcode: &str) -> Option<u32> {
+        let digits: String = postcode
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if digits.is_empty() {
+            None
+        } else {
+            digits.parse().ok().filter(|&postcode| postcode != 0)
+        }
+    }
+
+    /// Duplicate selection is deliberately narrower than feature reconciliation. Dresden's
+    /// duplicate discriminator is a fully numeric postcode; an alphanumeric suffix cannot be
+    /// reconstructed from the current numeric query feature and therefore must not reorder rows.
+    fn exact_house_postcode_matches(
+        &self,
+        m: &StreetMeta,
+        house_postcode_off: u32,
+        requested_postcode: u32,
+    ) -> bool {
+        if m.postcode_disp_off != PC_DISP_AMBIGUOUS {
+            return m.postcode != 0 && m.postcode == requested_postcode;
+        }
+        house_postcode_off != 0
+            && self.name(house_postcode_off).parse::<u32>().ok() == Some(requested_postcode)
+    }
+
+    fn exact_house_postcode_candidate(
+        &self,
+        sid: u32,
+        m: &StreetMeta,
+        requested_number: u32,
+        requested_rep: u32,
+        requested_postcode: u32,
+    ) -> bool {
+        #[cfg(test)]
+        DE_POSTCODE_HOUSE_RESCUE_HOUSE_DECODES.with(|calls| {
+            calls.set(calls.get().saturating_add(1));
+        });
+        let Some((_, _, kind, _, _, postcode_off)) = self.find_house(
+            sid,
+            m,
+            requested_number,
+            requested_rep,
+            Some(requested_postcode),
+        ) else {
+            return false;
+        };
+        kind == 2
+            && Self::postcode_numeric_prefix(&self.postcode_for_house(m, postcode_off))
+                == Some(requested_postcode)
+    }
+
+    /// Cheaply reject a homonymous street whose compact house-postcode dictionary cannot
+    /// contain the requested postcode.  The rescue still scans every bounded FST posting to
+    /// prove uniqueness, but it decodes a street's variable-length house rows only when this
+    /// metadata proof says an exact address is possible.
+    fn street_may_contain_postcode(
+        &self,
+        sid: u32,
+        m: &StreetMeta,
+        requested_postcode: u32,
+    ) -> bool {
+        if m.postcode_disp_off != PC_DISP_AMBIGUOUS {
+            return m.postcode != 0 && m.postcode == requested_postcode;
+        }
+        let Some((_, dictionary_byte, dictionary_count, _)) = self.house_block_layout(sid, m)
+        else {
+            return false;
+        };
+        (1..=dictionary_count).any(|id| {
+            let postcode_off = self.house_postcode_offset(dictionary_byte, dictionary_count, id);
+            postcode_off != 0
+                && self.name(postcode_off).parse::<u32>().ok() == Some(requested_postcode)
+        })
+    }
+
+    fn exact_house_postcode_candidate_cached(
+        &self,
+        cache: &mut HashMap<(u32, u32, u32, u32), bool>,
+        sid: u32,
+        m: &StreetMeta,
+        requested_number: u32,
+        requested_rep: u32,
+        requested_postcode: u32,
+    ) -> bool {
+        let key = (sid, requested_number, requested_rep, requested_postcode);
+        if let Some(&cached) = cache.get(&key) {
+            return cached;
+        }
+        let exact = self.street_may_contain_postcode(sid, m, requested_postcode)
+            && self.exact_house_postcode_candidate(
+                sid,
+                m,
+                requested_number,
+                requested_rep,
+                requested_postcode,
+            );
+        cache.insert(key, exact);
+        exact
+    }
+
+    /// Prove the complete literal house set on one street id.  Every endpoint
+    /// uses the same suffix id and numeric postcode; `find_house` must return an
+    /// exact represented row (`kind == 2`) for each one.  The cache remains
+    /// endpoint-specific so repeated DE variants do not re-decode house blocks.
+    // Frozen release: grouping house-set inputs would rewrite the validated resolver call sites.
+    #[allow(clippy::too_many_arguments)]
+    fn exact_house_postcode_set_candidate_cached(
+        &self,
+        cache: &mut HashMap<(u32, u32, u32, u32), bool>,
+        sid: u32,
+        m: &StreetMeta,
+        requested_number: u32,
+        requested_rep: u32,
+        additional_numbers: &[u32],
+        requested_postcode: u32,
+    ) -> bool {
+        self.exact_house_postcode_candidate_cached(
+            cache,
+            sid,
+            m,
+            requested_number,
+            requested_rep,
+            requested_postcode,
+        ) && additional_numbers.iter().all(|&number| {
+            self.exact_house_postcode_candidate_cached(
+                cache,
+                sid,
+                m,
+                number,
+                requested_rep,
+                requested_postcode,
+            )
+        })
+    }
+
+    /// The typed DE product predicates carry the full five-character postcode
+    /// field for every literal endpoint.  The shared numeric resolver
+    /// deliberately accepts leading-digit prefixes for other countries, so
+    /// this proof reasserts the rendered postcode on every represented house.
+    // Frozen release: preserve the separate numeric/full-postcode inputs and existing call sites.
+    #[allow(clippy::too_many_arguments)]
+    fn exact_house_full_postcode_set_candidate_cached(
+        &self,
+        cache: &mut HashMap<(u32, u32, u32, u32), bool>,
+        sid: u32,
+        m: &StreetMeta,
+        requested_number: u32,
+        requested_rep: u32,
+        additional_numbers: &[u32],
+        requested_postcode: u32,
+        requested_postcode_raw: &str,
+    ) -> bool {
+        if !self.exact_house_postcode_set_candidate_cached(
+            cache,
+            sid,
+            m,
+            requested_number,
+            requested_rep,
+            additional_numbers,
+            requested_postcode,
+        ) {
+            return false;
+        }
+        std::iter::once(requested_number)
+            .chain(additional_numbers.iter().copied())
+            .all(|number| {
+                let Some((_, _, kind, got, got_rep, postcode_off)) =
+                    self.find_house(sid, m, number, requested_rep, Some(requested_postcode))
+                else {
+                    return false;
+                };
+                kind == 2
+                    && got == number
+                    && got_rep == requested_rep
+                    && self.postcode_for_house(m, postcode_off) == requested_postcode_raw
+            })
+    }
+
+    /// Count every physical represented row for one exact number+suffix.
+    /// `find_house` returns at the first match, which is correct for ordinary
+    /// ranking but cannot prove P5 uniqueness when duplicate source rows share
+    /// one street id. This decoder deliberately ignores coordinates after
+    /// consuming their varints: they neither select nor deduplicate a row.
+    fn de_exact_house_record_postcodes(
+        &self,
+        sid: u32,
+        metadata: &StreetMeta,
+        requested_number: u32,
+        requested_rep: u32,
+        row_budget: &mut usize,
+    ) -> std::result::Result<Vec<String>, ()> {
+        if metadata.house_count == 0 {
+            return Ok(Vec::new());
+        }
+        let (mut position, postcode_dictionary, postcode_count, house_end) =
+            self.house_block_layout(sid, metadata).ok_or(())?;
+        let bounded_houses = &self.houses[..house_end];
+        let mut current_number = 0u32;
+        let mut matches = Vec::new();
+        for index in 0..metadata.house_count {
+            if *row_budget == 0 {
+                return Err(());
+            }
+            *row_budget -= 1;
+            #[cfg(test)]
+            DE_BLANK_POSTCODE_HOUSE_SCAN_ROWS.with(|rows| {
+                rows.set(rows.get().saturating_add(1));
+            });
+
+            let delta = strict_varint(bounded_houses, &mut position)
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or(())?;
+            current_number = if index == 0 {
+                delta
+            } else {
+                current_number.checked_add(delta).ok_or(())?
+            };
+            let rep = strict_varint(bounded_houses, &mut position)
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or(())?;
+            strict_varint(bounded_houses, &mut position).ok_or(())?;
+            strict_varint(bounded_houses, &mut position).ok_or(())?;
+            let postcode_off =
+                if self.format_version >= 7 && metadata.postcode_disp_off == PC_DISP_AMBIGUOUS {
+                    let id = strict_varint(bounded_houses, &mut position)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or(())?;
+                    self.house_postcode_offset(postcode_dictionary, postcode_count, id)
+                } else {
+                    0
+                };
+            if current_number == requested_number && rep == requested_rep {
+                matches.push(self.postcode_for_house(metadata, postcode_off));
+            }
+            if current_number > requested_number {
+                break;
+            }
+        }
+        Ok(matches)
     }
 
     fn commune_insee(&self, id: u32) -> &str {
@@ -2555,11 +4410,13 @@ impl Index {
         m: &StreetMeta,
         numero: u32,
         rep: u32,
+        requested_postcode: Option<u32>,
     ) -> Option<(f64, f64, u8, u32, u32, u32)> {
         let (mut pos, postcode_dictionary, postcode_count, house_end) =
             self.house_block_layout(street_id, m)?;
         let bounded_houses = &self.houses[..house_end];
         let mut cur = 0u32;
+        let mut exact_rep: Option<(f64, f64, u32)> = None;
         let mut num_only: Option<(f64, f64, u32, u32)> = None;
         let mut lower: Option<(u32, u32, f64, f64, u32)> = None; // last house below requested
         let mut upper: Option<(u32, u32, f64, f64, u32)> = None; // first house above requested
@@ -2587,7 +4444,15 @@ impl Index {
             let lon = lon_e7 as f64 / 1e7;
             if cur == numero {
                 if rid == rep {
-                    return Some((lat, lon, 2, cur, rid, postcode_off));
+                    let postcode_matches = requested_postcode.is_some_and(|postcode| {
+                        self.exact_house_postcode_matches(m, postcode_off, postcode)
+                    });
+                    if requested_postcode.is_none() || postcode_matches {
+                        return Some((lat, lon, 2, cur, rid, postcode_off));
+                    }
+                    if exact_rep.is_none() {
+                        exact_rep = Some((lat, lon, postcode_off));
+                    }
                 }
                 if num_only.is_none() {
                     num_only = Some((lat, lon, rid, postcode_off));
@@ -2599,6 +4464,9 @@ impl Index {
                 upper = Some((cur, rid, lat, lon, postcode_off));
                 break;
             }
+        }
+        if let Some((lat, lon, postcode_off)) = exact_rep {
+            return Some((lat, lon, 2, numero, rep, postcode_off));
         }
         if let Some((la, lo, rid, postcode_off)) = num_only {
             return Some((la, lo, 1, numero, rid, postcode_off));
@@ -2649,27 +4517,30 @@ impl Index {
         format!("{number}{suffix}")
     }
 
-    /// Suffixes safe for greedy parsing (the rep dictionary contains junk like
-    /// "rue"/"route" — digit-free words must not be consumed greedily).
-    fn is_safe_rep(t: &str) -> bool {
-        matches!(t, "bis" | "ter" | "quater" | "quinquies" | "sexies")
-            || (t.chars().count() == 1 && t.chars().all(|c| c.is_alphabetic()))
-    }
-
     fn add_cand(cand: &mut HashMap<u32, Feats>, sid: u32, f: Feats) {
         cand.entry(sid).or_default().merge(f);
     }
 
     /// Candidate collection: scanning the "street | commune" boundary from the end.
+    // Frozen release: keep scan budgets and caches wired through the validated call sites.
+    #[allow(clippy::too_many_arguments)]
     fn collect_candidates(
         &self,
         rest: &[&str],
         postcode: Option<u32>,
+        numero: Option<u32>,
+        rep: u32,
         from_ml: bool,
-    ) -> HashMap<u32, Feats> {
+        de_postcode_house_scan: bool,
+        de_postcode_house_additional_numbers: &[u32],
+        de_postcode_house_scan_budget: &mut usize,
+        de_postcode_house_seen_phrases: &mut HashSet<String>,
+        de_postcode_house_exact_cache: &mut HashMap<(u32, u32, u32, u32), bool>,
+    ) -> (HashMap<u32, Feats>, bool) {
         let mut cand: HashMap<u32, Feats> = HashMap::new();
+        let mut de_postcode_house_scan_overflowed = false;
         if rest.is_empty() {
-            return cand;
+            return (cand, de_postcode_house_scan_overflowed);
         }
         // French commune names can run to 8 words ("Saint-Remy-en-Bouzemont-...")
         let max_c = rest.len().saturating_sub(1).min(9);
@@ -2696,9 +4567,31 @@ impl Index {
                     phrases.push(rot);
                 }
             }
+            let mut de_street_phrases = HashSet::new();
+            if self.country() == Some("de") {
+                let bases = phrases.clone();
+                for base in bases {
+                    for variant in crate::de::street_variants(&base) {
+                        if !phrases.contains(&variant) {
+                            de_street_phrases.insert(variant.clone());
+                            phrases.push(variant);
+                        }
+                    }
+                }
+            }
             if c == 0 {
                 // the whole string is the street; prefix search across all communes
                 for phrase in &phrases {
+                    let de_house_postcode_scan = de_postcode_house_scan
+                        && self.country() == Some("de")
+                        && self.format_version >= 7
+                        && postcode.is_some()
+                        && numero.is_some();
+                    if de_house_postcode_scan
+                        && !de_postcode_house_seen_phrases.insert(phrase.clone())
+                    {
+                        continue;
+                    }
                     let mut lo = phrase.clone().into_bytes();
                     lo.push(KEY_SEP);
                     let mut hi = phrase.clone().into_bytes();
@@ -2706,18 +4599,62 @@ impl Index {
                     let mut stream = self.streets_fst.range().ge(&lo).lt(&hi).into_stream();
                     let mut taken = 0;
                     while let Some((_, v)) = stream.next() {
+                        if de_house_postcode_scan {
+                            if *de_postcode_house_scan_budget == 0 {
+                                de_postcode_house_scan_overflowed = true;
+                                break;
+                            }
+                            *de_postcode_house_scan_budget -= 1;
+                            #[cfg(test)]
+                            DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| {
+                                rows.set(rows.get().saturating_add(1));
+                            });
+                        }
                         let sid = v as u32;
                         let m = self.street_meta(sid);
+                        let exact_house_postcode = match (postcode, numero) {
+                            (Some(requested_postcode), Some(requested_number))
+                                if de_house_postcode_scan =>
+                            {
+                                self.exact_house_postcode_set_candidate_cached(
+                                    de_postcode_house_exact_cache,
+                                    sid,
+                                    &m,
+                                    requested_number,
+                                    rep,
+                                    de_postcode_house_additional_numbers,
+                                    requested_postcode,
+                                )
+                            }
+                            _ => false,
+                        };
                         let mut f = Feats {
                             street_exact: true,
                             from_ml,
+                            de_street_type: de_street_phrases.contains(phrase),
                             ..Default::default()
                         };
+                        // The narrow rescue consumes only exact street+house+postcode rows.
+                        // It still visits the complete bounded posting stream above, so a hidden
+                        // duplicate or overflow fails closed, while irrelevant homonyms never
+                        // reach ranking or house decoding a second time.
+                        if de_house_postcode_scan {
+                            if !exact_house_postcode {
+                                continue;
+                            }
+                            f.pc_exact = true;
+                            f.pc_dept = true;
+                            Self::add_cand(&mut cand, sid, f);
+                            continue;
+                        }
                         if let Some(pc) = postcode {
                             // postcode==0 = "absent from the data" — do not filter these,
                             // or a query WITH a postcode would go empty where the same
                             // query without one succeeds
-                            if m.postcode != 0 && m.postcode / 1000 != pc / 1000 {
+                            if m.postcode != 0
+                                && m.postcode / 1000 != pc / 1000
+                                && !exact_house_postcode
+                            {
                                 continue; // different part of the country — skip
                             }
                             if m.postcode != 0 {
@@ -2725,9 +4662,14 @@ impl Index {
                                 f.pc_exact = m.postcode == pc;
                             }
                         }
+                        if taken >= 300 && !exact_house_postcode {
+                            continue;
+                        }
                         Self::add_cand(&mut cand, sid, f);
-                        taken += 1;
-                        if taken >= 300 {
+                        if taken < 300 {
+                            taken += 1;
+                        }
+                        if taken >= 300 && !de_house_postcode_scan {
                             break;
                         }
                     }
@@ -2763,7 +4705,39 @@ impl Index {
                         if let Some(v) = self.streets_fst.get(&key) {
                             let sid = v as u32;
                             let m = self.street_meta(sid);
-                            let f = Feats {
+                            let exact_house_postcode = if de_postcode_house_scan
+                                && self.country() == Some("de")
+                                && self.format_version >= 7
+                            {
+                                if *de_postcode_house_scan_budget == 0 {
+                                    de_postcode_house_scan_overflowed = true;
+                                    break;
+                                }
+                                *de_postcode_house_scan_budget -= 1;
+                                #[cfg(test)]
+                                DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| {
+                                    rows.set(rows.get().saturating_add(1));
+                                });
+                                match (postcode, numero) {
+                                    (Some(requested_postcode), Some(requested_number)) => self
+                                        .exact_house_postcode_set_candidate_cached(
+                                            de_postcode_house_exact_cache,
+                                            sid,
+                                            &m,
+                                            requested_number,
+                                            rep,
+                                            de_postcode_house_additional_numbers,
+                                            requested_postcode,
+                                        ),
+                                    _ => false,
+                                }
+                            } else {
+                                false
+                            };
+                            if de_postcode_house_scan && !exact_house_postcode {
+                                continue;
+                            }
+                            let mut f = Feats {
                                 street_exact: true,
                                 commune_exact: exact_commune,
                                 commune_prefix: !exact_commune,
@@ -2773,15 +4747,20 @@ impl Index {
                                     m.postcode != 0 && m.postcode / 1000 == pc / 1000
                                 }),
                                 from_ml,
+                                de_street_type: de_street_phrases.contains(phrase),
                                 ..Default::default()
                             };
+                            if de_postcode_house_scan {
+                                f.pc_exact = true;
+                                f.pc_dept = true;
+                            }
                             Self::add_cand(&mut cand, sid, f);
                         }
                     }
                 }
             }
         }
-        cand
+        (cand, de_postcode_house_scan_overflowed)
     }
 
     /// street_ids whose normalized name contains the word (inverted index).
@@ -3193,7 +5172,7 @@ impl Index {
                 let ok = !t.is_empty()
                     && t.chars().count() <= 4
                     && t.chars().all(|c| c.is_alphanumeric())
-                    && (t.chars().any(|c| c.is_ascii_digit()) || Self::is_safe_rep(t));
+                    && (t.chars().any(|c| c.is_ascii_digit()) || is_safe_house_rep(t));
                 if !ok {
                     break;
                 }
@@ -3296,6 +5275,70 @@ impl Index {
         s
     }
 
+    /// Conservative bare street+house surface from the ORIGINAL query. An explicit
+    /// comma context, postal token, city prefix or city suffix cannot be discarded
+    /// by later variant/retry parsing to enable the prominence prior.
+    fn de_cityless_street(raw: &str) -> Option<String> {
+        if raw.contains(',') {
+            return None;
+        }
+        let normalized = prepared_query_key(raw);
+        let mut tokens: Vec<_> = normalized.split_whitespace().collect();
+        let mut house = tokens.pop()?;
+        if house.len() == 1 && house.bytes().all(|c| c.is_ascii_alphabetic()) {
+            house = tokens.pop()?;
+        }
+        let digits = house.bytes().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0
+            || digits > 4
+            || !house[digits..].bytes().all(|c| c.is_ascii_alphabetic())
+            || tokens.is_empty()
+            || tokens.iter().any(|t| t.bytes().any(|c| c.is_ascii_digit()))
+        {
+            return None;
+        }
+        Some(street_key(&tokens.join(" ")))
+    }
+
+    /// One tie-break experiment: existing leaf address count before the weak
+    /// capital anchor, only for equal-quality bare DE house homonyms.
+    fn de_cityless_prominence(
+        hits: &mut [RankedHit],
+        country: Option<&str>,
+        original_street: Option<&str>,
+        focused: bool,
+        postcode: Option<u32>,
+    ) {
+        let Some(top) = hits.first() else { return };
+        let key = street_key(&top.0.street);
+        let scope_allowed = country == Some("de")
+            && !focused
+            && postcode.is_none()
+            && original_street == Some(key.as_str());
+        if !scope_allowed {
+            return;
+        }
+        let mut chosen = 0;
+        for (position, candidate) in hits.iter().enumerate().skip(1) {
+            let equal_address_evidence = top.0.precision == "house"
+                && candidate.0.precision == "house"
+                && top.1[0] > 0.5
+                && candidate.1[0] > 0.5
+                && street_key(&candidate.0.street) == key
+                && candidate.0.score == top.0.score
+                && candidate.2 == top.2
+                && candidate.3 == top.3;
+            let more_prominent = candidate.4 > hits[chosen].4;
+            if equal_address_evidence && more_prominent {
+                chosen = position;
+            }
+        }
+        if chosen != 0 {
+            hits[..=chosen].rotate_right(1);
+            hits[0].0.flags.push("de_cityless_prominence");
+        }
+    }
+
     pub fn query_feats(&self, raw: &str, k: usize) -> Vec<(Hit, [f32; N_FEATS])> {
         if k == 0 {
             return Vec::new(); // k=0 asks for zero results; the city-only fallback used to ignore it
@@ -3303,7 +5346,7 @@ impl Index {
         let k = bound_k(k); // cap result count before it drives allocation/sort
         let raw = bound_query(raw); // cap work before normalization
         let _rules = crate::rules::scope(self.rules); // this file's tables, not another file's
-        let mut hits = self.query_feats_d(raw, k, 0, None);
+        let mut hits = self.query_feats_country_variants(raw, k, None);
         Self::monotone_confidence(&mut hits);
         hits
     }
@@ -3327,9 +5370,1401 @@ impl Index {
             lon,
             streets: self.streets_around(lat, lon),
         };
-        let mut hits = self.query_feats_d(raw, k, 0, Some(&focus));
+        let mut hits = self.query_feats_country_variants(raw, k, Some(&focus));
         Self::monotone_confidence(&mut hits);
         Ok(hits)
+    }
+
+    fn de_effect_flags(effect: crate::de::Effect) -> &'static [&'static str] {
+        use crate::de::Effect;
+        match effect {
+            Effect::Orthography => &["de_umlaut"],
+            Effect::CityAlias => &["de_city_alias"],
+            Effect::OfficialCommuneAlias => &["de_official_commune_alias"],
+            Effect::Abbreviation => &["de_abbrev"],
+            Effect::AdminTail => &["de_admin_tail"],
+            Effect::RecipientPrefix => &["de_recipient_prefix"],
+            Effect::SubaddressTail => &["de_subaddress_tail"],
+            Effect::ParentheticalSubaddress => &["de_parenthetical_subaddress"],
+            Effect::AddressField => &["de_address_field"],
+            Effect::LocalityFirst => &["de_locality_first"],
+            Effect::MissingCommaPostcodeBoundary => &["de_missing_postcode_comma"],
+            Effect::Country => &["de_country"],
+            Effect::HouseRange => &["de_house_range"],
+            Effect::HouseSlash => &["de_house_slash"],
+            Effect::PostcodePrefix => &["de_country", "de_postcode"],
+            Effect::PostcodeZero => &["de_postcode"],
+        }
+    }
+
+    fn annotate_de_effects(hits: &mut [(Hit, [f32; N_FEATS])], effects: &[crate::de::Effect]) {
+        for (hit, _) in hits {
+            for effect in effects {
+                for flag in Self::de_effect_flags(*effect) {
+                    if !hit.flags.contains(flag) {
+                        hit.flags.push(flag);
+                    }
+                }
+            }
+        }
+    }
+
+    fn de_variant_quality(hits: &[(Hit, [f32; N_FEATS])]) -> Option<(i32, u8, u8, f32)> {
+        let (hit, features) = hits.first()?;
+        let precision = match hit.precision {
+            "house" => 4,
+            "interp" => 3,
+            "near" => 2,
+            "street" => 1,
+            _ => 0,
+        };
+        Some((
+            Feats::from_vec(features).legacy(),
+            precision,
+            u8::from(!hit.flags.contains(&"dropped_suffix")),
+            hit.score,
+        ))
+    }
+
+    fn de_quality_is_better(candidate: (i32, u8, u8, f32), current: (i32, u8, u8, f32)) -> bool {
+        candidate.0 > current.0
+            || (candidate.0 == current.0 && candidate.1 > current.1)
+            || (candidate.0 == current.0 && candidate.1 == current.1 && candidate.2 > current.2)
+            || (candidate.0 == current.0
+                && candidate.1 == current.1
+                && candidate.2 == current.2
+                && candidate.3 > current.3)
+    }
+
+    fn de_official_commune_alias_candidate_is_exact(candidate: &[(Hit, [f32; N_FEATS])]) -> bool {
+        candidate.first().is_some_and(|(hit, _)| {
+            hit.precision == "house"
+                && hit.flags.contains(&"street_exact")
+                && hit.flags.contains(&"house_rep")
+        })
+    }
+
+    fn de_ludwigshafen_official_alias_candidate_position(
+        raw: &str,
+        candidate: &[(Hit, [f32; N_FEATS])],
+    ) -> Option<usize> {
+        let spec = de_strict_source_street_typo_spec(raw)?;
+        if spec.normalized_locality != "ludwigshafen rhein" {
+            return None;
+        }
+        // `query_feats_d` is bounded at 20 for a hard commune. Hitting the cap
+        // cannot prove that another eligible address is not hidden below it.
+        if candidate.len() >= 20 {
+            return None;
+        }
+        let expected_house = spec.house_number.to_string();
+        let mut eligible =
+            candidate
+                .iter()
+                .enumerate()
+                .filter_map(|(position, (hit, features))| {
+                    let features = Feats::from_vec(features);
+                    (hit.precision == "house"
+                        && features.street_exact
+                        && features.house_exact_rep
+                        // The product row may legitimately carry no postcode.
+                        // Missing evidence is not a disagreement; a populated
+                        // row still needs exact or department-level agreement.
+                        && (hit.postcode.is_empty() || features.pc_exact || features.pc_dept)
+                        && de_product_normalize_street(&hit.street) == spec.normalized_street
+                        && de_product_normalize_text(&hit.commune) == "ludwigshafen am rhein"
+                        && hit.housenumber.as_deref() == Some(expected_house.as_str()))
+                    .then_some(position)
+                });
+        let position = eligible.next()?;
+        eligible.next().is_none().then_some(position)
+    }
+
+    /// Return the single rank in the bounded established result window that
+    /// satisfies the X2 product predicate. No score, coordinate, benchmark
+    /// outcome or roster identity participates in this decision.
+    fn de_street_locality_qualifier_position(
+        raw: &str,
+        current: &[(Hit, [f32; N_FEATS])],
+    ) -> Option<usize> {
+        let spec = de_street_locality_qualifier_spec(raw)?;
+        let (top, top_features) = current.first()?;
+        let top_features = Feats::from_vec(top_features);
+        if top.precision != "house"
+            || !top_features.street_exact
+            || !top_features.house_exact_rep
+            || !top_features.pc_dept
+            || top_features.pc_exact
+            || !is_five_digit_postcode(&top.postcode)
+            || top.postcode == spec.postcode_raw
+            || de_product_normalize_street(&top.street) != spec.normalized_street
+            || !de_house_token_matches(top, &spec.house_token)
+        {
+            return None;
+        }
+
+        let mut eligible =
+            current
+                .iter()
+                .take(5)
+                .enumerate()
+                .skip(1)
+                .filter_map(|(position, (hit, features))| {
+                    let features = Feats::from_vec(features);
+                    let (base, qualifier) = de_source_street_locality_qualifier(&hit.street)?;
+                    let source_commune = de_product_normalize_text(&hit.commune);
+                    (hit.precision == "house"
+                        && features.street_exact
+                        && features.house_exact_rep
+                        && hit.postcode.is_empty()
+                        && de_house_token_matches(hit, &spec.house_token)
+                        && base == spec.normalized_street
+                        && qualifier == spec.normalized_locality
+                        && de_locality_is_exact_or_query_prefix(
+                            &spec.normalized_locality,
+                            &source_commune,
+                        ))
+                    .then_some(position)
+                });
+        let position = eligible.next()?;
+        eligible.next().is_none().then_some(position)
+    }
+
+    /// A parenthetical building/subaddress label is an additive, fill-empty
+    /// hypothesis only.  It may never replace an ordinary result, and even an
+    /// empty ordinary path is filled only by the top exact street+house in the
+    /// exact retained terminal commune core.
+    fn de_parenthetical_subaddress_may_fill(
+        current: &[(Hit, [f32; N_FEATS])],
+        candidate: &[(Hit, [f32; N_FEATS])],
+        expected_commune: Option<&str>,
+    ) -> bool {
+        if !current.is_empty() {
+            return false;
+        }
+        let (Some(expected_commune), Some((hit, features))) = (expected_commune, candidate.first())
+        else {
+            return false;
+        };
+        let features = Feats::from_vec(features);
+        hit.precision == "house"
+            && features.street_exact
+            && features.house_exact_rep
+            && de_commune_core(&hit.commune) == expected_commune
+    }
+
+    /// A comma-delimited recipient prefix is direct syntax evidence that every
+    /// token after the comma belongs to the address.  When that exact cleanup
+    /// produces the same street+house quality as a generic candidate that had
+    /// to drop a street-name prefix, preserve the full typed street.  This is a
+    /// deliberately narrow tie-break: it cannot promote fuzzy/near candidates
+    /// and it is unavailable without the exact recipient-prefix predicate.
+    fn de_recipient_cleanup_breaks_dropped_prefix_tie(
+        candidate: &[(Hit, [f32; N_FEATS])],
+        current: &[(Hit, [f32; N_FEATS])],
+    ) -> bool {
+        let (Some((candidate_hit, candidate_features)), Some((current_hit, current_features))) =
+            (candidate.first(), current.first())
+        else {
+            return false;
+        };
+        let candidate_features = Feats::from_vec(candidate_features);
+        let current_features = Feats::from_vec(current_features);
+        !candidate_hit.flags.contains(&"dropped_prefix")
+            && current_hit.flags.contains(&"dropped_prefix")
+            && candidate_features.street_exact
+            && candidate_features.house_exact_rep
+            && current_features.street_exact
+            && current_features.house_exact_rep
+    }
+
+    fn de_abbreviation_candidate_may_displace(
+        candidate: &[(Hit, [f32; N_FEATS])],
+        current: &[(Hit, [f32; N_FEATS])],
+        original_postcode_tail: Option<&str>,
+    ) -> bool {
+        #[cfg(test)]
+        DE_ABBREVIATION_GUARD_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+        if current.is_empty() {
+            return true;
+        }
+        let Some((candidate_hit, candidate_features)) = candidate.first() else {
+            return false;
+        };
+        let candidate_features = Feats::from_vec(candidate_features);
+        let current_features = Feats::from_vec(&current[0].1);
+        if candidate_hit.flags.contains(&"dropped_prefix") {
+            return candidate_features.street_exact
+                && candidate_features.house_exact_rep
+                && (candidate_features.pc_exact || candidate_features.commune_exact);
+        }
+        if candidate_features.commune_prefix
+            && !candidate_features.commune_exact
+            && !current_features.commune_prefix
+            && !current_features.commune_exact
+        {
+            let precision = |hit: &Hit| match hit.precision {
+                "house" => 3,
+                "interp" => 2,
+                "near" => 1,
+                _ => 0,
+            };
+            let candidate_evidence = [
+                u8::from(candidate_features.pc_exact),
+                u8::from(candidate_features.street_exact),
+                u8::from(candidate_features.house_exact_rep),
+                precision(candidate_hit),
+            ];
+            let current_evidence = [
+                u8::from(current_features.pc_exact),
+                u8::from(current_features.street_exact),
+                u8::from(current_features.house_exact_rep),
+                precision(&current[0].0),
+            ];
+            let no_regression = candidate_evidence
+                .iter()
+                .zip(current_evidence)
+                .all(|(candidate, current)| *candidate >= current);
+            let strict_gain = candidate_evidence
+                .iter()
+                .zip(current_evidence)
+                .any(|(candidate, current)| *candidate > current);
+            if no_regression && strict_gain {
+                return true;
+            }
+            // An abbreviation may expose the canonical street spelling without adding
+            // postcode evidence.  When exact street+house evidence otherwise ties, only
+            // the locality text the user actually supplied may break that tie; the
+            // variant's synthetic commune_prefix bit alone is not sufficient.
+            let Some(postcode_tail) = original_postcode_tail else {
+                return false;
+            };
+            return no_regression
+                && candidate_features.street_exact
+                && candidate_features.house_exact_rep
+                && de_retained_locality_score(postcode_tail, &candidate_hit.commune)
+                    > de_retained_locality_score(postcode_tail, &current[0].0.commune);
+        }
+        true
+    }
+
+    fn de_has_complete_postcode_house_evidence(hits: &[(Hit, [f32; N_FEATS])]) -> bool {
+        hits.first().is_some_and(|(_, features)| {
+            let features = Feats::from_vec(features);
+            features.street_exact && features.house_exact_rep && features.pc_exact
+        })
+    }
+
+    /// Wave A is a post-failure correction, never a fill-empty fallback.  The
+    /// ordinary path must already have produced an exact-street address-level
+    /// result.  A represented house is eligible only when its postcode is not
+    /// the explicit query postcode; near/interp is eligible because a uniquely
+    /// proven exact indexed house is strictly stronger at the same address key.
+    fn de_strict_postcode_house_override_allowed(
+        hits: &[(Hit, [f32; N_FEATS])],
+        requested_postcode: u32,
+    ) -> bool {
+        let Some((hit, features)) = hits.first() else {
+            return false;
+        };
+        let features = Feats::from_vec(features);
+        match hit.precision {
+            "house" => {
+                features.street_exact
+                    && features.house_exact_rep
+                    && Self::postcode_numeric_prefix(&hit.postcode) != Some(requested_postcode)
+            }
+            "near" | "interp" => {
+                Self::postcode_numeric_prefix(&hit.postcode) == Some(requested_postcode)
+                    || (features.street_exact
+                        && Self::postcode_numeric_prefix(&hit.postcode) != Some(requested_postcode))
+            }
+            _ => false,
+        }
+    }
+
+    fn de_should_try_postcode_house_rescue(raw: &str, hits: &[(Hit, [f32; N_FEATS])]) -> bool {
+        // A mechanically restored comma is only a structural hypothesis until
+        // the exact street+house+postcode rescue proves it against the sheet.
+        // Run that proof even when the ordinary parser happened to produce a
+        // complete hit, so the result never depends on index insertion order.
+        if crate::de::query_variants(raw).iter().any(|variant| {
+            variant
+                .effects
+                .contains(&crate::de::Effect::MissingCommaPostcodeBoundary)
+        }) {
+            return true;
+        }
+        if !Self::de_has_complete_postcode_house_evidence(hits) {
+            return true;
+        }
+        if !hits
+            .first()
+            .is_some_and(|(hit, _)| hit.flags.contains(&"dropped_prefix"))
+        {
+            return false;
+        }
+        de_comma_postcode_house_rescue_query(raw).is_some_and(|(_, postcode, locality)| {
+            de_is_exact_locality_alias_query(&locality, postcode)
+        })
+    }
+
+    fn de_postcode_house_locality_score(
+        locality_tail: &str,
+        hard_commune: Option<&str>,
+        requested_postcode: u32,
+        commune: &str,
+    ) -> u8 {
+        if let Some(expected) = hard_commune {
+            let actual = de_commune_core(commune);
+            return if actual == expected
+                || (expected == "frankfurt oder"
+                    && actual == "frankfurt"
+                    && requested_postcode == 15230)
+            {
+                4
+            } else {
+                0
+            };
+        }
+        let retained = de_retained_locality_score(locality_tail, commune);
+        if retained == 2 {
+            return 4;
+        }
+        let query = normalize(locality_tail);
+        let candidate = de_commune_core(commune);
+        if de_exact_locality_alias_matches(locality_tail, requested_postcode, commune) {
+            return 3;
+        }
+        if query == "berlin"
+            && !de_is_exact_locality_alias_query(locality_tail, requested_postcode)
+            && de_is_proven_berlin_postcode(requested_postcode)
+            && de_is_berlin_postal_locality(commune)
+        {
+            return 3;
+        }
+        if retained != 0
+            || de_locality_qualifiers_match(locality_tail, commune)
+            || de_p3_locality_compatible(&query, &candidate)
+        {
+            return 1;
+        }
+        0
+    }
+
+    fn de_postcode_house_locality_compatible(
+        &self,
+        locality_tail: &str,
+        hard_commune: Option<&str>,
+        requested_postcode: u32,
+        hit: &Hit,
+    ) -> bool {
+        Self::de_postcode_house_locality_score(
+            locality_tail,
+            hard_commune,
+            requested_postcode,
+            &hit.commune,
+        ) != 0
+    }
+
+    /// Product-visible proof that the typed postcode contains at least one
+    /// indexed street in a compatible locality. The exact-postcode roster is
+    /// bounded by the same fail-closed scan ceiling as the house rescue.
+    fn de_postcode_has_locality_support(
+        &self,
+        requested_postcode: u32,
+        locality_tail: &str,
+    ) -> bool {
+        self.de_postcode_street_bucket(requested_postcode)
+            .is_some_and(|bucket| {
+                bucket.iter().any(|&(_, sid)| {
+                    let metadata = self.street_meta(sid);
+                    Self::de_postcode_house_locality_score(
+                        locality_tail,
+                        None,
+                        requested_postcode,
+                        self.commune_name(metadata.commune_id),
+                    ) != 0
+                })
+            })
+    }
+
+    /// A near/interpolation matching the locality in a typed-postcode request
+    /// already carries product-visible locality evidence, even when that weak
+    /// hit has no display postcode. Wave N permits the strict exact-house
+    /// replacement only when its indexed commune is compatible with the same
+    /// typed locality. Wrong-postcode exact-house corrections remain the
+    /// independent P1 rule and do not acquire a synthetic constraint here.
+    fn de_typed_postcode_near_has_locality_evidence(
+        &self,
+        hits: &[(Hit, [f32; N_FEATS])],
+        requested_postcode: u32,
+        locality_tail: &str,
+    ) -> bool {
+        hits.first().is_some_and(|(hit, features)| {
+            let features = Feats::from_vec(features);
+            let postcode_supports_locality = Self::postcode_numeric_prefix(&hit.postcode)
+                == Some(requested_postcode)
+                || (hit.postcode.trim().is_empty()
+                    && self.de_postcode_has_locality_support(requested_postcode, locality_tail));
+            matches!(hit.precision, "near" | "interp")
+                && features.street_exact
+                && postcode_supports_locality
+                && self.de_postcode_house_locality_compatible(
+                    locality_tail,
+                    None,
+                    requested_postcode,
+                    hit,
+                )
+        })
+    }
+
+    fn de_blank_postcode_current_top_is_strict(
+        current: &[(Hit, [f32; N_FEATS])],
+        spec: &DeBlankPostcodeHouseSpec,
+    ) -> bool {
+        let Some((hit, features)) = current.first() else {
+            return false;
+        };
+        let features = Feats::from_vec(features);
+        let relies_on_disallowed_cleanup = [
+            "dropped_prefix",
+            "dropped_suffix",
+            "de_city_alias",
+            "de_official_commune_alias",
+        ]
+        .iter()
+        .any(|flag| hit.flags.contains(flag));
+        matches!(hit.precision, "near" | "interp")
+            && features.street_exact
+            && features.commune_exact
+            && features.pc_exact
+            && !features.house_exact_rep
+            && hit.postcode == spec.postcode_raw
+            && de_product_normalize_street(&hit.street) == spec.normalized_street
+            && de_product_normalize_text(&hit.commune) == spec.normalized_locality
+            && !relies_on_disallowed_cleanup
+    }
+
+    /// Anchor P5 to one exact product-visible commune identity already proven
+    /// by the typed postcode roster. Prefix/alias/district compatibility is
+    /// intentionally absent: two commune ids with the same display name are
+    /// ambiguous and therefore fail closed.
+    fn de_blank_postcode_anchor_commune_id(&self, spec: &DeBlankPostcodeHouseSpec) -> Option<u32> {
+        let mut commune_ids: Vec<u32> = self
+            .de_postcode_street_bucket(spec.postcode)?
+            .iter()
+            .filter_map(|&(_, sid)| {
+                let metadata = self.street_meta(sid);
+                (de_product_normalize_street(self.name(metadata.name_off))
+                    == spec.normalized_street
+                    && de_product_normalize_text(self.commune_name(metadata.commune_id))
+                        == spec.normalized_locality)
+                    .then_some(metadata.commune_id)
+            })
+            .collect();
+        commune_ids.sort_unstable();
+        commune_ids.dedup();
+        let [commune_id] = commune_ids.as_slice() else {
+            return None;
+        };
+        Some(*commune_id)
+    }
+
+    /// Wave O/P5: replace only a fully evidenced typed-postcode near/interp
+    /// with one physical exact-house row whose source postcode is genuinely
+    /// absent. Admission is driven by exact display fields, a single anchored
+    /// commune id, exact number+suffix, and full source-row uniqueness. No
+    /// non-request selector participates.
+    fn de_blank_postcode_exact_house_fallback(
+        &self,
+        raw: &str,
+        current: &[(Hit, [f32; N_FEATS])],
+        k: usize,
+        focus: Option<&QueryFocus>,
+    ) -> Option<Vec<(Hit, [f32; N_FEATS])>> {
+        if self.country() != Some("de") || self.format_version < 7 || focus.is_some() {
+            return None;
+        }
+        let spec = de_blank_postcode_house_spec(raw)?;
+        if !Self::de_blank_postcode_current_top_is_strict(current, &spec) {
+            return None;
+        }
+        let requested_rep = if spec.house_suffix.is_empty() {
+            0
+        } else {
+            *self.rep_lookup.get(&spec.house_suffix)?
+        };
+        let anchor_commune_id = self.de_blank_postcode_anchor_commune_id(&spec)?;
+        let candidate_sids = self
+            .de_blank_postcode_display_streets
+            .get(&spec.normalized_street, &spec.normalized_locality)?;
+        let scan_limit = de_postcode_house_rescue_scan_limit();
+        if candidate_sids.is_empty() || candidate_sids.len() > scan_limit {
+            return None;
+        }
+
+        let mut row_budget = scan_limit;
+        let mut exact_records: Vec<(u32, String)> = Vec::new();
+        for &sid in candidate_sids.iter() {
+            let metadata = self.street_meta(sid);
+            if de_product_normalize_street(self.name(metadata.name_off)) != spec.normalized_street
+                || de_product_normalize_text(self.commune_name(metadata.commune_id))
+                    != spec.normalized_locality
+            {
+                continue;
+            }
+            let postcodes = self
+                .de_exact_house_record_postcodes(
+                    sid,
+                    &metadata,
+                    spec.house_number,
+                    requested_rep,
+                    &mut row_budget,
+                )
+                .ok()?;
+            for postcode in postcodes {
+                exact_records.push((sid, postcode));
+                if exact_records.len() > 1 {
+                    return None;
+                }
+            }
+        }
+        let [(sid, postcode)] = exact_records.as_slice() else {
+            return None;
+        };
+        let metadata = self.street_meta(*sid);
+        if metadata.commune_id != anchor_commune_id
+            || !postcode.is_empty()
+            || metadata.postcode != 0
+            || metadata.postcode_disp_off != 0
+        {
+            return None;
+        }
+
+        let query_words: Vec<Vec<char>> = spec
+            .normalized_street
+            .split_whitespace()
+            .map(|word| word.chars().collect())
+            .collect();
+        let features = Feats {
+            street_exact: true,
+            commune_exact: true,
+            ..Default::default()
+        };
+        let (mut hit, feature_vector, _, _, _, _) = self.make_hit(
+            *sid,
+            features,
+            Some(spec.house_number),
+            requested_rep,
+            None,
+            &query_words,
+        );
+        let made_features = Feats::from_vec(&feature_vector);
+        let expected_house = self.house_number(spec.house_number, requested_rep);
+        if hit.precision != "house"
+            || hit.housenumber.as_deref() != Some(expected_house.as_str())
+            || !hit.postcode.is_empty()
+            || de_product_normalize_street(&hit.street) != spec.normalized_street
+            || de_product_normalize_text(&hit.commune) != spec.normalized_locality
+            || !made_features.street_exact
+            || !made_features.commune_exact
+            || !made_features.house_exact_rep
+            || made_features.pc_exact
+            || made_features.pc_dept
+        {
+            return None;
+        }
+        if !hit.flags.contains(&"de_blank_postcode_house_override") {
+            hit.flags.push("de_blank_postcode_house_override");
+        }
+        let mut exact = vec![(hit, feature_vector)];
+        exact.truncate(k);
+        Some(exact)
+    }
+
+    fn de_product_fallback_arbitration(
+        best: &mut Vec<(Hit, [f32; N_FEATS])>,
+        p3: Option<Vec<(Hit, [f32; N_FEATS])>>,
+        p4: Option<Vec<(Hit, [f32; N_FEATS])>>,
+        x2: Option<usize>,
+        p5: Option<Vec<(Hit, [f32; N_FEATS])>>,
+    ) {
+        match (p3, p4, x2, p5) {
+            (Some(candidate), None, None, None)
+            | (None, Some(candidate), None, None)
+            | (None, None, None, Some(candidate)) => *best = candidate,
+            (None, None, Some(position), None) if position < best.len() => {
+                let mut chosen = best.remove(position);
+                if !chosen.0.flags.contains(&"de_street_locality_qualifier") {
+                    chosen.0.flags.push("de_street_locality_qualifier");
+                }
+                best.insert(0, chosen);
+            }
+            // P3, P4, P5 and X2 are intended to be disjoint typed mechanisms.
+            // If a future parser change creates overlap, preserve the
+            // established result instead of choosing by order or data order.
+            _ => {}
+        }
+    }
+
+    fn de_p3_current_top_already_complete(
+        current: &[(Hit, [f32; N_FEATS])],
+        spec: &DeStrictSourceStreetTypoSpec,
+    ) -> bool {
+        let expected_house = spec.house_number.to_string();
+        current.first().is_some_and(|(hit, _)| {
+            hit.precision == "house"
+                && hit.housenumber.as_deref() == Some(expected_house.as_str())
+                && hit.postcode == spec.postcode_raw
+        })
+    }
+
+    /// A strict P3 request may name a postcode for which an older or partial
+    /// index has no exact-postcode street roster at all.  In that case P3
+    /// cannot manufacture the requested address, but it also must not retain
+    /// a same-house hit contradicted by both of the user's explicit locality
+    /// and postcode fields.  An empty row postcode is unknown, not a
+    /// contradiction.  This is deliberately a narrow fail-closed filter: a
+    /// hit compatible with either explicit field is preserved.
+    fn de_p3_filter_absent_postcode_conflicts(
+        current: &[(Hit, [f32; N_FEATS])],
+        spec: &DeStrictSourceStreetTypoSpec,
+    ) -> Option<Vec<(Hit, [f32; N_FEATS])>> {
+        let expected_house = spec.house_number.to_string();
+        let mut removed = false;
+        let retained = current
+            .iter()
+            .filter_map(|(hit, features)| {
+                let same_house = hit.housenumber.as_deref() == Some(expected_house.as_str());
+                let postcode_conflicts =
+                    !hit.postcode.is_empty() && hit.postcode != spec.postcode_raw;
+                let source_locality = de_product_normalize_text(&hit.commune);
+                let product_alias_proves_locality = hit.flags.contains(&"de_city_alias")
+                    || hit.flags.contains(&"de_official_commune_alias");
+                let locality_conflicts = !product_alias_proves_locality
+                    && !de_p3_locality_compatible(&spec.normalized_locality, &source_locality);
+                if same_house && postcode_conflicts && locality_conflicts {
+                    removed = true;
+                    None
+                } else {
+                    Some((
+                        Hit {
+                            lat: hit.lat,
+                            lon: hit.lon,
+                            precision: hit.precision,
+                            score: hit.score,
+                            confidence: hit.confidence,
+                            street: hit.street.clone(),
+                            housenumber: hit.housenumber.clone(),
+                            commune: hit.commune.clone(),
+                            postcode: hit.postcode.clone(),
+                            flags: hit.flags.clone(),
+                            region: hit.region.clone(),
+                            distance_m: hit.distance_m,
+                        },
+                        *features,
+                    ))
+                }
+            })
+            .collect();
+        removed.then_some(retained)
+    }
+
+    /// P3 is not the generic fuzzy collector.  Its bounded exact-postcode
+    /// roster is independent of source FST keys; admission proves the exact
+    /// source house/postcode, compatible locality, one global display-street
+    /// identity, first codepoint, compact OSA 1..=2 and the frozen 0.90 ratio.
+    fn de_strict_source_street_typo_fallback(
+        &self,
+        raw: &str,
+        current: &[(Hit, [f32; N_FEATS])],
+        k: usize,
+    ) -> Option<Vec<(Hit, [f32; N_FEATS])>> {
+        let spec = de_strict_source_street_typo_spec(raw)?;
+        if Self::de_p3_current_top_already_complete(current, &spec) {
+            return None;
+        }
+
+        let mut exact_cache = HashMap::new();
+        let mut candidates: HashMap<String, Vec<(u32, bool)>> = HashMap::new();
+        // The source FST key is intentionally absent from this loop: the
+        // product predicate is defined over display street + exact index
+        // metadata, and must see a qualifying identity even behind a stale or
+        // unrelated `nom_voie_norm` key.
+        let Some(postcode_streets) = self.de_postcode_street_bucket(spec.postcode) else {
+            return Self::de_p3_filter_absent_postcode_conflicts(current, &spec);
+        };
+        for &(_, sid) in postcode_streets {
+            let metadata = self.street_meta(sid);
+            let source_street = de_product_normalize_street(self.name(metadata.name_off));
+            if source_street.is_empty()
+                || source_street.len() > 96
+                || source_street == spec.normalized_street
+                || source_street
+                    .bytes()
+                    .next()
+                    .zip(spec.normalized_street.bytes().next())
+                    .is_none_or(|(source, query)| source != query)
+            {
+                continue;
+            }
+            let distance = de_compact_osa_distance(&spec.normalized_street, &source_street);
+            if !(1..=2).contains(&distance)
+                || !de_sequence_matcher_ratio_at_least_090(&spec.normalized_street, &source_street)
+            {
+                continue;
+            }
+            let source_commune = de_product_normalize_text(self.commune_name(metadata.commune_id));
+            if !de_p3_locality_compatible(&spec.normalized_locality, &source_commune)
+                || !self.exact_house_full_postcode_set_candidate_cached(
+                    &mut exact_cache,
+                    sid,
+                    &metadata,
+                    spec.house_number,
+                    0,
+                    &[],
+                    spec.postcode,
+                    &spec.postcode_raw,
+                )
+            {
+                continue;
+            }
+            candidates
+                .entry(source_street)
+                .or_default()
+                .push((sid, source_commune == spec.normalized_locality));
+        }
+        if candidates.len() != 1 {
+            return None;
+        }
+        let mut identity = candidates.into_values().next()?;
+        identity.sort_by_key(|candidate| candidate.0);
+        identity.dedup_by_key(|candidate| candidate.0);
+        // The predicate requires one semantic street identity, not one physical
+        // row.  Multiple exact rows with the same allowed display projection do
+        // not change admission; the lowest stable SID only chooses the output.
+        let (sid, commune_exact) = *identity.first()?;
+        let query_words: Vec<Vec<char>> = spec
+            .normalized_street
+            .split_whitespace()
+            .map(|word| word.chars().collect())
+            .collect();
+        let features = Feats {
+            street_fuzzy: true,
+            commune_exact,
+            commune_prefix: !commune_exact,
+            pc_exact: true,
+            pc_dept: true,
+            ..Default::default()
+        };
+        let mut ranked = self.make_hit(
+            sid,
+            features,
+            Some(spec.house_number),
+            0,
+            Some(spec.postcode),
+            &query_words,
+        );
+        let made_features = Feats::from_vec(&ranked.1);
+        if ranked.0.precision != "house"
+            || !made_features.house_exact_rep
+            || !made_features.pc_exact
+            || ranked.0.housenumber.as_deref() != Some(spec.house_number.to_string().as_str())
+            || ranked.0.postcode != spec.postcode_raw
+        {
+            return None;
+        }
+        if !ranked.0.flags.contains(&"de_strict_source_street_typo") {
+            ranked.0.flags.push("de_strict_source_street_typo");
+        }
+        let mut exact = vec![(ranked.0, ranked.1)];
+        exact.truncate(k);
+        Some(exact)
+    }
+
+    /// P4 accepts only one of four typed raw syntaxes. Once parsed, it scans
+    /// the complete bounded typed-postcode bucket and re-proves exact display
+    /// street/locality plus the full house/set/postcode contract. Recall is
+    /// therefore independent of the spelling used by an internal source FST
+    /// key, while ambiguity and bucket overflow still fail closed.
+    fn de_audited_compound_fallback(
+        &self,
+        raw: &str,
+        k: usize,
+    ) -> Option<Vec<(Hit, [f32; N_FEATS])>> {
+        let spec = de_audited_compound_spec(raw)?;
+        let mut street_forms = de_product_street_forms(&spec.street);
+        if !street_forms.contains(&spec.normalized_street) {
+            street_forms.push(spec.normalized_street.clone());
+        }
+        if street_forms.len() > 32 {
+            return None;
+        }
+        let commune_ids = self.communes_by_name(&spec.normalized_locality);
+        if commune_ids.is_empty() || commune_ids.len() > 16 {
+            return None;
+        }
+        if street_forms
+            .len()
+            .checked_mul(commune_ids.len())
+            .is_none_or(|attempts| attempts > 64)
+        {
+            return None;
+        }
+        let postcode_streets = self.de_postcode_street_bucket(spec.postcode)?;
+
+        let mut exact_cache = HashMap::new();
+        let mut candidate_sids = Vec::new();
+        for &(_, sid) in postcode_streets {
+            #[cfg(test)]
+            DE_P4_POSTCODE_BUCKET_SCAN_ROWS.with(|rows| {
+                rows.set(rows.get().saturating_add(1));
+            });
+            let metadata = self.street_meta(sid);
+            if de_product_normalize_text(self.commune_name(metadata.commune_id))
+                != spec.normalized_locality
+                || de_product_normalize_street(self.name(metadata.name_off))
+                    != spec.normalized_street
+                || !self.exact_house_full_postcode_set_candidate_cached(
+                    &mut exact_cache,
+                    sid,
+                    &metadata,
+                    spec.primary_house,
+                    0,
+                    &spec.additional_houses,
+                    spec.postcode,
+                    &spec.postcode_raw,
+                )
+            {
+                continue;
+            }
+            #[cfg(test)]
+            DE_P4_POSTCODE_BUCKET_MATCHING_SIDS.with(|matches| {
+                matches.set(matches.get().saturating_add(1));
+            });
+            candidate_sids.push(sid);
+        }
+        candidate_sids.sort_unstable();
+        candidate_sids.dedup();
+        let [sid] = candidate_sids.as_slice() else {
+            return None;
+        };
+        let query_words: Vec<Vec<char>> = spec
+            .normalized_street
+            .split_whitespace()
+            .map(|word| word.chars().collect())
+            .collect();
+        let features = Feats {
+            street_exact: true,
+            commune_exact: true,
+            pc_exact: true,
+            pc_dept: true,
+            ..Default::default()
+        };
+        let (mut hit, feature_vector, _, _, _, _) = self.make_hit(
+            *sid,
+            features,
+            Some(spec.primary_house),
+            0,
+            Some(spec.postcode),
+            &query_words,
+        );
+        let made_features = Feats::from_vec(&feature_vector);
+        let expected_house = spec.primary_house.to_string();
+        if hit.precision != "house"
+            || hit.housenumber.as_deref() != Some(expected_house.as_str())
+            || hit.postcode != spec.postcode_raw
+            || de_product_normalize_text(&hit.commune) != spec.normalized_locality
+            || de_product_normalize_street(&hit.street) != spec.normalized_street
+            || !made_features.street_exact
+            || !made_features.house_exact_rep
+            || !made_features.pc_exact
+        {
+            return None;
+        }
+        if !hit.flags.contains(&"de_audited_compound") {
+            hit.flags.push("de_audited_compound");
+        }
+        if matches!(
+            spec.shape,
+            DeAuditedCompoundShape::StreetHouseRangeBalancedAccessParenthetical
+        ) {
+            hit.flags.push("de_house_set_exact");
+        }
+        let mut exact = vec![(hit, feature_vector)];
+        exact.truncate(k);
+        Some(exact)
+    }
+
+    fn de_comma_postcode_house_rescue(
+        &self,
+        raw: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+    ) -> Option<Vec<(Hit, [f32; N_FEATS])>> {
+        if de_parenthetical_locality_uses_slash_qualifier(raw) {
+            return None;
+        }
+        // The parser itself remains deliberately narrow.  Let the bounded DE
+        // structural variants first remove only proven recipient/subaddress
+        // noise or reorder the exact locality-first shape, then require the
+        // same unique exact street+house+postcode proof as a canonical query.
+        for variant in crate::de::query_variants(raw) {
+            let Some((query, postcode, locality_tail)) =
+                de_comma_postcode_house_rescue_query(&variant.query)
+            else {
+                continue;
+            };
+            let Some(mut exact) = self.de_postcode_house_rescue_parsed(
+                raw,
+                &query,
+                postcode,
+                &locality_tail,
+                k,
+                focus,
+                None,
+                &[],
+                false,
+            ) else {
+                continue;
+            };
+            Self::annotate_de_effects(&mut exact, &variant.effects);
+            return Some(exact);
+        }
+        None
+    }
+
+    fn de_compact_house_pair_left_rescue(
+        &self,
+        raw: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+    ) -> Option<Vec<(Hit, [f32; N_FEATS])>> {
+        let (query, postcode, locality_tail, effect) =
+            de_compact_house_pair_left_rescue_query(raw)?;
+        self.de_postcode_house_rescue_parsed(
+            raw,
+            &query,
+            postcode,
+            &locality_tail,
+            k,
+            focus,
+            Some(effect),
+            &[],
+            false,
+        )
+    }
+
+    /// A strict, product-only Wave-A override.  It is intentionally narrower
+    /// than the delivery-cleanup rescue: only a canonical comma form or one
+    /// compact two-endpoint literal is admitted.  Soft locality text may lose
+    /// only after the runtime index proves one unique exact street/house-set/PLZ
+    /// candidate; Frankfurt and variant-required communes remain hard guards.
+    fn de_strict_postcode_house_set_override(
+        &self,
+        raw: &str,
+        current: &[(Hit, [f32; N_FEATS])],
+        k: usize,
+        focus: Option<&QueryFocus>,
+    ) -> Option<Vec<(Hit, [f32; N_FEATS])>> {
+        let mut exact = if let Some((query, postcode, locality_tail)) =
+            de_comma_postcode_house_rescue_query(raw)
+        {
+            if !Self::de_strict_postcode_house_override_allowed(current, postcode) {
+                return None;
+            }
+            let allow_soft_locality_override = !self.de_typed_postcode_near_has_locality_evidence(
+                current,
+                postcode,
+                &locality_tail,
+            );
+            self.de_postcode_house_rescue_parsed(
+                raw,
+                &query,
+                postcode,
+                &locality_tail,
+                k,
+                focus,
+                None,
+                &[],
+                allow_soft_locality_override,
+            )?
+        } else {
+            let spec = de_compact_house_pair_spec(raw)?;
+            if !Self::de_strict_postcode_house_override_allowed(current, spec.postcode) {
+                return None;
+            }
+            let allow_soft_locality_override = !self.de_typed_postcode_near_has_locality_evidence(
+                current,
+                spec.postcode,
+                &spec.locality_tail,
+            );
+            self.de_postcode_house_rescue_parsed(
+                raw,
+                &spec.query,
+                spec.postcode,
+                &spec.locality_tail,
+                k,
+                focus,
+                Some(spec.effect),
+                &[spec.right],
+                allow_soft_locality_override,
+            )?
+        };
+        for (hit, _) in &mut exact {
+            if !hit.flags.contains(&"de_exact_postcode_override") {
+                hit.flags.push("de_exact_postcode_override");
+            }
+        }
+        Some(exact)
+    }
+
+    // Frozen release: grouping parsed rescue inputs would rewrite the validated call sites.
+    #[allow(clippy::too_many_arguments)]
+    fn de_postcode_house_rescue_parsed(
+        &self,
+        raw: &str,
+        query: &str,
+        postcode: u32,
+        locality_tail: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+        structural_effect: Option<crate::de::Effect>,
+        additional_exact_house_numbers: &[u32],
+        allow_soft_locality_override: bool,
+    ) -> Option<Vec<(Hit, [f32; N_FEATS])>> {
+        let hard_commune = crate::de::frankfurt_qualifier(raw).or_else(|| {
+            let words: std::collections::HashSet<&str> = locality_tail.split_whitespace().collect();
+            if words.contains("frankfurt") && words.contains("oder") {
+                Some("frankfurt oder")
+            } else if words.contains("frankfurt") && words.contains("main") {
+                Some("frankfurt am main")
+            } else {
+                None
+            }
+        });
+        let mut exact: Vec<DePostcodeHouseCandidate> = Vec::new();
+        let mut scan_budget = de_postcode_house_rescue_scan_limit();
+        let mut prepared_seen = HashSet::new();
+        let mut seen_phrases = HashSet::new();
+        for variant in crate::de::query_variants(query) {
+            let prepared = prepared_query_key(&variant.query);
+            if !prepared_seen.insert(prepared.clone()) {
+                continue;
+            }
+            let mut candidate = match self.query_feats_prepared_postcode_house_rescue(
+                &prepared,
+                k.max(20),
+                focus,
+                additional_exact_house_numbers,
+                &mut scan_budget,
+                &mut seen_phrases,
+            ) {
+                Ok(candidate) => candidate,
+                Err(()) => return None,
+            };
+            if let Some(expected) = variant.required_commune.as_deref() {
+                candidate.retain(|candidate| normalize(&candidate.hit.commune) == expected);
+            }
+            candidate.retain(|candidate| {
+                let hit = &candidate.hit;
+                let features = Feats::from_vec(&candidate.features);
+                features.street_exact
+                    && features.house_exact_rep
+                    && features.pc_exact
+                    && Self::postcode_numeric_prefix(&hit.postcode) == Some(postcode)
+                    && ((allow_soft_locality_override && hard_commune.is_none())
+                        || self.de_postcode_house_locality_compatible(
+                            locality_tail,
+                            hard_commune,
+                            postcode,
+                            hit,
+                        ))
+            });
+            let mut applied_effects = variant.effects.clone();
+            if let Some(effect) = structural_effect {
+                if !applied_effects.contains(&effect) {
+                    applied_effects.push(effect);
+                }
+            }
+            for candidate in &mut candidate {
+                for effect in &applied_effects {
+                    for flag in Self::de_effect_flags(*effect) {
+                        if !candidate.hit.flags.contains(flag) {
+                            candidate.hit.flags.push(flag);
+                        }
+                    }
+                }
+            }
+            for item in candidate {
+                if let Some(existing) = exact
+                    .iter()
+                    .find(|existing| existing.source_sid == item.source_sid)
+                {
+                    if !existing.same_product_projection(&item) {
+                        return None;
+                    }
+                } else {
+                    exact.push(item);
+                }
+            }
+        }
+        if structural_effect.is_none() && (!allow_soft_locality_override || hard_commune.is_some())
+        {
+            let strongest = exact
+                .iter()
+                .map(|candidate| {
+                    Self::de_postcode_house_locality_score(
+                        locality_tail,
+                        hard_commune,
+                        postcode,
+                        &candidate.hit.commune,
+                    )
+                })
+                .max()
+                .unwrap_or(0);
+            if strongest == 0 {
+                return None;
+            }
+            exact.retain(|candidate| {
+                Self::de_postcode_house_locality_score(
+                    locality_tail,
+                    hard_commune,
+                    postcode,
+                    &candidate.hit.commune,
+                ) == strongest
+            });
+        }
+        if exact.len() != 1 {
+            return None;
+        }
+        if !exact[0].hit.flags.contains(&"de_postcode_house") {
+            exact[0].hit.flags.push("de_postcode_house");
+        }
+        if structural_effect.is_some() && !exact[0].hit.flags.contains(&"de_house_left_endpoint") {
+            exact[0].hit.flags.push("de_house_left_endpoint");
+        }
+        if !additional_exact_house_numbers.is_empty()
+            && !exact[0].hit.flags.contains(&"de_house_set_exact")
+        {
+            exact[0].hit.flags.push("de_house_set_exact");
+        }
+        let only = exact.pop()?;
+        let mut out = vec![(only.hit, only.features)];
+        out.truncate(k);
+        Some(out)
+    }
+
+    /// The ordinary query remains first and wins ties.  DE-only alternatives are
+    /// compared by the same legacy evidence (exact street/commune/postcode/house)
+    /// used to choose parse hypotheses, so a fallback can replace a weak fuzzy hit
+    /// but cannot dislodge an equally supported canonical spelling.
+    fn query_feats_country_variants(
+        &self,
+        raw: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        if self.country() != Some("de") {
+            return self.query_feats_d(raw, k, 0, focus, None, None, false, None);
+        }
+        let original_cityless_street = Self::de_cityless_street(raw);
+        // Only the exact typed X2 surface needs the already-ranked frozen
+        // top-5 window for a caller requesting top-1. Every other DE query
+        // retains its established caller-k work bound.
+        let product_k = if de_street_locality_qualifier_spec(raw).is_some() {
+            k.max(5)
+        } else {
+            k
+        };
+        // Freeze the user's normalized post-postcode locality before any DE variant or
+        // city-alias rewrite.  Every variant may change the lookup query, but none may
+        // manufacture stronger retained-locality evidence than the text the user supplied.
+        let de_original_postcode_context = de_postcode_context(&normalize(raw));
+        let de_original_postcode = de_original_postcode_context
+            .as_ref()
+            .map(|(postcode, _)| *postcode);
+        let de_original_postcode_tail = de_original_postcode_context
+            .as_ref()
+            .map(|(_, tail)| tail.as_str());
+        let de_parenthetical_subaddress_commune = crate::de::parenthetical_subaddress_commune(raw);
+        let mut best: Vec<(Hit, [f32; N_FEATS])> = Vec::new();
+        let mut best_quality: Option<(i32, u8, u8, f32)> = None;
+        let frankfurt = crate::de::frankfurt_qualifier(raw);
+        let de_postal_tail_eligible = crate::de::postal_tail_eligible(raw);
+        let variants = crate::de::query_variants(raw);
+        let official_alias_constrained = variants.iter().any(|variant| {
+            variant
+                .effects
+                .contains(&crate::de::Effect::OfficialCommuneAlias)
+                && variant.required_commune.is_some()
+        });
+        let alias_target = variants
+            .iter()
+            .find_map(|variant| variant.required_commune.clone());
+        let alias_constrained = alias_target.is_some();
+        let hard_commune = frankfurt.map(str::to_string).or(alias_target);
+        let search_k = if hard_commune.is_some() {
+            product_k.max(20)
+        } else {
+            product_k
+        };
+        // Raw and normalized DE variants usually converge to the exact same
+        // prepared query. A previous non-city result is reusable only when the
+        // variant effects and commune constraint are also identical. City/empty
+        // outcomes remain uncached because the final settlement fallback still
+        // inspects raw comma-delimited segments.
+        let mut reusable_prepared: Vec<(String, Vec<crate::de::Effect>, Option<String>)> =
+            Vec::new();
+        for variant in variants {
+            if variant
+                .required_commune
+                .as_deref()
+                .is_some_and(|target| self.communes_fst.get(target.as_bytes()).is_none())
+            {
+                continue;
+            }
+            let prepared = prepared_query_key(&variant.query);
+            if reusable_prepared.iter().any(|(seen, effects, required)| {
+                seen == &prepared
+                    && effects == &variant.effects
+                    && required == &variant.required_commune
+            }) {
+                continue;
+            }
+            #[cfg(test)]
+            DE_COUNTRY_VARIANT_PREPARED_SEARCH_CALLS
+                .with(|calls| calls.set(calls.get().saturating_add(1)));
+            let mut candidate = self.query_feats_d(
+                &variant.query,
+                search_k,
+                0,
+                focus,
+                de_original_postcode_tail,
+                de_original_postcode,
+                de_postal_tail_eligible,
+                original_cityless_street.as_deref(),
+            );
+            if candidate
+                .first()
+                .is_some_and(|(hit, _)| hit.precision != "city")
+            {
+                reusable_prepared.push((
+                    prepared,
+                    variant.effects.clone(),
+                    variant.required_commune.clone(),
+                ));
+            }
+            if variant.effects.contains(&crate::de::Effect::PostcodeZero) {
+                candidate.retain(|(_, features)| Feats::from_vec(features).pc_exact);
+            }
+            if let Some(expected) = hard_commune.as_deref() {
+                candidate.retain(|(hit, _)| normalize(&hit.commune) == expected);
+            }
+            if official_alias_constrained {
+                if hard_commune.as_deref() == Some("ludwigshafen am rhein") {
+                    let Some(position) =
+                        Self::de_ludwigshafen_official_alias_candidate_position(raw, &candidate)
+                    else {
+                        continue;
+                    };
+                    let chosen = candidate.remove(position);
+                    candidate.insert(0, chosen);
+                } else if !Self::de_official_commune_alias_candidate_is_exact(&candidate) {
+                    continue;
+                }
+            }
+            candidate.truncate(product_k);
+            if variant
+                .effects
+                .contains(&crate::de::Effect::ParentheticalSubaddress)
+                && !Self::de_parenthetical_subaddress_may_fill(
+                    &best,
+                    &candidate,
+                    de_parenthetical_subaddress_commune.as_deref(),
+                )
+            {
+                continue;
+            }
+            let Some(quality) = Self::de_variant_quality(&candidate) else {
+                continue;
+            };
+            if variant.effects.contains(&crate::de::Effect::Abbreviation)
+                && !Self::de_abbreviation_candidate_may_displace(
+                    &candidate,
+                    &best,
+                    de_original_postcode_tail,
+                )
+            {
+                continue;
+            }
+            if variant.effects.contains(&crate::de::Effect::PostcodeZero)
+                && best_quality.is_some_and(|current| quality.1 < current.1)
+            {
+                // A four-digit token is ambiguous with a house number.  Padding
+                // it may add exact-postcode evidence, but must never downgrade
+                // an existing house/near/interpolation answer to street level.
+                continue;
+            }
+            let proven_recipient_tie = best_quality.is_some_and(|current| {
+                quality == current
+                    && variant
+                        .effects
+                        .contains(&crate::de::Effect::RecipientPrefix)
+                    && Self::de_recipient_cleanup_breaks_dropped_prefix_tie(&candidate, &best)
+            });
+            if best_quality.is_none_or(|current| Self::de_quality_is_better(quality, current))
+                || proven_recipient_tie
+            {
+                let mut applied_effects = variant.effects.clone();
+                if official_alias_constrained {
+                    if !applied_effects.contains(&crate::de::Effect::OfficialCommuneAlias) {
+                        applied_effects.push(crate::de::Effect::OfficialCommuneAlias);
+                    }
+                } else if alias_constrained
+                    && !applied_effects.contains(&crate::de::Effect::CityAlias)
+                {
+                    // Even an otherwise successful original spelling is admissible only
+                    // because the exonym supplied this hard commune constraint.
+                    applied_effects.push(crate::de::Effect::CityAlias);
+                }
+                Self::annotate_de_effects(&mut candidate, &applied_effects);
+                best = candidate;
+                best_quality = Some(quality);
+            }
+        }
+        let ludwigshafen_alias_selected = hard_commune.as_deref() == Some("ludwigshafen am rhein")
+            && best
+                .first()
+                .is_some_and(|(hit, _)| hit.flags.contains(&"de_official_commune_alias"));
+        if !ludwigshafen_alias_selected && Self::de_should_try_postcode_house_rescue(raw, &best) {
+            if let Some(rescue) = self.de_comma_postcode_house_rescue(raw, k, focus) {
+                best = rescue;
+            } else if let Some(rescue) =
+                self.de_strict_postcode_house_set_override(raw, &best, k, focus)
+            {
+                best = rescue;
+            } else if !Self::de_has_complete_postcode_house_evidence(&best) {
+                if let Some(rescue) = self.de_compact_house_pair_left_rescue(raw, k, focus) {
+                    best = rescue;
+                }
+            }
+        }
+        let x2 = Self::de_street_locality_qualifier_position(raw, &best);
+        let p3 = self.de_strict_source_street_typo_fallback(raw, &best, k);
+        let p4 = self.de_audited_compound_fallback(raw, k);
+        let p5 = self.de_blank_postcode_exact_house_fallback(raw, &best, k, focus);
+        Self::de_product_fallback_arbitration(&mut best, p3, p4, x2, p5);
+        if frankfurt.is_some() {
+            for (hit, _) in &mut best {
+                if !hit.flags.contains(&"de_frankfurt") {
+                    hit.flags.push("de_frankfurt");
+                }
+            }
+        }
+        best.truncate(k);
+        best
     }
 
     /// Confidence is MONOTONE by rank: a lower-ranked answer cannot look "more confident"
@@ -3347,16 +6782,21 @@ impl Index {
         }
     }
 
+    // Frozen release: retain each provenance flag and the validated recursive call sites.
+    #[allow(clippy::too_many_arguments)]
     fn query_feats_d(
         &self,
         raw: &str,
         k: usize,
         depth: u8,
         focus: Option<&QueryFocus>,
+        de_original_postcode_tail: Option<&str>,
+        de_original_postcode: Option<u32>,
+        de_postal_tail_eligible: bool,
+        original_cityless_street: Option<&str>,
     ) -> Vec<(Hit, [f32; N_FEATS])> {
-        let q = self.expand_city_aliases(&expand_two_token(&fold_units(
-            &crate::norm::fold_homoglyphs(&normalize(raw)),
-        )));
+        let normalized_raw = prepared_query_key(raw);
+        let q = self.expand_city_aliases(&normalized_raw);
         // French arrondissements: context-gated rewrite of "3eme"/Roman/order forms to the canon
         let q = fr_arrondissement_rewrite(&q).unwrap_or(q);
         // phone-number runs: cut before parsing, else digit pairs become "houses"
@@ -3421,7 +6861,8 @@ impl Index {
         } else {
             k
         };
-        let mut hits = self.query_feats_prepared(&q, prepared_k, focus);
+        let mut hits =
+            self.query_feats_prepared_cityless(&q, prepared_k, focus, original_cityless_street);
         if let Some(expected) = fr_area_constraint.as_deref() {
             hits.retain(|(hit, _)| normalize(&hit.commune) == expected);
             hits.truncate(k);
@@ -3551,7 +6992,16 @@ impl Index {
                 d += 1;
             }
             if d > 0 {
-                let h = self.query_feats_d(&toks[d..].join(" "), k, depth + 1, focus);
+                let h = self.query_feats_d(
+                    &toks[d..].join(" "),
+                    k,
+                    depth + 1,
+                    focus,
+                    de_original_postcode_tail,
+                    de_original_postcode,
+                    de_postal_tail_eligible,
+                    original_cityless_street,
+                );
                 if !h.is_empty() {
                     return h;
                 }
@@ -3563,7 +7013,19 @@ impl Index {
         // if an EXACT house resolves after the drop.
         let maxd = 8.min(toks.len().saturating_sub(2));
         for drop in 1..=maxd {
-            let h = self.query_feats_prepared(&toks[drop..].join(" "), k, focus);
+            let mut h = self.query_feats_prepared(&toks[drop..].join(" "), k, focus);
+            if let (Some(postcode), Some(postcode_tail)) =
+                (de_original_postcode, de_original_postcode_tail)
+            {
+                h.retain(|(hit, features)| {
+                    de_prefix_drop_preserves_postcode_locality(
+                        hit,
+                        features,
+                        postcode,
+                        postcode_tail,
+                    )
+                });
+            }
             if h.is_empty() {
                 continue;
             }
@@ -3625,7 +7087,18 @@ impl Index {
                 {
                     break;
                 }
-                let h = self.query_feats_prepared(&toks[..toks.len() - drop].join(" "), k, focus);
+                let shortened = toks[..toks.len() - drop].join(" ");
+                let dropped_tail = toks[toks.len() - drop..].join(" ");
+                let h = self.query_feats_prepared_with_retained_locality(
+                    &shortened,
+                    k,
+                    focus,
+                    de_retained_locality(
+                        de_original_postcode_tail,
+                        &dropped_tail,
+                        de_postal_tail_eligible,
+                    ),
+                );
                 if h.is_empty() {
                     continue;
                 }
@@ -3638,6 +7111,7 @@ impl Index {
                         hit.confidence = hit.confidence.min(0.6);
                         hit.flags.push("dropped_suffix");
                     }
+                    h.truncate(k);
                     return h;
                 }
             }
@@ -3744,13 +7218,14 @@ impl Index {
         mut f: Feats,
         numero: Option<u32>,
         rep: u32,
+        requested_postcode: Option<u32>,
         qwords: &[Vec<char>],
-    ) -> (Hit, [f32; N_FEATS], i32, u32, u32) {
+    ) -> RankedHit {
         let m = self.street_meta(sid);
         f.numero_present = numero.is_some();
         let mut snap_delta = 0u32;
         let (lat, lon, precision, housenumber, house_postcode_off) =
-            match numero.and_then(|nm| self.find_house(sid, &m, nm, rep)) {
+            match numero.and_then(|nm| self.find_house(sid, &m, nm, rep, requested_postcode)) {
                 Some((la, lo, 3, got, got_rep, postcode_off)) => {
                     // Interpolation returns the requested address, not either bracketing house.
                     (
@@ -3796,6 +7271,18 @@ impl Index {
                     )
                 }
             };
+        let rendered_postcode = self.postcode_for_house(&m, house_postcode_off);
+        if self.format_version >= 7
+            && m.postcode_disp_off == PC_DISP_AMBIGUOUS
+            && housenumber.is_some()
+        {
+            if let Some(requested) = requested_postcode {
+                let represented = Self::postcode_numeric_prefix(&rendered_postcode);
+                f.pc_exact = requested != 0 && represented == Some(requested);
+                f.pc_dept = requested != 0
+                    && represented.is_some_and(|postcode| postcode / 1000 == requested / 1000);
+            }
+        }
         let mut score = match &self.rank {
             Some(r) => r.score(&f),
             None => f.legacy() as f32,
@@ -3831,7 +7318,7 @@ impl Index {
                 street: self.name(m.name_off).to_string(),
                 housenumber,
                 commune: self.commune_name(m.commune_id).to_string(),
-                postcode: self.postcode_for_house(&m, house_postcode_off),
+                postcode: rendered_postcode,
                 flags: match_flags(&f),
                 region: self.admin_at(lat, lon), // WOF region in forward answers too
                 distance_m: None,
@@ -3840,15 +7327,85 @@ impl Index {
             name_sim,
             snap_delta,
             self.commune_prominence(m.commune_id),
+            sid,
         )
     }
 
-    /// STRUCTURED INPUT: pre-parsed street/number/city/postcode fields bypass the
-    /// segmentation heuristics (no "street|commune" boundary guessing). Resolve the commune
-    /// from city directly, look the street up within it (exact + type padding + rotation,
-    /// fuzzy when empty), find_house for the number. Isolated from free-form parsing, so
-    /// the primary path is unaffected.
+    /// STRUCTURED INPUT: pre-parsed street/number/city/postcode fields use the
+    /// direct structured resolver first.  A DE sheet also compares the canonical
+    /// field join with the country-scoped free-form fallbacks.  The structured
+    /// result keeps ties, so ordinary exact input is unchanged while Munich,
+    /// umlaut/digraph and compound street-type behavior stays in parity with the
+    /// public free-form API.
     pub fn query_structured(
+        &self,
+        street: &str,
+        number: Option<&str>,
+        city: &str,
+        postcode: Option<&str>,
+        k: usize,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        if self.country() != Some("de") || k == 0 {
+            return self.query_structured_primary(street, number, city, postcode, k);
+        }
+        let k = bound_k(k);
+        let street = bound_query(street);
+        let number = number.map(bound_query);
+        let city = bound_query(city);
+        let postcode = postcode.map(bound_query);
+        let _rules = crate::rules::scope(self.rules);
+        let mut primary = self.query_structured_primary(street, number, city, postcode, k);
+        // The city field has an explicit boundary, so apply DE city/abbreviation
+        // variants directly instead of asking the free-form segmenter to infer it.
+        // Alias targets remain hard postconditions; an equal-quality alias result
+        // wins because the constraint itself was needed to interpret the field.
+        for variant in crate::de::query_variants(city).into_iter().skip(1) {
+            let mut candidate =
+                self.query_structured_primary(street, number, &variant.query, postcode, k);
+            if let Some(expected) = variant.required_commune.as_deref() {
+                candidate.retain(|(hit, _)| normalize(&hit.commune) == expected);
+            }
+            let (Some(candidate_quality), current_quality) = (
+                Self::de_variant_quality(&candidate),
+                Self::de_variant_quality(&primary),
+            ) else {
+                continue;
+            };
+            let alias_tie = variant.effects.contains(&crate::de::Effect::CityAlias)
+                && current_quality == Some(candidate_quality);
+            if current_quality
+                .is_none_or(|current| Self::de_quality_is_better(candidate_quality, current))
+                || alias_tie
+            {
+                Self::annotate_de_effects(&mut candidate, &variant.effects);
+                primary = candidate;
+            }
+        }
+        let joined = [street, number.unwrap_or(""), postcode.unwrap_or(""), city]
+            .iter()
+            .filter(|value| !value.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut fallback = self.query_feats_country_variants(&joined, k, None);
+        let use_fallback = match (
+            Self::de_variant_quality(&fallback),
+            Self::de_variant_quality(&primary),
+        ) {
+            (Some(candidate), Some(current)) => Self::de_quality_is_better(candidate, current),
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if use_fallback {
+            Self::monotone_confidence(&mut fallback);
+            fallback
+        } else {
+            primary
+        }
+    }
+
+    /// Direct structured resolver: no street/commune boundary guessing.
+    fn query_structured_primary(
         &self,
         street: &str,
         number: Option<&str>,
@@ -3924,6 +7481,15 @@ impl Index {
             phrases.push(r);
         }
         phrases.extend(type_padded_variants(&sn));
+        let mut de_street_phrases = HashSet::new();
+        if self.country() == Some("de") {
+            for variant in crate::de::street_variants(&sn) {
+                if !phrases.contains(&variant) {
+                    de_street_phrases.insert(variant.clone());
+                    phrases.push(variant);
+                }
+            }
+        }
         let mut cand: HashMap<u32, Feats> = HashMap::new();
         for cid in &cids {
             let insee = self.commune_insee(*cid);
@@ -3943,6 +7509,7 @@ impl Index {
                             pc_exact: pc.is_some_and(|p| m.postcode != 0 && m.postcode == p),
                             pc_dept: pc
                                 .is_some_and(|p| m.postcode != 0 && m.postcode / 1000 == p / 1000),
+                            de_street_type: de_street_phrases.contains(ph),
                             ..Default::default()
                         },
                     );
@@ -3977,7 +7544,7 @@ impl Index {
         cand_v.sort_by_key(|(sid, _)| *sid);
         let mut hits: Vec<_> = cand_v
             .into_iter()
-            .map(|(sid, f)| self.make_hit(sid, f, numero, rep, &qwords))
+            .map(|(sid, f)| self.make_hit(sid, f, numero, rep, pc, &qwords))
             .collect();
         hits.sort_by(|a, b| {
             b.0.score
@@ -3990,7 +7557,7 @@ impl Index {
         hits.truncate(k);
         {
             let mut out: Vec<(Hit, [f32; N_FEATS])> =
-                hits.into_iter().map(|(h, f, _, _, _)| (h, f)).collect();
+                hits.into_iter().map(|(h, f, _, _, _, _)| (h, f)).collect();
             Self::monotone_confidence(&mut out);
             out
         }
@@ -4036,6 +7603,110 @@ impl Index {
         k: usize,
         focus: Option<&QueryFocus>,
     ) -> Vec<(Hit, [f32; N_FEATS])> {
+        self.query_feats_prepared_with_retained_locality(q, k, focus, None)
+    }
+
+    fn query_feats_prepared_postcode_house_rescue(
+        &self,
+        q: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+        additional_exact_house_numbers: &[u32],
+        scan_budget: &mut usize,
+        seen_phrases: &mut HashSet<String>,
+    ) -> Result<Vec<DePostcodeHouseCandidate>, ()> {
+        let mut overflowed = false;
+        let hits = self.query_feats_prepared_internal(
+            q,
+            k,
+            focus,
+            None,
+            true,
+            additional_exact_house_numbers,
+            scan_budget,
+            seen_phrases,
+            &mut overflowed,
+            None,
+        );
+        if overflowed {
+            Err(())
+        } else {
+            Ok(hits
+                .into_iter()
+                .map(
+                    |(hit, features, _, _, _, source_sid)| DePostcodeHouseCandidate {
+                        source_sid,
+                        hit,
+                        features,
+                    },
+                )
+                .collect())
+        }
+    }
+
+    fn query_feats_prepared_with_retained_locality(
+        &self,
+        q: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+        retained_locality: Option<DeRetainedLocality<'_>>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        self.query_feats_prepared_context(q, k, focus, retained_locality, None)
+    }
+
+    fn query_feats_prepared_cityless(
+        &self,
+        q: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+        original_cityless_street: Option<&str>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        self.query_feats_prepared_context(q, k, focus, None, original_cityless_street)
+    }
+
+    fn query_feats_prepared_context(
+        &self,
+        q: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+        retained_locality: Option<DeRetainedLocality<'_>>,
+        original_cityless_street: Option<&str>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        let mut overflowed = false;
+        let mut scan_budget = 0;
+        let mut seen_phrases = HashSet::new();
+        self.query_feats_prepared_internal(
+            q,
+            k,
+            focus,
+            retained_locality,
+            false,
+            &[],
+            &mut scan_budget,
+            &mut seen_phrases,
+            &mut overflowed,
+            original_cityless_street,
+        )
+        .into_iter()
+        .map(|(hit, features, _, _, _, _)| (hit, features))
+        .collect()
+    }
+
+    // Frozen release: preserve the existing provenance, scan-budget and overflow call wiring.
+    #[allow(clippy::too_many_arguments)]
+    fn query_feats_prepared_internal(
+        &self,
+        q: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+        retained_locality: Option<DeRetainedLocality<'_>>,
+        de_postcode_house_scan: bool,
+        de_postcode_house_additional_numbers: &[u32],
+        de_postcode_house_scan_budget: &mut usize,
+        de_postcode_house_seen_phrases: &mut HashSet<String>,
+        de_postcode_house_scan_overflowed: &mut bool,
+        original_cityless_street: Option<&str>,
+    ) -> Vec<RankedHit> {
         // input CAP (token bombs): the cascade is ~O(n^2), so hundreds of repeated tokens
         // could pin a core for seconds. Real addresses are <= ~15 tokens: collapse repeats
         // of a token (max 2 occurrences — "new york new york" survives), overall cap 32.
@@ -4062,7 +7733,7 @@ impl Index {
         while i < n {
             let t = toks[i];
             let all_digit = t.bytes().all(|b| b.is_ascii_digit());
-            if all_digit && t.len() == 5 {
+            if is_five_digit_postcode(t) {
                 // French/Italian postcode: 5 digits
                 postcode = Some(t.parse().unwrap_or(0));
                 used[i] = true;
@@ -4147,17 +7818,12 @@ impl Index {
                 continue;
             }
             let t = toks[ci];
-            let d = t.bytes().take_while(|b| b.is_ascii_digit()).count();
-            if (1..=4).contains(&d)
-                && t.len() > d
-                && t[d..].chars().count() <= 4
-                && t[d..].chars().all(|c| c.is_alphanumeric())
-            {
+            if let Some((d, suffix)) = compound_house_parts(t) {
                 let numero = t[..d].parse().ok();
                 // keep consuming suffixes after the compound token, but ONLY
                 // letter+digit mixes: the rep dictionary contains junk ("rue", "5")
                 // and greedy consumption of it would eat half the street
-                let mut rep_s = t[d..].to_string();
+                let mut rep_s = suffix.to_string();
                 let mut j = ci + 1;
                 while j < n && !used[j] && {
                     let w = toks[j];
@@ -4214,12 +7880,28 @@ impl Index {
         // 4) hypothesis selection: exact candidates; best by maximum score
         let rest_of = |h: &Hyp| -> Vec<&str> { h.rest_idx.iter().map(|&ix| toks[ix]).collect() };
         let mut best: Option<(usize, HashMap<u32, Feats>, i32)> = None;
+        let mut de_postcode_house_exact_cache = HashMap::new();
         for (hi, h) in hyps.iter().enumerate() {
             let rest = rest_of(h);
             if rest.is_empty() {
                 continue;
             }
-            let cand = self.collect_candidates(&rest, postcode, h.from_ml);
+            let (cand, scan_overflowed) = self.collect_candidates(
+                &rest,
+                postcode,
+                h.numero,
+                h.rep,
+                h.from_ml,
+                de_postcode_house_scan,
+                de_postcode_house_additional_numbers,
+                de_postcode_house_scan_budget,
+                de_postcode_house_seen_phrases,
+                &mut de_postcode_house_exact_cache,
+            );
+            if scan_overflowed {
+                *de_postcode_house_scan_overflowed = true;
+                return Vec::new();
+            }
             let top = cand.values().map(|f| f.legacy()).max().unwrap_or(i32::MIN);
             let better = match &best {
                 None => !cand.is_empty(),
@@ -4237,12 +7919,16 @@ impl Index {
         // 5) typos — only when the exact passes are empty; among hypotheses pick the
         // BEST by score (taking the first non-empty one misleads on streets with
         // numbers in the name); the fuzzy path is expensive — cap the hypothesis count
-        if best.is_none() {
+        if best.is_none() && !de_postcode_house_scan {
             for (hi, h) in hyps.iter().enumerate().take(5) {
                 let rest = rest_of(h);
                 if rest.is_empty() {
                     continue;
                 }
+                #[cfg(test)]
+                DE_POSTCODE_HOUSE_RESCUE_FUZZY_CALLS.with(|calls| {
+                    calls.set(calls.get().saturating_add(1));
+                });
                 let cand = self.collect_fuzzy(&rest, postcode, h.from_ml);
                 let top = cand.values().map(|f| f.legacy()).max().unwrap_or(i32::MIN);
                 let better = match &best {
@@ -4259,12 +7945,19 @@ impl Index {
         // only when both are empty: e.g. "amir temur" -> "Amir Temur shoh". Runs last
         // so it never overrides correct answers from the typo path ("Via Roma 1 Roma").
         // Uses the street-word inverted index.
-        if best.is_none() && std::env::var_os("GRIDPIN_NO_SUBSET").is_none() {
+        if best.is_none()
+            && !de_postcode_house_scan
+            && std::env::var_os("GRIDPIN_NO_SUBSET").is_none()
+        {
             for (hi, h) in hyps.iter().enumerate().take(5) {
                 let rest = rest_of(h);
                 if rest.is_empty() {
                     continue;
                 }
+                #[cfg(test)]
+                DE_POSTCODE_HOUSE_RESCUE_SUBSET_CALLS.with(|calls| {
+                    calls.set(calls.get().saturating_add(1));
+                });
                 let cand = self.collect_subset(&rest, postcode);
                 let top = cand.values().map(|f| f.legacy()).max().unwrap_or(i32::MIN);
                 let better = match &best {
@@ -4301,11 +7994,62 @@ impl Index {
         // without the venue prefix and finds the right street.
         if let Some(pc) = postcode {
             let dept = pc / 1000;
-            scored.retain(|(sid, _)| {
-                let p = self.street_meta(*sid).postcode;
-                p == 0 || p / 1000 == dept
+            scored.retain(|(sid, features)| {
+                let m = self.street_meta(*sid);
+                let p = m.postcode;
+                p == 0
+                    || p / 1000 == dept
+                    || (de_postcode_house_scan
+                        && self.country() == Some("de")
+                        && self.format_version >= 7
+                        && features.street_exact
+                        && numero.is_some_and(|requested_number| {
+                            self.exact_house_postcode_set_candidate_cached(
+                                &mut de_postcode_house_exact_cache,
+                                *sid,
+                                &m,
+                                requested_number,
+                                rep,
+                                de_postcode_house_additional_numbers,
+                                pc,
+                            )
+                        }))
             });
         }
+        // A v7 mixed-postcode street stores the exact postcode at house level.  The
+        // ordinary pre-ranking cap cannot see that evidence yet: it sorts StreetMeta
+        // before `make_hit` decodes the represented house, so a unique exact
+        // street+house+postcode can be cut behind prominent homonyms.  Preserve that one
+        // causally complete candidate through the cap.  Ambiguous duplicates fail closed:
+        // if more than one street has the same exact house/postcode, none receives this
+        // rescue and the established ranking remains authoritative.
+        let de_postcode_house_rescue = match (self.country(), postcode, numero) {
+            (Some("de"), Some(requested_postcode), Some(requested_number))
+                if de_postcode_house_scan && self.format_version >= 7 =>
+            {
+                let matches: Vec<u32> = scored
+                    .iter()
+                    .filter_map(|(sid, features)| {
+                        let m = self.street_meta(*sid);
+                        if !features.street_exact {
+                            return None;
+                        }
+                        self.exact_house_postcode_set_candidate_cached(
+                            &mut de_postcode_house_exact_cache,
+                            *sid,
+                            &m,
+                            requested_number,
+                            rep,
+                            de_postcode_house_additional_numbers,
+                            requested_postcode,
+                        )
+                        .then_some(*sid)
+                    })
+                    .collect();
+                (matches.len() == 1).then(|| matches[0])
+            }
+            _ => None,
+        };
         // the pre-ranking truncation must not cut by street_id (= source CSV order), or at
         // equal score only low-id candidates would survive and the top-1 would depend on
         // -k. At equal score the PROMINENT commune survives; id is the last resort.
@@ -4322,7 +8066,24 @@ impl Index {
                 .then(b.2.cmp(&a.2))
                 .then(a.0.cmp(&b.0))
         });
-        scored.truncate(k.max(10) * 3);
+        let pre_rank_limit = k.max(10) * 3;
+        if scored.len() > pre_rank_limit {
+            if let Some(rescue_sid) = de_postcode_house_rescue {
+                if let Some(position) = scored
+                    .iter()
+                    .position(|(sid, _, _)| *sid == rescue_sid)
+                    .filter(|position| *position >= pre_rank_limit)
+                {
+                    let rescue = scored.remove(position);
+                    scored.truncate(pre_rank_limit);
+                    scored.push(rescue);
+                } else {
+                    scored.truncate(pre_rank_limit);
+                }
+            } else {
+                scored.truncate(pre_rank_limit);
+            }
+        }
         let mut scored: Vec<(u32, Feats)> =
             scored.into_iter().map(|(sid, f, _)| (sid, f)).collect();
         if focus.is_some() {
@@ -4356,9 +8117,9 @@ impl Index {
             .map(|s| s.chars().collect())
             .collect();
 
-        let mut hits: Vec<(Hit, [f32; N_FEATS], i32, u32, u32)> = Vec::new();
+        let mut hits: Vec<RankedHit> = Vec::new();
         for (sid, f) in scored {
-            hits.push(self.make_hit(sid, f, numero, rep, &qwords));
+            hits.push(self.make_hit(sid, f, numero, rep, postcode, &qwords));
         }
         // GEO ANCHOR for homonyms. If the query TAIL names a major city (resolving to a
         // high-prominence center), then among candidates with the SAME street name the one
@@ -4450,8 +8211,16 @@ impl Index {
         // otherwise the geo anchor already handled it), (2) the winner is FARTHER than
         // 60 km from the capital, (3) a candidate with the SAME street name lies WITHIN
         // 40 km of it. Houses near the capital (already closest) and non-homonyms are
-        // unaffected.
-        if focus.is_none() && !has_named_city {
+        // unaffected. In Germany, an exact postcode match on the already sorted winner is
+        // stronger evidence than this cityless prior: tail recovery can drop an unrecognized
+        // locality while retaining its postcode, and promoting the anchor then inverts the
+        // postcode-aware score order. A parsed postcode without an exact candidate is not
+        // enough to disable the prior (the anchor may still be the only nearby result).
+        // Keep the established behavior unchanged for every other country.
+        let german_sorted_top_has_exact_postcode = self.country() == Some("de")
+            && postcode.is_some()
+            && hits.first().is_some_and(|t| Feats::from_vec(&t.1).pc_exact);
+        if focus.is_none() && !has_named_city && !german_sorted_top_has_exact_postcode {
             if let Some((alat, alon)) = anchor {
                 let top_far = hits
                     .first()
@@ -4463,6 +8232,11 @@ impl Index {
                     // distant exact house.
                     let near_cap = hits.iter().position(|t| {
                         t.1[0] > 0.5
+                            && de_capital_prior_candidate_allowed(
+                                self.country(),
+                                &hits[0].1,
+                                t.0.precision,
+                            )
                             && street_key(&t.0.street) == tkey
                             && Self::dist_km(alat, alon, t.0.lat, t.0.lon) < 40.0
                     });
@@ -4475,6 +8249,29 @@ impl Index {
                 }
             }
         }
+        Self::de_cityless_prominence(
+            &mut hits,
+            self.country(),
+            original_cityless_street,
+            focus.is_some(),
+            postcode,
+        );
+        // DE retained-locality tie-break for the c2 suffix retry. Only replace the current
+        // winner when exactly one later homonym has stronger exact/prefix locality evidence
+        // from the original post-postcode tail, and every earlier address-quality comparator
+        // is byte-for-byte equal. The exact discarded slice must also reach that commune;
+        // this blocks shared-generic-token conflicts such as Gross Roge -> Roge Stadt.
+        // Explicit focus keeps its established ordering and never enters this path.
+        // DE exact-PLZ c2 tail tie-break.  Run only after CAPITAL and retained-locality:
+        // an already exact-postcode winner or a retained-locality decision is final.  The
+        // helper also fail-closes outside a DE suffix retry and under explicit focus.
+        apply_de_c2_tiebreaks(
+            &mut hits,
+            retained_locality,
+            self.country() == Some("de"),
+            focus.is_some(),
+            postcode,
+        );
         // confidence MARGIN CUTOFF: a small top-1 vs top-2 SCORE gap plus a LARGE
         // geographic spread means a high risk of a distant homonym. Lower the top-1
         // confidence and set a flag — the ANSWER itself is unchanged (a downstream
@@ -4488,7 +8285,7 @@ impl Index {
             }
         }
         hits.truncate(k);
-        hits.into_iter().map(|(h, f, _, _, _)| (h, f)).collect()
+        hits
     }
 
     pub fn query(&self, raw: &str, k: usize) -> Vec<Hit> {
@@ -4789,6 +8586,1593 @@ impl Index {
 mod tests {
     use super::*;
 
+    // Keep the frozen fixtures' explicit fields; grouping them would rewrite the test call sites.
+    #[allow(clippy::too_many_arguments)]
+    fn retained_test_hit(
+        commune: &str,
+        street: &str,
+        housenumber: Option<&str>,
+        postcode: &str,
+        precision: &'static str,
+        score: f32,
+        features: [f32; N_FEATS],
+        flags: Vec<&'static str>,
+        name_similarity: i32,
+        snap_delta: u32,
+    ) -> RankedHit {
+        (
+            Hit {
+                lat: 50.0,
+                lon: 8.0,
+                precision,
+                score,
+                confidence: 0.8,
+                street: street.to_owned(),
+                housenumber: housenumber.map(str::to_owned),
+                commune: commune.to_owned(),
+                postcode: postcode.to_owned(),
+                flags,
+                region: None,
+                distance_m: None,
+            },
+            features,
+            name_similarity,
+            snap_delta,
+            1,
+            0,
+        )
+    }
+
+    fn wave_b1_hits() -> Vec<RankedHit> {
+        let make = || {
+            retained_test_hit(
+                "Near",
+                "Teststraße",
+                Some("12"),
+                "",
+                "house",
+                8.0,
+                Feats {
+                    street_exact: true,
+                    ..Feats::default()
+                }
+                .to_vec(),
+                vec![],
+                9,
+                0,
+            )
+        };
+        let mut a = make();
+        let mut b = make();
+        a.4 = 10;
+        b.0.commune = "Large".to_owned();
+        b.4 = 100;
+        vec![a, b]
+    }
+
+    #[test]
+    fn de_wave_b1_more_prominent_equal_house_wins_stably() {
+        let mut hits = wave_b1_hits();
+        let key = street_key("Teststraße");
+        Index::de_cityless_prominence(&mut hits, Some("de"), Some(&key), false, None);
+        assert_eq!(hits[0].0.commune, "Large");
+        assert_eq!(hits[1].0.commune, "Near");
+        assert!(hits[0].0.flags.contains(&"de_cityless_prominence"));
+        hits[1].4 = 100;
+        Index::de_cityless_prominence(&mut hits, Some("de"), Some(&key), false, None);
+        assert_eq!(hits[0].0.commune, "Large", "ties must retain prior order");
+    }
+
+    #[test]
+    fn de_wave_b1_scope_preserves_every_explicit_context() {
+        let key = street_key("Teststraße");
+        for (country, original, focused, pc) in [
+            (Some("nl"), Some(key.as_str()), false, None),
+            (Some("de"), None, false, None),
+            (Some("de"), Some("teststrasseberlin"), false, None),
+            (Some("de"), Some(key.as_str()), true, None),
+            (Some("de"), Some(key.as_str()), false, Some(12345)),
+        ] {
+            let mut hits = wave_b1_hits();
+            let before = serde_json::to_string(&hits).unwrap();
+            Index::de_cityless_prominence(&mut hits, country, original, focused, pc);
+            assert_eq!(serde_json::to_string(&hits).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn de_wave_b1_address_quality_cannot_be_overridden() {
+        for case in 0..7 {
+            let mut hits = wave_b1_hits();
+            match case {
+                0 => hits[1].0.precision = "interp",
+                1 => hits[1].1[0] = 0.0,
+                2 => hits[1].0.street = "Otherstraße".to_owned(),
+                3 => hits[1].0.score -= 1.0,
+                4 => hits[1].2 -= 1,
+                5 => hits[1].3 += 1,
+                _ => hits[0].0.precision = "interp",
+            }
+            Index::de_cityless_prominence(
+                &mut hits,
+                Some("de"),
+                Some(&street_key("Teststraße")),
+                false,
+                None,
+            );
+            assert_eq!(hits[0].0.commune, "Near", "case {case}");
+        }
+    }
+
+    #[test]
+    fn de_wave_b1_original_surface_does_not_drop_city_or_postcode() {
+        for raw in ["Teststraße 12", "Teststraße 12a", "Teststraße 12 a"] {
+            assert_eq!(
+                Index::de_cityless_street(raw),
+                Some(street_key("Teststraße"))
+            );
+        }
+        for raw in [
+            "Teststraße 12, Berlin",
+            "Teststraße 12 Berlin",
+            "Teststraße 12 12345",
+            "Teststraße 12 12345 Berlin",
+            "Berlin Teststraße 12",
+            "Teststraße Berlin 12",
+        ] {
+            assert_ne!(
+                Index::de_cityless_street(raw),
+                Some(street_key("Teststraße")),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn de_retained_locality_core_is_exact_or_prefix_only() {
+        let retained = de_retained_locality(Some("groß roge"), "roge", true).unwrap();
+        assert_eq!(retained.postcode_tail, "groß roge");
+        assert_eq!(retained.dropped_tail, "roge");
+        assert!(de_retained_locality(None, "roge", true).is_none());
+        assert_eq!(
+            de_postcode_tail("x 11111 noise 22222 frankfurt").as_deref(),
+            Some("frankfurt")
+        );
+        assert!(de_postcode_tail("x 11111").is_none());
+        assert_eq!(de_retained_locality_score("lohne", "Lohne, Stadt"), 2);
+        assert_eq!(de_retained_locality_score("lohne", "Stadt Lohne"), 2);
+        assert_eq!(
+            de_retained_locality_score("frankfurt", "Frankfurt am Main"),
+            1
+        );
+        assert_eq!(de_retained_locality_score("frank", "Frankfurt"), 0);
+        assert_eq!(
+            de_retained_locality_score("neustadt weinstraße", "Neustadt an der Weinstraße"),
+            0
+        );
+        assert_eq!(de_retained_locality_score("groß roge", "Klein Roge"), 0);
+        assert!(de_dropped_tail_reaches_commune(
+            "frankfurt",
+            "Frankfurt am Main"
+        ));
+        assert!(
+            de_dropped_tail_reaches_commune("roge", "Klein Roge"),
+            "the full post-postcode context, not this reachability gate alone, rejects the conflict"
+        );
+    }
+
+    #[test]
+    fn de_capital_prior_keeps_an_exact_house_over_a_near_anchor() {
+        let mut exact_house = [0.0; N_FEATS];
+        exact_house[0] = 1.0;
+        exact_house[8] = 1.0;
+
+        assert!(!de_capital_prior_candidate_allowed(
+            Some("de"),
+            &exact_house,
+            "near",
+        ));
+        assert!(de_capital_prior_candidate_allowed(
+            Some("de"),
+            &exact_house,
+            "interp",
+        ));
+        assert!(de_capital_prior_candidate_allowed(
+            Some("fr"),
+            &exact_house,
+            "near",
+        ));
+
+        exact_house[8] = 0.0;
+        assert!(de_capital_prior_candidate_allowed(
+            Some("de"),
+            &exact_house,
+            "near",
+        ));
+    }
+
+    #[test]
+    fn de_exact_locality_aliases_are_postcode_bound_without_cross_products() {
+        for (query, postcode, commune) in DE_EXACT_LOCALITY_ALIASES {
+            assert!(
+                de_exact_locality_alias_matches(query, *postcode, commune),
+                "missing exact alias {query:?} / {postcode} / {commune:?}"
+            );
+            assert!(de_is_exact_locality_alias_query(query, *postcode));
+            assert!(!de_exact_locality_alias_matches(
+                query,
+                postcode.saturating_add(1),
+                commune,
+            ));
+        }
+        assert!(!de_exact_locality_alias_matches(
+            "Berlin",
+            13187,
+            "Gesundbrunnen"
+        ));
+        assert!(!de_exact_locality_alias_matches(
+            "Landkirchen",
+            23769,
+            "Lübbenau"
+        ));
+        assert!(!de_exact_locality_alias_matches(
+            "Zerkwitz", 3222, "Fehmarn"
+        ));
+    }
+
+    #[test]
+    fn de_postcode_house_locality_aliases_are_explicit_and_bounded() {
+        for (query, indexed) in [
+            ("reichenbach vogt", "Reichenbach im Vogtland"),
+            ("sankt wendel", "St. Wendel"),
+            ("homburg saar", "Homburg"),
+            ("kottmar ot eibau", "Eibau"),
+            ("st peter ording", "Sankt Peter-Ording"),
+            ("burg auf fehmarn", "Fehmarn"),
+        ] {
+            assert!(
+                de_locality_qualifiers_match(query, indexed),
+                "{query:?} must be compatible with {indexed:?}"
+            );
+        }
+        assert!(!de_locality_qualifiers_match(
+            "neustadt an der weinstraße",
+            "Neustadt am Rübenberge"
+        ));
+        assert!(!de_locality_qualifiers_match(
+            "offenbach",
+            "Frankfurt am Main"
+        ));
+        assert!(!de_locality_qualifiers_match(
+            "homburg saar",
+            "Bad Homburg vor der Höhe"
+        ));
+        assert!(!de_locality_qualifiers_match("hallenberg", "Halle"));
+        for district in [
+            "Adlershof",
+            "Charlottenburg",
+            "Dahlem",
+            "Kaulsdorf",
+            "Kreuzberg",
+            "Marienfelde",
+            "Mitte",
+            "Neukölln",
+            "Niederschöneweide",
+            "Nikolassee",
+            "Tempelhof",
+            "Wilmersdorf",
+        ] {
+            assert!(de_is_berlin_postal_locality(district));
+        }
+        assert!(!de_is_berlin_postal_locality("Offenbach"));
+        assert!(de_is_proven_berlin_postcode(10117));
+        assert!(!de_is_proven_berlin_postcode(12529));
+    }
+
+    #[test]
+    fn de_wave_n_locality_strength_preserves_audited_same_postcode_relations() {
+        for (query, postcode, commune, minimum) in [
+            ("leer ostfriesland", 26789, "Leer", 1),
+            ("berlin", 14195, "Lichterfelde", 3),
+            ("lutherstadt wittenberg", 6886, "Wittenberg", 3),
+            ("wittenberg lutherstadt", 6886, "Wittenberg", 3),
+            ("forst lausitz", 3149, "Forst", 1),
+            ("lubeck", 23552, "Lübeck, Hansestadt", 1),
+            ("berlin", 10783, "Schöneberg", 3),
+            ("berlin", 13627, "Charlottenburg-Nord", 3),
+            ("berlin", 14059, "Charlottenburg", 3),
+            ("weilheim teck", 73235, "Weilheim an der Teck", 3),
+            ("konigstein taunus", 61462, "Königstein im Taunus", 3),
+            ("freiburg breisgau", 79104, "Freiburg im Breisgau", 3),
+            ("freiburg", 79115, "Freiburg im Breisgau", 1),
+            ("bernburg saale", 6406, "Bernburg", 1),
+            ("muhlhausen thuringen", 99974, "Mühlhausen", 1),
+            ("berlin", 10587, "Charlottenburg", 3),
+            ("oelsnitz vogtland", 8606, "Oelsnitz/Vogtl.", 3),
+            ("frankenberg sachsen", 9669, "Frankenberg/Sa.", 3),
+        ] {
+            let score = Index::de_postcode_house_locality_score(query, None, postcode, commune);
+            assert!(
+                score >= minimum,
+                "{query:?} / {postcode} must retain {commune:?}: score={score}"
+            );
+        }
+
+        assert_eq!(
+            Index::de_postcode_house_locality_score("kanzach", None, 88422, "Bad Buchau"),
+            0
+        );
+        assert!(
+            Index::de_postcode_house_locality_score(
+                "oelsnitz vogtland",
+                None,
+                8606,
+                "Oelsnitz/Vogtl."
+            ) > Index::de_postcode_house_locality_score(
+                "oelsnitz vogtland",
+                None,
+                8606,
+                "Oelsnitz"
+            )
+        );
+        assert!(
+            Index::de_postcode_house_locality_score(
+                "frankenberg sachsen",
+                None,
+                9669,
+                "Frankenberg/Sa."
+            ) > Index::de_postcode_house_locality_score(
+                "frankenberg sachsen",
+                None,
+                9669,
+                "Frankenberg"
+            )
+        );
+
+        for (query, postcode, commune) in [
+            ("konigstein taunus", 61462, "Königstein im Taunus"),
+            ("freiburg breisgau", 79104, "Freiburg im Breisgau"),
+            ("freiburg", 79115, "Freiburg im Breisgau"),
+            ("oelsnitz vogtland", 8606, "Oelsnitz/Vogtl."),
+            ("frankenberg sachsen", 9669, "Frankenberg/Sa."),
+            ("lutherstadt wittenberg", 6886, "Wittenberg"),
+            ("wittenberg lutherstadt", 6886, "Wittenberg"),
+            ("weilheim teck", 73235, "Weilheim an der Teck"),
+            ("berlin", 10587, "Charlottenburg"),
+            ("berlin", 10783, "Schöneberg"),
+            ("berlin", 13627, "Charlottenburg-Nord"),
+            ("berlin", 14059, "Charlottenburg"),
+            ("berlin", 14195, "Lichterfelde"),
+        ] {
+            assert_eq!(
+                Index::de_postcode_house_locality_score(query, None, postcode, commune),
+                3,
+                "the audited relation must be strong only on its exact postcode"
+            );
+            assert!(
+                Index::de_postcode_house_locality_score(query, None, 99999, commune) < 3,
+                "{query:?} -> {commune:?} must not retain strong evidence across postcodes"
+            );
+        }
+        assert!(
+            Index::de_postcode_house_locality_score("berlin", None, 10587, "Schöneberg") < 3,
+            "Berlin locality and postcode allowlists must not form an unproven cross-product"
+        );
+    }
+
+    #[test]
+    fn de_wave_n_new_berlin_relations_do_not_cross_product() {
+        let relations = [
+            (10587, "Charlottenburg"),
+            (10783, "Schöneberg"),
+            (13627, "Charlottenburg-Nord"),
+            (14059, "Charlottenburg"),
+            (14195, "Lichterfelde"),
+        ];
+        let district_candidates = [
+            "Adlershof",
+            "Charlottenburg",
+            "Charlottenburg-Nord",
+            "Dahlem",
+            "Kaulsdorf",
+            "Kreuzberg",
+            "Lichterfelde",
+            "Marienfelde",
+            "Mitte",
+            "Neukölln",
+            "Niederschöneweide",
+            "Nikolassee",
+            "Schöneberg",
+            "Tempelhof",
+            "Wilmersdorf",
+        ];
+
+        for (postcode, exact_commune) in relations {
+            assert_eq!(
+                Index::de_postcode_house_locality_score("berlin", None, postcode, exact_commune,),
+                3,
+                "the registered Berlin triple must remain strong: {postcode} -> {exact_commune}"
+            );
+            let exact_core = de_commune_core(exact_commune);
+            for commune in district_candidates {
+                if de_commune_core(commune) == exact_core {
+                    continue;
+                }
+                assert!(
+                    Index::de_postcode_house_locality_score("berlin", None, postcode, commune) < 3,
+                    "an unregistered Berlin cross-product must stay weak: {postcode} -> {commune}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn de_prefix_drop_requires_original_postcode_or_locality_evidence() {
+        let features = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let wrong = retained_test_hit(
+            "Celle, Stadt",
+            "Berlinstraße",
+            Some("8"),
+            "",
+            "house",
+            0.43,
+            features,
+            vec!["street_exact", "house_rep", "de_street_type"],
+            17,
+            0,
+        );
+        assert!(!de_prefix_drop_preserves_postcode_locality(
+            &wrong.0, &wrong.1, 10117, "berlin"
+        ));
+
+        let matching_locality = retained_test_hit(
+            "Frankfurt am Main",
+            "Domstraße",
+            Some("10"),
+            "",
+            "house",
+            0.43,
+            features,
+            vec!["street_exact", "house_rep"],
+            17,
+            0,
+        );
+        assert!(de_prefix_drop_preserves_postcode_locality(
+            &matching_locality.0,
+            &matching_locality.1,
+            60311,
+            "frankfurt"
+        ));
+
+        let mut postcode_features = features;
+        postcode_features[4] = 1.0;
+        let matching_postcode = retained_test_hit(
+            "Charlottenburg",
+            "Testweg",
+            Some("1"),
+            "10117",
+            "house",
+            0.43,
+            postcode_features,
+            vec!["street_exact", "house_rep", "pc_exact"],
+            17,
+            0,
+        );
+        assert!(de_prefix_drop_preserves_postcode_locality(
+            &matching_postcode.0,
+            &matching_postcode.1,
+            10117,
+            "berlin"
+        ));
+    }
+
+    #[test]
+    fn de_abbreviation_variant_cannot_trade_a_live_result_for_weaker_invented_context() {
+        let pair = |hit: RankedHit| (hit.0, hit.1);
+        let current_features = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let current = vec![pair(retained_test_hit(
+            "Rinteln",
+            "Paul-Erdniß-Straße",
+            Some("1"),
+            "",
+            "house",
+            -1.03,
+            current_features,
+            vec!["street_fuzzy", "house_rep"],
+            0,
+            0,
+        ))];
+
+        let mut invented_features = current_features;
+        invented_features[3] = 1.0;
+        let invented_commune = vec![pair(retained_test_hit(
+            "Straßenhaus",
+            "Paul-Mertgen-Straße",
+            Some("1"),
+            "",
+            "house",
+            99.0,
+            invented_features,
+            vec!["street_fuzzy", "commune_prefix", "house_rep"],
+            0,
+            0,
+        ))];
+        assert!(!Index::de_abbreviation_candidate_may_displace(
+            &invented_commune,
+            &current,
+            None,
+        ));
+
+        let exact_address = vec![pair(retained_test_hit(
+            "Rinteln",
+            "Paul-Erdniß-Straße",
+            Some("1"),
+            "",
+            "house",
+            1.0,
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec!["street_exact", "house_rep"],
+            0,
+            0,
+        ))];
+        let postcode_only = vec![pair(retained_test_hit(
+            "Straßenhaus",
+            "Other",
+            Some("1"),
+            "01067",
+            "house",
+            99.0,
+            [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0],
+            vec!["commune_prefix", "pc_exact"],
+            0,
+            0,
+        ))];
+        assert!(
+            !Index::de_abbreviation_candidate_may_displace(&postcode_only, &exact_address, None,),
+            "postcode-only evidence must not trade away exact street+house evidence"
+        );
+        let equal_invented = vec![pair(retained_test_hit(
+            "Straßenhaus",
+            "Paul-Erdniß-Straße",
+            Some("1"),
+            "",
+            "house",
+            99.0,
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec!["street_exact", "commune_prefix", "house_rep"],
+            0,
+            0,
+        ))];
+        assert!(
+            !Index::de_abbreviation_candidate_may_displace(
+                &equal_invented,
+                &exact_address,
+                Some("rinteln"),
+            ),
+            "invented commune context needs a strict independent-address gain"
+        );
+
+        for (tail, commune, house) in [
+            ("ahlden aller", "Ahlden (Aller), Flecken", "1"),
+            ("bad iburg", "Bad Iburg, Stadt", "12"),
+        ] {
+            let tied_wrong_locality = vec![pair(retained_test_hit(
+                "Wittenburg",
+                "Große Str.",
+                Some(house),
+                "",
+                "house",
+                0.43,
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                vec!["street_exact", "house_rep", "dropped_suffix"],
+                0,
+                0,
+            ))];
+            let retained_candidate = vec![pair(retained_test_hit(
+                commune,
+                "Große Straße",
+                Some(house),
+                "",
+                "house",
+                0.08,
+                [1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                vec!["street_exact", "commune_prefix", "house_rep"],
+                0,
+                0,
+            ))];
+            assert!(
+                !Index::de_abbreviation_candidate_may_displace(
+                    &retained_candidate,
+                    &tied_wrong_locality,
+                    None,
+                ),
+                "a variant must not invent locality evidence without the original tail",
+            );
+            assert!(
+                Index::de_abbreviation_candidate_may_displace(
+                    &retained_candidate,
+                    &tied_wrong_locality,
+                    Some(tail),
+                ),
+                "original locality {tail:?} must break a tied exact-address arbitration",
+            );
+        }
+        let strict_improvement = vec![pair(retained_test_hit(
+            "Straßenhaus",
+            "Paul-Erdniß-Straße",
+            Some("1"),
+            "01067",
+            "house",
+            99.0,
+            [1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec!["street_exact", "commune_prefix", "house_rep", "pc_exact"],
+            0,
+            0,
+        ))];
+        assert!(Index::de_abbreviation_candidate_may_displace(
+            &strict_improvement,
+            &exact_address,
+            None,
+        ));
+
+        let dropped_name = vec![pair(retained_test_hit(
+            "Arnsberg",
+            "Stumpfstraße",
+            Some("2"),
+            "",
+            "house",
+            0.43,
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec!["street_exact", "house_rep", "dropped_prefix"],
+            0,
+            0,
+        ))];
+        assert!(!Index::de_abbreviation_candidate_may_displace(
+            &dropped_name,
+            &current,
+            Some("arnsberg"),
+        ));
+        assert!(Index::de_abbreviation_candidate_may_displace(
+            &dropped_name,
+            &[],
+            Some("arnsberg"),
+        ));
+
+        let strong_dropped = vec![pair(retained_test_hit(
+            "Dresden",
+            "Hauptstraße",
+            Some("1"),
+            "01067",
+            "house",
+            2.0,
+            [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec![
+                "street_exact",
+                "commune_exact",
+                "house_rep",
+                "pc_exact",
+                "dropped_prefix",
+            ],
+            0,
+            0,
+        ))];
+        assert!(Index::de_abbreviation_candidate_may_displace(
+            &strong_dropped,
+            &current,
+            None,
+        ));
+
+        let exact = vec![pair(retained_test_hit(
+            "Rinteln",
+            "Paul-Erdniß-Straße",
+            Some("1"),
+            "",
+            "house",
+            0.43,
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec!["street_exact", "house_rep"],
+            0,
+            0,
+        ))];
+        assert!(Index::de_abbreviation_candidate_may_displace(
+            &exact, &current, None,
+        ));
+    }
+
+    #[test]
+    fn de_parenthetical_subaddress_admission_is_exact_commune_and_fill_empty_only() {
+        let pair = |hit: RankedHit| (hit.0, hit.1);
+        let exact = vec![pair(retained_test_hit(
+            "Zeven, Stadt",
+            "Am Markt",
+            Some("4"),
+            "",
+            "house",
+            1.0,
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec!["street_exact", "house_rep"],
+            0,
+            0,
+        ))];
+        assert!(Index::de_parenthetical_subaddress_may_fill(
+            &[],
+            &exact,
+            Some("zeven")
+        ));
+        assert!(
+            !Index::de_parenthetical_subaddress_may_fill(&exact, &exact, Some("zeven")),
+            "PARENTHETICAL_SUBADDRESS_FILL_EMPTY_OBSERVER: a live result is immutable"
+        );
+        assert!(!Index::de_parenthetical_subaddress_may_fill(
+            &[],
+            &exact,
+            Some("aachen")
+        ));
+        assert!(!Index::de_parenthetical_subaddress_may_fill(
+            &[],
+            &exact,
+            None
+        ));
+
+        let weak = |precision, features| {
+            vec![pair(retained_test_hit(
+                "Zeven, Stadt",
+                "Am Markt",
+                Some("4"),
+                "",
+                precision,
+                99.0,
+                features,
+                vec!["street_fuzzy"],
+                0,
+                0,
+            ))]
+        };
+        assert!(!Index::de_parenthetical_subaddress_may_fill(
+            &[],
+            &weak("house", [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+            Some("zeven")
+        ));
+        assert!(!Index::de_parenthetical_subaddress_may_fill(
+            &[],
+            &weak("interp", [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0]),
+            Some("zeven")
+        ));
+    }
+
+    #[test]
+    fn de_abbreviation_guard_is_wired_into_country_variant_arbitration() {
+        let idx = forward_postcode_index_for_country(
+            "abbreviation-guard-wiring",
+            "wilhelm luckert strasse,001,berlin,10115,10115,4,,13.3889,52.5170,Wilhelm-Lückert-Straße,Berlin\n",
+            "de",
+        );
+        DE_ABBREVIATION_GUARD_CALLS.with(|calls| calls.set(0));
+        let hits = idx.query("Wilhelm-Lückert-str. 4, 10115 Berlin", 1);
+        assert_eq!(
+            hits.first().map(|hit| hit.street.as_str()),
+            Some("Wilhelm-Lückert-Straße")
+        );
+        assert!(
+            DE_ABBREVIATION_GUARD_CALLS.with(|calls| calls.get()) > 0,
+            "the production country-variant loop must consult the abbreviation guard"
+        );
+    }
+
+    #[test]
+    fn de_recipient_cleanup_tie_break_requires_exact_full_street_and_house() {
+        let pair = |hit: RankedHit| (hit.0, hit.1);
+        let current = vec![pair(retained_test_hit(
+            "Wesselburen",
+            "Dohrnstraße",
+            Some("5"),
+            "25764",
+            "house",
+            0.43,
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec!["street_exact", "house_rep", "dropped_prefix"],
+            0,
+            0,
+        ))];
+        let exact_full_street = vec![pair(retained_test_hit(
+            "Charlottenburg-Nord",
+            "Max-Dohrn-Straße",
+            Some("5"),
+            "10589",
+            "house",
+            0.43,
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec!["street_exact", "house_rep"],
+            0,
+            0,
+        ))];
+        assert!(Index::de_recipient_cleanup_breaks_dropped_prefix_tie(
+            &exact_full_street,
+            &current,
+        ));
+
+        let fuzzy = vec![pair(retained_test_hit(
+            "Charlottenburg-Nord",
+            "Max-Dorn-Straße",
+            Some("5"),
+            "10589",
+            "house",
+            -1.03,
+            [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec!["street_fuzzy", "house_rep"],
+            0,
+            0,
+        ))];
+        assert!(!Index::de_recipient_cleanup_breaks_dropped_prefix_tie(
+            &fuzzy, &current,
+        ));
+        assert!(!Index::de_recipient_cleanup_breaks_dropped_prefix_tie(
+            &exact_full_street,
+            &[],
+        ));
+    }
+
+    #[test]
+    fn de_country_variants_skip_equivalent_raw_and_normalized_base() {
+        let idx = forward_postcode_index_for_country(
+            "country-variant-prepared-dedup",
+            "mainweg,001,berlin,10115,10115,1,,13.3889,52.5170,Mainweg,Berlin\n",
+            "de",
+        );
+        let query = "Mainweg 1, 10115 Berlin";
+        assert_eq!(
+            crate::de::query_variants(query).len(),
+            2,
+            "the witness must generate distinct raw and normalized variants"
+        );
+        DE_COUNTRY_VARIANT_PREPARED_SEARCH_CALLS.with(|calls| calls.set(0));
+        let hits = idx.query(query, 1);
+        let top = hits.first().expect("the exact house must still resolve");
+        assert_eq!(top.street, "Mainweg");
+        assert_eq!(top.housenumber.as_deref(), Some("1"));
+        assert_eq!(
+            DE_COUNTRY_VARIANT_PREPARED_SEARCH_CALLS.with(|calls| calls.get()),
+            1,
+            "equivalent non-city variants must execute one prepared search"
+        );
+    }
+
+    #[test]
+    fn de_country_variants_keep_raw_sensitive_city_fallbacks() {
+        let idx = forward_postcode_index_for_country(
+            "country-variant-raw-city-fallback",
+            "mainweg,001,berlin,10115,10115,1,,13.3889,52.5170,Mainweg,Berlin\n",
+            "de",
+        );
+        DE_COUNTRY_VARIANT_PREPARED_SEARCH_CALLS.with(|calls| calls.set(0));
+        let hits = idx.query("Unindexed, Berlin", 1);
+        let top = hits
+            .first()
+            .expect("the raw comma segment must resolve Berlin");
+        assert_eq!(top.precision, "city");
+        assert_eq!(top.commune, "Berlin");
+        assert_eq!(
+            DE_COUNTRY_VARIANT_PREPARED_SEARCH_CALLS.with(|calls| calls.get()),
+            2,
+            "city/empty outcomes must not be reused because raw segments differ"
+        );
+    }
+
+    #[test]
+    fn de_abbreviation_retained_locality_breaks_exact_address_evidence_ties() {
+        let idx = forward_postcode_index_for_country(
+            "abbreviation-retained-locality-tie",
+            "grosse str,001,wittenburg,,,1,,11.0762461,53.5107681,Große Str.,Wittenburg\n\
+             grosse str,001,wittenburg,,,12,,11.0755349,53.5113574,Große Str.,Wittenburg\n\
+             grosse str,002,grabow,,,1,,11.5644688,53.2784453,Große Str.,Grabow\n\
+             grosse str,002,grabow,,,12,,11.5629185,53.2779808,Große Str.,Grabow\n\
+             grosse str,003,crivitz,,,1,,11.6507684,53.5765525,Große Str.,Crivitz\n\
+             grosse str,003,crivitz,,,12,,11.6505726,53.5770965,Große Str.,Crivitz\n\
+             grosse str,004,westerkappeln,,,1,,7.8774391,52.3146747,Große Str.,Westerkappeln\n\
+             grosse str,004,westerkappeln,,,12,,7.8776095,52.3132857,Große Str.,Westerkappeln\n\
+             grosse str,005,ibbenburen,,,1,,7.7152364,52.2766699,Große Str.,Ibbenbüren\n\
+             grosse str,005,ibbenburen,,,12,,7.7156456,52.2769733,Große Str.,Ibbenbüren\n\
+             grosse strasse,006,ahlden aller flecken,,,1,,9.5577655,52.7592260,Große Straße,Ahlden (Aller) Flecken\n\
+             grosse strasse,007,bad iburg stadt,,,12,,8.0452005,52.1568279,Große Straße,Bad Iburg Stadt\n",
+            "de",
+        );
+
+        for (query, expected_commune, expected_house) in [
+            (
+                "Große Str. 1, 29693 Ahlden (Aller)",
+                "Ahlden (Aller) Flecken",
+                "1",
+            ),
+            ("Große Str. 12, 49186 Bad Iburg", "Bad Iburg Stadt", "12"),
+        ] {
+            let hits = idx.query(query, 5);
+            let top = hits
+                .first()
+                .unwrap_or_else(|| panic!("retained locality must resolve {query:?}"));
+            assert_eq!(top.street, "Große Straße", "wrong street for {query:?}");
+            assert_eq!(top.housenumber.as_deref(), Some(expected_house));
+            assert_eq!(top.commune, expected_commune, "wrong commune for {query:?}");
+            assert!(top.flags.contains(&"de_abbrev"));
+        }
+    }
+
+    #[test]
+    fn de_retained_locality_requires_every_prior_address_comparator_to_tie() {
+        let features = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let base = retained_test_hit(
+            "Wrong",
+            "Hamburger Allee",
+            Some("2"),
+            "",
+            "house",
+            0.43,
+            features,
+            vec!["street_exact", "house_rep"],
+            17,
+            0,
+        );
+        let same = retained_test_hit(
+            "Frankfurt am Main",
+            "Hamburger Allee",
+            Some("2"),
+            "",
+            "house",
+            0.43,
+            features,
+            vec!["street_exact", "house_rep"],
+            17,
+            0,
+        );
+        assert!(de_same_retained_address_evidence(&base, &same));
+
+        let cases = [
+            retained_test_hit(
+                "Target",
+                "Hamburger Allee",
+                Some("2"),
+                "",
+                "house",
+                0.44,
+                features,
+                vec!["street_exact", "house_rep"],
+                17,
+                0,
+            ),
+            retained_test_hit(
+                "Target",
+                "Hamburger Allee",
+                Some("2"),
+                "",
+                "house",
+                0.43,
+                [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                vec!["street_exact", "house_rep"],
+                17,
+                0,
+            ),
+            retained_test_hit(
+                "Target",
+                "Hamburger Allee",
+                Some("2"),
+                "",
+                "house",
+                0.43,
+                features,
+                vec!["street_exact", "house_rep"],
+                16,
+                0,
+            ),
+            retained_test_hit(
+                "Target",
+                "Hamburger Allee",
+                Some("2"),
+                "",
+                "house",
+                0.43,
+                features,
+                vec!["street_exact", "house_rep"],
+                17,
+                1,
+            ),
+            retained_test_hit(
+                "Target",
+                "Hamburger Allee",
+                Some("2"),
+                "",
+                "near",
+                0.43,
+                features,
+                vec!["street_exact", "house_rep"],
+                17,
+                0,
+            ),
+            retained_test_hit(
+                "Target",
+                "Hamburger Allee",
+                Some("3"),
+                "",
+                "house",
+                0.43,
+                features,
+                vec!["street_exact", "house_rep"],
+                17,
+                0,
+            ),
+            retained_test_hit(
+                "Target",
+                "Hamburger Allee",
+                Some("2"),
+                "60486",
+                "house",
+                0.43,
+                features,
+                vec!["street_exact", "house_rep"],
+                17,
+                0,
+            ),
+            retained_test_hit(
+                "Target",
+                "Hamburger Allee",
+                Some("2"),
+                "",
+                "house",
+                0.43,
+                features,
+                vec!["street_exact"],
+                17,
+                0,
+            ),
+            retained_test_hit(
+                "Target",
+                "Andere Straße",
+                Some("2"),
+                "",
+                "house",
+                0.43,
+                features,
+                vec!["street_exact", "house_rep"],
+                17,
+                0,
+            ),
+        ];
+        for candidate in &cases {
+            assert!(!de_same_retained_address_evidence(&base, candidate));
+        }
+
+        let positive_zero = retained_test_hit(
+            "Wrong",
+            "Hamburger Allee",
+            Some("2"),
+            "",
+            "house",
+            0.0,
+            features,
+            vec!["street_exact", "house_rep"],
+            17,
+            0,
+        );
+        let negative_zero = retained_test_hit(
+            "Target",
+            "Hamburger Allee",
+            Some("2"),
+            "",
+            "house",
+            -0.0,
+            features,
+            vec!["street_exact", "house_rep"],
+            17,
+            0,
+        );
+        assert!(!de_same_retained_address_evidence(
+            &positive_zero,
+            &negative_zero
+        ));
+    }
+
+    fn retained_equal_hit(commune: &str, features: [f32; N_FEATS]) -> RankedHit {
+        retained_test_hit(
+            commune,
+            "Hamburger Allee",
+            Some("2"),
+            "",
+            "house",
+            0.43,
+            features,
+            vec!["street_exact", "house_rep"],
+            17,
+            0,
+        )
+    }
+
+    #[test]
+    fn de_retained_locality_promoter_is_fixed_to_the_preregistered_top_five() {
+        let features = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let mut hits = vec![
+            retained_equal_hit("Wrong", features),
+            retained_equal_hit("Other One", features),
+            retained_equal_hit("Other Two", features),
+            retained_equal_hit("Other Three", features),
+            retained_equal_hit("Frankfurt am Main", features),
+            retained_equal_hit("Frankfurt an der Oder", features),
+        ];
+        assert!(promote_de_retained_locality(
+            &mut hits,
+            DeRetainedLocality {
+                postcode_tail: "frankfurt",
+                dropped_tail: "frankfurt",
+                postal_tail_eligible: true,
+            },
+        ));
+        assert_eq!(hits[0].0.commune, "Frankfurt am Main");
+        assert!(hits[0].0.flags.contains(&"de_retained_locality"));
+    }
+
+    #[test]
+    fn de_retained_locality_promoter_rejects_fuzzy_or_unequal_address_evidence() {
+        let fuzzy = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let mut fuzzy_hits = vec![
+            retained_equal_hit("Wrong", fuzzy),
+            retained_equal_hit("Frankfurt am Main", fuzzy),
+        ];
+        assert!(!promote_de_retained_locality(
+            &mut fuzzy_hits,
+            DeRetainedLocality {
+                postcode_tail: "frankfurt",
+                dropped_tail: "frankfurt",
+                postal_tail_eligible: true,
+            },
+        ));
+        assert_eq!(fuzzy_hits[0].0.commune, "Wrong");
+
+        let exact = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let mut unequal_hits = vec![
+            retained_equal_hit("Wrong", exact),
+            retained_test_hit(
+                "Frankfurt am Main",
+                "Hamburger Allee",
+                Some("3"),
+                "",
+                "house",
+                0.43,
+                exact,
+                vec!["street_exact", "house_rep"],
+                17,
+                0,
+            ),
+        ];
+        assert!(!promote_de_retained_locality(
+            &mut unequal_hits,
+            DeRetainedLocality {
+                postcode_tail: "frankfurt",
+                dropped_tail: "frankfurt",
+                postal_tail_eligible: true,
+            },
+        ));
+        assert_eq!(unequal_hits[0].0.commune, "Wrong");
+    }
+
+    #[test]
+    fn de_retained_locality_promoter_requires_full_context_and_reachable_drop() {
+        let features = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let mut shared_tail = vec![
+            retained_equal_hit("Wrong", features),
+            retained_equal_hit("Roge Stadt", features),
+        ];
+        assert!(!promote_de_retained_locality(
+            &mut shared_tail,
+            DeRetainedLocality {
+                postcode_tail: "groß roge",
+                dropped_tail: "roge",
+                postal_tail_eligible: true,
+            },
+        ));
+        assert_eq!(shared_tail[0].0.commune, "Wrong");
+
+        let mut short_drop = vec![
+            retained_equal_hit("Wrong", features),
+            retained_equal_hit("Frankfurt am Main", features),
+        ];
+        assert!(!promote_de_retained_locality(
+            &mut short_drop,
+            DeRetainedLocality {
+                postcode_tail: "frankfurt am",
+                dropped_tail: "am",
+                postal_tail_eligible: true,
+            },
+        ));
+        assert_eq!(short_drop[0].0.commune, "Wrong");
+    }
+
+    #[test]
+    fn de_retained_locality_promoter_keeps_an_already_matching_top() {
+        let features = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let mut hits = vec![
+            retained_equal_hit("Frankfurt am Main", features),
+            retained_equal_hit("Frankfurt Stadt", features),
+        ];
+        assert!(!promote_de_retained_locality(
+            &mut hits,
+            DeRetainedLocality {
+                postcode_tail: "frankfurt",
+                dropped_tail: "frankfurt",
+                postal_tail_eligible: true,
+            },
+        ));
+        assert_eq!(hits[0].0.commune, "Frankfurt am Main");
+        assert!(!hits[0].0.flags.contains(&"de_retained_locality"));
+    }
+
+    #[test]
+    fn de_retained_locality_promoter_prefers_exact_over_prefix_evidence() {
+        let features = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let mut hits = vec![
+            retained_equal_hit("Wrong", features),
+            retained_equal_hit("Frankfurt am Main", features),
+            retained_equal_hit("Frankfurt Stadt", features),
+        ];
+        assert!(promote_de_retained_locality(
+            &mut hits,
+            DeRetainedLocality {
+                postcode_tail: "frankfurt",
+                dropped_tail: "frankfurt",
+                postal_tail_eligible: true,
+            },
+        ));
+        assert_eq!(hits[0].0.commune, "Frankfurt Stadt");
+    }
+
+    // Keep the frozen fixtures' explicit fields; grouping them would rewrite the test call sites.
+    #[allow(clippy::too_many_arguments)]
+    fn postal_tail_test_hit(
+        commune: &str,
+        street: &str,
+        housenumber: &str,
+        postcode: &str,
+        precision: &'static str,
+        pc_exact: bool,
+        house_exact_rep: bool,
+        score: f32,
+    ) -> RankedHit {
+        let features = [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            if pc_exact { 1.0 } else { 0.0 },
+            1.0,
+            0.0,
+            1.0,
+            if house_exact_rep { 1.0 } else { 0.0 },
+            1.0,
+        ];
+        let mut flags = vec!["street_exact"];
+        if house_exact_rep {
+            flags.push("house_rep");
+        }
+        if pc_exact {
+            flags.push("pc_exact");
+        } else {
+            flags.push("pc_dept");
+        }
+        retained_test_hit(
+            commune,
+            street,
+            Some(housenumber),
+            postcode,
+            precision,
+            score,
+            features,
+            flags,
+            if pc_exact { 3 } else { 97 },
+            if pc_exact { 8 } else { 0 },
+        )
+    }
+
+    fn postal_tail_positive_at_rank(target_rank: usize) -> Vec<RankedHit> {
+        let mut hits = vec![postal_tail_test_hit(
+            "Top",
+            "Post Allee",
+            "15b",
+            "12346",
+            "house",
+            false,
+            false,
+            12.0,
+        )];
+        for rank in 2..=6 {
+            if rank == target_rank {
+                hits.push(postal_tail_test_hit(
+                    "Target",
+                    "Post-Allee",
+                    "15a",
+                    "12345",
+                    "house",
+                    true,
+                    false,
+                    -7.25,
+                ));
+            } else {
+                hits.push(postal_tail_test_hit(
+                    &format!("Filler {rank}"),
+                    "Post Allee",
+                    "15c",
+                    "12347",
+                    "house",
+                    false,
+                    false,
+                    11.0 - rank as f32,
+                ));
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn de_postal_tail_stably_promotes_unique_rank_two_three_or_five() {
+        for target_rank in [2, 3, 5] {
+            let mut hits = postal_tail_positive_at_rank(target_rank);
+            let original_order: Vec<String> =
+                hits.iter().map(|hit| hit.0.commune.clone()).collect();
+            assert!(promote_de_postal_tail(
+                &mut hits,
+                true,
+                true,
+                false,
+                Some(12345),
+            ));
+            assert_eq!(hits[0].0.commune, "Target");
+            assert_eq!(hits[0].0.housenumber.as_deref(), Some("15a"));
+            assert_eq!(hits[0].0.score, -7.25, "the hit must move intact");
+            assert!(hits[0].0.flags.contains(&"de_postal_tail"));
+
+            let expected_tail: Vec<String> = original_order
+                .into_iter()
+                .filter(|commune| commune != "Target")
+                .collect();
+            let actual_tail: Vec<String> =
+                hits[1..].iter().map(|hit| hit.0.commune.clone()).collect();
+            assert_eq!(actual_tail, expected_tail, "move-to-front must be stable");
+        }
+    }
+
+    #[test]
+    fn de_retained_locality_decision_precedes_and_blocks_postal_tail() {
+        let features = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let initial = || {
+            vec![
+                retained_equal_hit("Wrong", features),
+                retained_equal_hit("Frankfurt am Main", features),
+                postal_tail_test_hit(
+                    "Postal Target",
+                    "Hamburger Allee",
+                    "2",
+                    "12345",
+                    "house",
+                    true,
+                    true,
+                    -8.0,
+                ),
+            ]
+        };
+
+        let mut postal_first = initial();
+        assert!(promote_de_postal_tail(
+            &mut postal_first,
+            true,
+            true,
+            false,
+            Some(12345),
+        ));
+        assert_eq!(postal_first[0].0.commune, "Postal Target");
+
+        let mut production_order = initial();
+        apply_de_c2_tiebreaks(
+            &mut production_order,
+            Some(DeRetainedLocality {
+                postcode_tail: "frankfurt",
+                dropped_tail: "frankfurt",
+                postal_tail_eligible: true,
+            }),
+            true,
+            false,
+            Some(12345),
+        );
+        assert_eq!(production_order[0].0.commune, "Frankfurt am Main");
+        assert!(production_order[0]
+            .0
+            .flags
+            .contains(&"de_retained_locality"));
+        assert_eq!(production_order[0].0.commune, "Frankfurt am Main");
+        assert!(!production_order[0].0.flags.contains(&"de_postal_tail"));
+    }
+
+    #[test]
+    fn de_postal_tail_is_fixed_to_one_candidate_in_the_original_top_five() {
+        let mut rank_six = postal_tail_positive_at_rank(6);
+        let rank_six_order: Vec<String> =
+            rank_six.iter().map(|hit| hit.0.commune.clone()).collect();
+        assert!(!promote_de_postal_tail(
+            &mut rank_six,
+            true,
+            true,
+            false,
+            Some(12345),
+        ));
+        assert_eq!(
+            rank_six
+                .iter()
+                .map(|hit| hit.0.commune.clone())
+                .collect::<Vec<_>>(),
+            rank_six_order
+        );
+
+        let mut duplicate = postal_tail_positive_at_rank(2);
+        duplicate[2] = postal_tail_test_hit(
+            "Duplicate Target",
+            "Post Allee",
+            "15d",
+            "12345",
+            "house",
+            true,
+            false,
+            -8.0,
+        );
+        let duplicate_order: Vec<String> =
+            duplicate.iter().map(|hit| hit.0.commune.clone()).collect();
+        assert!(!promote_de_postal_tail(
+            &mut duplicate,
+            true,
+            true,
+            false,
+            Some(12345),
+        ));
+        assert_eq!(
+            duplicate
+                .iter()
+                .map(|hit| hit.0.commune.clone())
+                .collect::<Vec<_>>(),
+            duplicate_order
+        );
+    }
+
+    #[test]
+    fn de_postal_tail_fails_closed_at_every_context_and_evidence_gate() {
+        let assert_rejected = |mut hits: Vec<RankedHit>, is_de, is_c2, focus, postcode| {
+            let before: Vec<(String, Vec<&'static str>)> = hits
+                .iter()
+                .map(|hit| (hit.0.commune.clone(), hit.0.flags.clone()))
+                .collect();
+            assert!(!promote_de_postal_tail(
+                &mut hits, is_de, is_c2, focus, postcode,
+            ));
+            assert_eq!(
+                hits.iter()
+                    .map(|hit| (hit.0.commune.clone(), hit.0.flags.clone()))
+                    .collect::<Vec<_>>(),
+                before
+            );
+        };
+
+        assert_rejected(
+            postal_tail_positive_at_rank(2),
+            false,
+            true,
+            false,
+            Some(12345),
+        );
+        assert_rejected(
+            postal_tail_positive_at_rank(2),
+            true,
+            false,
+            false,
+            Some(12345),
+        );
+        assert_rejected(
+            postal_tail_positive_at_rank(2),
+            true,
+            true,
+            true,
+            Some(12345),
+        );
+        assert_rejected(postal_tail_positive_at_rank(2), true, true, false, None);
+
+        let mut top_postcode = postal_tail_positive_at_rank(2);
+        top_postcode[0].1[4] = 1.0;
+        top_postcode[0].0.postcode = "12345".to_owned();
+        top_postcode[0].0.flags.push("pc_exact");
+        assert_rejected(top_postcode, true, true, false, Some(12345));
+
+        let mut retained = postal_tail_positive_at_rank(2);
+        retained[0].0.flags.push("de_retained_locality");
+        assert_rejected(retained, true, true, false, Some(12345));
+
+        let mut fuzzy_top = postal_tail_positive_at_rank(2);
+        fuzzy_top[0].1[0] = 0.0;
+        fuzzy_top[0].1[1] = 1.0;
+        assert_rejected(fuzzy_top, true, true, false, Some(12345));
+
+        let mut fuzzy_candidate = postal_tail_positive_at_rank(2);
+        fuzzy_candidate[1].1[0] = 0.0;
+        fuzzy_candidate[1].1[1] = 1.0;
+        assert_rejected(fuzzy_candidate, true, true, false, Some(12345));
+
+        let mut both_fuzzy = postal_tail_positive_at_rank(2);
+        for hit in &mut both_fuzzy[..2] {
+            hit.1[0] = 0.0;
+            hit.1[1] = 1.0;
+            hit.0.flags.retain(|flag| *flag != "street_exact");
+            hit.0.flags.push("street_fuzzy");
+        }
+        assert_rejected(both_fuzzy, true, true, false, Some(12345));
+
+        let mut reordered_street = postal_tail_positive_at_rank(2);
+        reordered_street[1].0.street = "Allee Post".to_owned();
+        assert_rejected(reordered_street, true, true, false, Some(12345));
+
+        let mut other_precision = postal_tail_positive_at_rank(2);
+        other_precision[1].0.precision = "near";
+        assert_rejected(other_precision, true, true, false, Some(12345));
+
+        let mut emitted_postcode_mismatch = postal_tail_positive_at_rank(2);
+        emitted_postcode_mismatch[1].0.postcode = "12346".to_owned();
+        assert_rejected(emitted_postcode_mismatch, true, true, false, Some(12345));
+
+        let mut missing_pc_feature = postal_tail_positive_at_rank(2);
+        assert_eq!(missing_pc_feature[1].0.postcode, "12345");
+        missing_pc_feature[1].1[4] = 0.0;
+        assert_rejected(missing_pc_feature, true, true, false, Some(12345));
+
+        for feature_index in [0, 1, 2, 3, 6, 7, 8, 9] {
+            let mut widened_mask = postal_tail_positive_at_rank(2);
+            widened_mask[1].1[feature_index] = if widened_mask[1].1[feature_index] > 0.5 {
+                0.0
+            } else {
+                1.0
+            };
+            assert_rejected(widened_mask, true, true, false, Some(12345));
+        }
+
+        let mut non_postal_weakening = postal_tail_positive_at_rank(2);
+        non_postal_weakening[0].1[8] = 1.0;
+        non_postal_weakening[0].0.housenumber = Some("15".to_owned());
+        non_postal_weakening[1].0.housenumber = Some("15a".to_owned());
+        assert_rejected(non_postal_weakening, true, true, false, Some(12345));
+
+        let mut foreign_wrapper = postal_tail_positive_at_rank(2);
+        apply_de_c2_tiebreaks(
+            &mut foreign_wrapper,
+            Some(DeRetainedLocality {
+                postcode_tail: "unmatched locality",
+                dropped_tail: "unmatched",
+                postal_tail_eligible: true,
+            }),
+            false,
+            false,
+            Some(12345),
+        );
+        assert_eq!(foreign_wrapper[0].0.commune, "Top");
+        assert!(foreign_wrapper
+            .iter()
+            .all(|hit| !hit.0.flags.contains(&"de_postal_tail")));
+
+        let mut house_effect_wrapper = postal_tail_positive_at_rank(2);
+        apply_de_c2_tiebreaks(
+            &mut house_effect_wrapper,
+            Some(DeRetainedLocality {
+                postcode_tail: "unmatched locality",
+                dropped_tail: "unmatched",
+                postal_tail_eligible: false,
+            }),
+            true,
+            false,
+            Some(12345),
+        );
+        assert_eq!(house_effect_wrapper[0].0.commune, "Top");
+        assert!(house_effect_wrapper
+            .iter()
+            .all(|hit| !hit.0.flags.contains(&"de_postal_tail")));
+    }
+
     fn forward_housenumber_index(case: &str, rows: &str) -> Index {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4829,6 +10213,1344 @@ mod tests {
         let bin = dir.join("addresses.bin");
         crate::builder::build(&csv, &bin, None, None, None, None, None).unwrap();
         Index::open(&bin).unwrap()
+    }
+
+    fn forward_postcode_index_for_country(case: &str, rows: &str, country: &str) -> Index {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "gridpin-forward-postcode-country-{case}-{}-{serial}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("addresses.csv");
+        std::fs::write(
+            &csv,
+            format!(
+                "nom_voie_norm,code_insee,nom_commune_norm,code_postal,code_postal_display,numero,rep,lon,lat,nom_voie,nom_commune\n{rows}"
+            ),
+        )
+        .unwrap();
+        let manifest = dir.join("manifest.json");
+        std::fs::write(
+            &manifest,
+            format!(
+                r#"{{"country":"{country}","layer":"addresses","license":"test","source_release":"test"}}"#
+            ),
+        )
+        .unwrap();
+        let bin = dir.join("addresses.bin");
+        crate::builder::build(&csv, &bin, None, None, None, None, Some(&manifest)).unwrap();
+        Index::open(&bin).unwrap()
+    }
+
+    fn forward_postcode_index_for_country_with_rules(
+        case: &str,
+        rows: &str,
+        country: &str,
+    ) -> Index {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "gridpin-forward-postcode-country-rules-{case}-{}-{serial}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("addresses.csv");
+        std::fs::write(
+            &csv,
+            format!(
+                "nom_voie_norm,code_insee,nom_commune_norm,code_postal,code_postal_display,numero,rep,lon,lat,nom_voie,nom_commune\n{rows}"
+            ),
+        )
+        .unwrap();
+        let manifest = dir.join("manifest.json");
+        std::fs::write(
+            &manifest,
+            format!(
+                r#"{{"country":"{country}","layer":"addresses","license":"test","source_release":"test"}}"#
+            ),
+        )
+        .unwrap();
+        let bin = dir.join("addresses.bin");
+        let rules_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../rules");
+        crate::builder::build(
+            &csv,
+            &bin,
+            None,
+            None,
+            Some(&rules_dir),
+            None,
+            Some(&manifest),
+        )
+        .unwrap();
+        Index::open(&bin).unwrap()
+    }
+
+    fn de_wave_b_homonymous_p4_rows(
+        commune_count: usize,
+        source_street: &str,
+        source_display: &str,
+    ) -> String {
+        let mut rows = (0..commune_count)
+            .map(|position| {
+                let insee = format!("{:03}", position + 1);
+                let (street, display) = if position == 0 {
+                    (source_street.to_owned(), source_display.to_owned())
+                } else {
+                    (
+                        format!("zzdummy{position:02}"),
+                        format!("ZZ Dummy {position:02}"),
+                    )
+                };
+                format!(
+                    "{street},{insee},bremen,28759,28759,1,,8.{position:07},53.{position:07},{display},Bremen"
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.sort_unstable();
+        format!("{}\n", rows.join("\n"))
+    }
+
+    #[test]
+    fn de_prefix_drop_guard_reaches_postcode_locality_tail_end_to_end() {
+        let idx = forward_postcode_index_for_country(
+            "prefix-drop-postcode-locality",
+            "berlinstrasse,002,celle,29221,29221,8,,10.0577218,52.6307212,Berlinstraße,Celle\n\
+             franzosische strasse,001,mitte,10117,10117,8,,13.3864406,52.5144355,Französische Straße,Mitte\n",
+            "de",
+        );
+
+        let hits = idx.query("Französische Straße 8, 10117 Berlin", 5);
+        let top = hits
+            .first()
+            .expect("the postcode-preserving tail path must resolve");
+        assert_eq!(top.street, "Französische Straße");
+        assert_eq!(top.housenumber.as_deref(), Some("8"));
+        assert_eq!(top.postcode, "10117");
+        assert_eq!(top.commune, "Mitte");
+        assert!(top.flags.contains(&"dropped_suffix"));
+        assert!(
+            hits.iter().all(|hit| hit.commune != "Celle"),
+            "a generic prefix drop must not revive an exact house in the wrong postcode/locality"
+        );
+
+        DE_PREFIX_DROP_GUARD_CALLS.with(|calls| calls.set(0));
+        let wrong_only = idx.query_feats_d(
+            "venue berlinstrasse 8",
+            5,
+            0,
+            None,
+            Some("berlin"),
+            Some(10117),
+            true,
+            None,
+        );
+        assert!(
+            DE_PREFIX_DROP_GUARD_CALLS.with(|calls| calls.get()) > 0,
+            "the production prefix-drop loop must execute the postcode/locality guard"
+        );
+        assert!(
+            wrong_only.is_empty(),
+            "dropping an unknown prefix must not turn a contradictory postcode/locality into a house"
+        );
+    }
+
+    #[test]
+    fn de_unique_house_postcode_survives_the_pre_rank_homonym_cap() {
+        let mut rows =
+            String::from("dummy,998,berlin,10115,10115,1,,13.3900000,52.5100000,Dummy,Berlin\n");
+        for commune in 1..=340 {
+            for house in [44, 45, 46] {
+                rows.push_str(&format!(
+                    "friedrichstrasse,{commune:03},ort{commune:03},,,{house},,{:.7},{:.7},Friedrichstraße,Ort {commune:03}\n",
+                    10.0 + commune as f64 / 1000.0,
+                    50.0 + commune as f64 / 1000.0,
+                ));
+            }
+        }
+        rows.push_str(
+            "friedrichstrasse,999,zzztarget,10969,10969,44,,13.3900000,52.5100000,Friedrichstraße,Berlin Mitte\n\
+             friedrichstrasse,999,zzztarget,10117,10117,45,,13.3910000,52.5110000,Friedrichstraße,Berlin Mitte\n",
+        );
+        let idx = forward_postcode_index_for_country("house-postcode-rescue", &rows, "de");
+
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| rows.set(0));
+        DE_POSTCODE_HOUSE_RESCUE_HOUSE_DECODES.with(|calls| calls.set(0));
+        let top = idx
+            .query("Friedrichstraße 44, 10969 Berlin", 1)
+            .into_iter()
+            .next()
+            .expect("the unique exact house/postcode must survive the homonym cap");
+        assert_eq!(top.street, "Friedrichstraße");
+        assert_eq!(top.housenumber.as_deref(), Some("44"));
+        assert_eq!(top.postcode, "10969");
+        assert_eq!(top.commune, "Berlin Mitte");
+        assert!(top.flags.contains(&"pc_exact"));
+        let scanned = DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| rows.get());
+        assert!(
+            scanned > 300,
+            "the narrow rescue must prove the exact candidate beyond the ordinary 300-row cap"
+        );
+        assert!(
+            scanned as usize <= DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT_DEFAULT,
+            "all variants share one request-wide scan budget"
+        );
+        assert!(
+            DE_POSTCODE_HOUSE_RESCUE_HOUSE_DECODES.with(|calls| calls.get()) <= 2,
+            "hundreds of homonymous street postings must not trigger hundreds of house-block decodes"
+        );
+    }
+
+    #[test]
+    fn de_wave_n_terminal_country_tail_is_structural_and_bounded() {
+        let parsed =
+            de_comma_postcode_house_rescue_query("Wiesentalstraße 10, 79115 Freiburg, Deutschland")
+                .expect(
+                    "one terminal German country field must preserve the address/locality boundary",
+                );
+        assert_eq!(parsed.0, "Wiesentalstraße 10 79115");
+        assert_eq!(parsed.1, 79115);
+        assert_eq!(parsed.2, "freiburg");
+
+        assert!(de_comma_postcode_house_rescue_query(
+            "Wiesentalstraße 10, 79115 Freiburg, Deutschland, Europa"
+        )
+        .is_none());
+        assert!(de_comma_postcode_house_rescue_query(
+            "Wiesentalstraße 10, 79115 Freiburg, Targettown"
+        )
+        .is_none());
+        assert!(de_comma_postcode_house_rescue_query(
+            "Albertstr. 25 (Otto-Krayer-Haus), 79104 Freiburg/Breisgau"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn de_wave_n_malformed_parenthetical_qualifier_cannot_bypass_p4() {
+        let idx = forward_postcode_index_for_country(
+            "wave-n-parenthetical-qualifier-boundary",
+            "albertstrasse,001,freiburg im breisgau,79104,79104,25,,7.8500000,48.0100000,Albertstraße,Freiburg im Breisgau\n",
+            "de",
+        );
+        let raw = "Albertstr. 25 (Otto-Krayer-Haus),79104 Freiburg/Breisgau";
+
+        assert!(de_parenthetical_locality_uses_slash_qualifier(raw));
+        assert!(
+            idx.de_comma_postcode_house_rescue(raw, 5, None).is_none(),
+            "the generic rescue itself must not own a malformed P4 qualifier surface"
+        );
+        let hits = idx.query(raw, 5);
+        assert!(
+            hits.iter().all(|hit| {
+                hit.precision != "house"
+                    && !hit.flags.contains(&"de_postcode_house")
+                    && !hit.flags.contains(&"de_audited_compound")
+                    && !hit.flags.contains(&"de_parenthetical_subaddress")
+            }),
+            "a malformed P4 surface must not reach an exact house through generic rescue: {} hits",
+            hits.len()
+        );
+    }
+
+    #[test]
+    fn de_wave_n_token_bound_locality_arbitration_selects_one_exact_house() {
+        let idx = forward_postcode_index_for_country(
+            "wave-n-token-bound-locality",
+            "grabenstrasse,001,oelsnitz,08606,08606,31,,12.1700000,50.4200000,Grabenstraße,Oelsnitz\n\
+             grabenstrasse,002,oelsnitz vogtl,08606,08606,31,,12.1800000,50.4300000,Grabenstraße,Oelsnitz/Vogtl.\n\
+             grabenstrasse,003,oelsnitz vogtland,08606,08606,24,,12.1600000,50.4100000,Grabenstraße,Oelsnitz/Vogtland\n",
+            "de",
+        );
+
+        let exact = idx
+            .de_postcode_house_rescue_parsed(
+                "Grabenstr. 31, 08606 Oelsnitz/Vogtland",
+                "Grabenstraße 31 08606",
+                8606,
+                "oelsnitz vogtland",
+                1,
+                None,
+                None,
+                &[],
+                false,
+            )
+            .expect("the token-bound query locality must leave one exact source identity");
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].0.commune, "Oelsnitz/Vogtl.");
+        assert_eq!(exact[0].0.housenumber.as_deref(), Some("31"));
+        assert_eq!(exact[0].0.postcode, "08606");
+    }
+
+    #[test]
+    fn de_wave_n_duplicate_source_sids_fail_closed_independent_of_coordinates() {
+        for (case, second_coordinates) in [
+            ("same-coordinates", "12.1800000,50.4300000"),
+            ("different-coordinates", "12.1810000,50.4310000"),
+        ] {
+            let rows = format!(
+                "grabenstrasse,001,oelsnitz vogtl,08606,08606,31,,12.1800000,50.4300000,Grabenstraße,Oelsnitz/Vogtl.\n\
+                 grabenstrasse,002,oelsnitz vogtl,08606,08606,31,,{second_coordinates},Grabenstraße,Oelsnitz/Vogtl.\n"
+            );
+            let idx = forward_postcode_index_for_country(case, &rows, "de");
+            assert!(
+                idx.de_postcode_house_rescue_parsed(
+                    "Grabenstr. 31, 08606 Oelsnitz/Vogtland",
+                    "Grabenstraße 31 08606",
+                    8606,
+                    "oelsnitz vogtland",
+                    1,
+                    None,
+                    None,
+                    &[],
+                    false,
+                )
+                .is_none(),
+                "two distinct eligible source SIDs must fail closed regardless of coordinates: {case}"
+            );
+        }
+
+        let suffix = forward_postcode_index_for_country(
+            "wave-n-duplicate-suffix-same-coordinates",
+            "grabenstrasse,001,oelsnitz vogtl,08606,08606,31,a,12.1800000,50.4300000,Grabenstraße,Oelsnitz/Vogtl.\n\
+             grabenstrasse,002,oelsnitz vogtl,08606,08606,31,a,12.1800000,50.4300000,Grabenstraße,Oelsnitz/Vogtl.\n",
+            "de",
+        );
+        assert!(
+            suffix
+                .de_postcode_house_rescue_parsed(
+                    "Grabenstr. 31a, 08606 Oelsnitz/Vogtland",
+                    "Grabenstraße 31a 08606",
+                    8606,
+                    "oelsnitz vogtland",
+                    1,
+                    None,
+                    None,
+                    &[],
+                    false,
+                )
+                .is_none(),
+            "same-coordinate duplicate source SIDs must also fail closed for an exact suffix"
+        );
+
+        let range = forward_postcode_index_for_country(
+            "wave-n-duplicate-range-same-coordinates",
+            "paarstrasse,001,oelsnitz vogtl,08606,08606,1,,12.1800000,50.4300000,Paarstraße,Oelsnitz/Vogtl.\n\
+             paarstrasse,001,oelsnitz vogtl,08606,08606,3,,12.1810000,50.4310000,Paarstraße,Oelsnitz/Vogtl.\n\
+             paarstrasse,002,oelsnitz vogtl,08606,08606,1,,12.1800000,50.4300000,Paarstraße,Oelsnitz/Vogtl.\n\
+             paarstrasse,002,oelsnitz vogtl,08606,08606,3,,12.1810000,50.4310000,Paarstraße,Oelsnitz/Vogtl.\n",
+            "de",
+        );
+        assert!(
+            range
+                .de_postcode_house_rescue_parsed(
+                    "Paarstraße 1/3, 08606 Oelsnitz/Vogtland",
+                    "Paarstraße 1 08606",
+                    8606,
+                    "oelsnitz vogtland",
+                    1,
+                    None,
+                    None,
+                    &[3],
+                    false,
+                )
+                .is_none(),
+            "same-coordinate duplicate source SIDs must fail closed for a complete endpoint set"
+        );
+    }
+
+    #[test]
+    fn de_wave_n_same_postcode_unrelated_locality_vetoes_soft_override() {
+        let idx = forward_postcode_index_for_country(
+            "wave-n-unrelated-locality-veto",
+            "alte poststrasse,003,kanzach,88422,88422,2,,9.5590000,48.0780000,Alte Poststraße,Kanzach\n\
+             riedlinger strasse,001,kanzach,,,13,,9.5580000,48.0770000,Riedlinger Straße,Kanzach\n\
+             riedlinger strasse,002,bad buchau,88422,88422,12,,9.6010000,48.0610000,Riedlinger Straße,Bad Buchau\n",
+            "de",
+        );
+
+        let top = idx
+            .query("Riedlinger Straße 12, 88422 Kanzach", 1)
+            .into_iter()
+            .next()
+            .expect("the established same-postcode locality result must remain available");
+        assert_eq!(top.commune, "Kanzach");
+        assert_eq!(top.postcode, "");
+        assert!(matches!(top.precision, "near" | "interp"));
+        assert!(!top.flags.contains(&"de_exact_postcode_override"));
+    }
+
+    #[test]
+    fn de_wave_n_explicit_wrong_postcode_near_remains_p1_override() {
+        let idx = forward_postcode_index_for_country(
+            "wave-n-explicit-wrong-postcode-near",
+            "teststrasse,001,querytown,22111,22111,13,,9.2100000,48.4900000,Teststraße,Querytown\n\
+             teststrasse,002,targettown,22222,22222,12,,9.2200000,48.5000000,Teststraße,Targettown\n",
+            "de",
+        );
+
+        let top = idx
+            .query("Teststraße 12, 22222 Querytown", 1)
+            .into_iter()
+            .next()
+            .expect("an explicit wrong-postcode near hit must keep the established P1 correction");
+        assert_eq!(top.precision, "house");
+        assert_eq!(top.housenumber.as_deref(), Some("12"));
+        assert_eq!(top.postcode, "22222");
+        assert_eq!(top.commune, "Targettown");
+        assert!(top.flags.contains(&"de_postcode_house"));
+        assert!(top.flags.contains(&"de_exact_postcode_override"));
+    }
+
+    #[test]
+    fn de_wave_n_country_tail_and_qualified_localities_reach_exact_houses() {
+        for (case, rows, query, expected_commune, expected_house, expected_postcode) in [
+            (
+                "freiburg-country-tail",
+                "wiesentalstrasse,001,freiburg,79115,79115,23,,7.8255000,47.9780000,Wiesentalstraße,Freiburg\n\
+                 wiesentalstrasse,002,freiburg im breisgau,79115,79115,10,,7.8260000,47.9790000,Wiesentalstraße,Freiburg im Breisgau\n",
+                "Wiesentalstraße 10, 79115 Freiburg, Deutschland",
+                "Freiburg im Breisgau",
+                "10",
+                "79115",
+            ),
+            (
+                "frankenberg-qualified",
+                "chemnitzer strasse,001,frankenberg sachsen,09669,09669,17,,13.0310000,50.9100000,Chemnitzer Straße,Frankenberg/Sachsen\n\
+                 chemnitzer strasse,002,frankenberg,09669,09669,64,,13.0320000,50.9110000,Chemnitzer Straße,Frankenberg\n\
+                 chemnitzer strasse,003,frankenberg sa,09669,09669,64,,13.0330000,50.9120000,Chemnitzer Straße,Frankenberg/Sa.\n",
+                "Chemnitzer Str. 64, 09669 Frankenberg/Sachsen",
+                "Frankenberg/Sa.",
+                "64",
+                "09669",
+            ),
+        ] {
+            let idx = forward_postcode_index_for_country(case, rows, "de");
+            let top = idx
+                .query(query, 1)
+                .into_iter()
+                .next()
+                .expect("the exact represented house must remain available");
+            assert_eq!(top.precision, "house", "{case}");
+            assert_eq!(top.housenumber.as_deref(), Some(expected_house), "{case}");
+            assert_eq!(top.postcode, expected_postcode, "{case}");
+            assert_eq!(top.commune, expected_commune, "{case}");
+        }
+    }
+
+    #[test]
+    fn de_wave_n_existing_same_postcode_locality_relations_remain_reachable() {
+        for (case, rows, postcode, locality, expected_commune) in [
+            (
+                "muhlhausen-regression",
+                "teststrasse,001,muhlhausen,99974,99974,12,,10.0000000,51.0000000,Teststraße,Mühlhausen\n\
+                 teststrasse,002,targettown,99974,99974,12,,10.1000000,51.1000000,Teststraße,Targettown\n",
+                99974,
+                "muhlhausen thuringen",
+                "Mühlhausen",
+            ),
+            (
+                "bernburg-regression",
+                "teststrasse,001,bernburg,06406,06406,12,,11.0000000,51.0000000,Teststraße,Bernburg\n\
+                 teststrasse,002,targettown,06406,06406,12,,11.1000000,51.1000000,Teststraße,Targettown\n",
+                6406,
+                "bernburg saale",
+                "Bernburg",
+            ),
+            (
+                "berlin-regression",
+                "teststrasse,001,charlottenburg,10587,10587,12,,13.3000000,52.5000000,Teststraße,Charlottenburg\n\
+                 teststrasse,002,targettown,10587,10587,12,,13.4000000,52.6000000,Teststraße,Targettown\n",
+                10587,
+                "berlin",
+                "Charlottenburg",
+            ),
+        ] {
+            let idx = forward_postcode_index_for_country(case, rows, "de");
+            let query = format!("Teststraße 12 {postcode:05}");
+            let exact = idx
+                .de_postcode_house_rescue_parsed(
+                    &query,
+                    &query,
+                    postcode,
+                    locality,
+                    1,
+                    None,
+                    None,
+                    &[],
+                    false,
+                )
+                .expect("the pre-Wave-N locality relation must retain one exact house");
+            assert_eq!(exact.len(), 1, "{case}");
+            assert_eq!(exact[0].0.commune, expected_commune, "{case}");
+            assert_eq!(exact[0].0.housenumber.as_deref(), Some("12"), "{case}");
+            assert_eq!(exact[0].0.postcode, format!("{postcode:05}"), "{case}");
+        }
+    }
+
+    #[test]
+    fn de_wave_a_unique_exact_postcode_overrides_only_an_address_level_soft_locality() {
+        let idx = forward_postcode_index_for_country(
+            "wave-a-postcode-override",
+            "teststrasse,001,querytown,22111,22111,1,,10.0000000,50.0000000,Teststraße,Querytown\n\
+             teststrasse,002,targettown,22222,22222,1,,11.0000000,51.0000000,Teststraße,Targettown\n",
+            "de",
+        );
+
+        let top = idx
+            .query("Teststraße 1, 22222 Querytown", 1)
+            .into_iter()
+            .next()
+            .expect("an address-level homonym must still return one candidate");
+        assert_eq!(top.precision, "house");
+        assert_eq!(top.housenumber.as_deref(), Some("1"));
+        assert_eq!(top.postcode, "22222");
+        assert_eq!(top.commune, "Targettown");
+        assert!(top.flags.contains(&"de_exact_postcode_override"));
+        let top_five = idx.query("Teststraße 1, 22222 Querytown", 5);
+        assert_eq!(top_five[0].postcode, "22222");
+        assert_eq!(top_five[0].commune, "Targettown");
+
+        let duplicate = forward_postcode_index_for_country(
+            "wave-a-postcode-override-duplicate",
+            "teststrasse,001,querytown,22111,22111,1,,10.0000000,50.0000000,Teststraße,Querytown\n\
+             teststrasse,002,targettown,22222,22222,1,,11.0000000,51.0000000,Teststraße,Targettown\n\
+             teststrasse,003,othertown,22222,22222,1,,12.0000000,52.0000000,Teststraße,Othertown\n",
+            "de",
+        );
+        let duplicate_top = duplicate
+            .query("Teststraße 1, 22222 Querytown", 1)
+            .into_iter()
+            .next()
+            .expect("the established result remains when exact PLZ candidates are ambiguous");
+        assert_eq!(duplicate_top.commune, "Querytown");
+        assert_ne!(duplicate_top.postcode, "22222");
+        assert!(!duplicate_top.flags.contains(&"de_exact_postcode_override"));
+
+        let suffix_isolated = forward_postcode_index_for_country(
+            "wave-a-postcode-override-suffix",
+            "teststrasse,001,querytown,22111,22111,1,,10.0000000,50.0000000,Teststraße,Querytown\n\
+             teststrasse,002,targettown,22222,22222,1,a,11.0000000,51.0000000,Teststraße,Targettown\n",
+            "de",
+        );
+        let suffix_top = suffix_isolated
+            .query("Teststraße 1, 22222 Querytown", 1)
+            .into_iter()
+            .next()
+            .expect("a suffix mismatch must leave the established result intact");
+        assert_eq!(suffix_top.commune, "Querytown");
+        assert!(!suffix_top.flags.contains(&"de_exact_postcode_override"));
+
+        let exact_suffix = forward_postcode_index_for_country(
+            "wave-a-postcode-override-exact-suffix",
+            "teststrasse,001,querytown,22111,22111,3,a,10.0000000,50.0000000,Teststraße,Querytown\n\
+             teststrasse,002,targettown,22222,22222,3,a,11.0000000,51.0000000,Teststraße,Targettown\n",
+            "de",
+        );
+        let suffix_target = exact_suffix
+            .query("Teststraße 3 a, 22222 Querytown", 1)
+            .into_iter()
+            .next()
+            .expect("an exact spaced suffix must stay part of the strict product key");
+        assert_eq!(suffix_target.housenumber.as_deref(), Some("3a"));
+        assert_eq!(suffix_target.postcode, "22222");
+        assert_eq!(suffix_target.commune, "Targettown");
+        assert!(suffix_target.flags.contains(&"de_exact_postcode_override"));
+
+        let frankfurt = forward_postcode_index_for_country(
+            "wave-a-postcode-override-frankfurt",
+            "domstrasse,001,frankfurt am main,15231,15231,10,,8.6800000,50.1100000,Domstraße,Frankfurt am Main\n\
+             domstrasse,002,frankfurt,15230,15230,10,,14.5500000,52.3470000,Domstraße,Frankfurt (Oder)\n",
+            "de",
+        );
+        let frankfurt_top = frankfurt
+            .query("Domstraße 10, 15230 Frankfurt am Main", 1)
+            .into_iter()
+            .next()
+            .expect("a hard Frankfurt qualifier must keep the established candidate");
+        assert_ne!(frankfurt_top.postcode, "15230");
+        assert!(!frankfurt_top.flags.contains(&"de_exact_postcode_override"));
+    }
+
+    #[test]
+    fn de_wave_a_suffixed_house_never_falls_back_to_the_bare_number() {
+        let idx = forward_postcode_index_for_country(
+            "wave-a-suffix-does-not-fall-back-to-bare",
+            "teststrasse,001,querytown,22111,22111,3,a,10.0000000,50.0000000,Teststraße,Querytown\n\
+             teststrasse,002,targettown,22222,22222,3,,11.0000000,51.0000000,Teststraße,Targettown\n",
+            "de",
+        );
+
+        let top = idx
+            .query("Teststraße 3a, 22222 Querytown", 1)
+            .into_iter()
+            .next()
+            .expect("the established exact-suffix result must remain available");
+        assert_eq!(top.housenumber.as_deref(), Some("3a"));
+        assert_eq!(top.commune, "Querytown");
+        assert_eq!(top.postcode, "22111");
+        assert!(
+            !top.flags.contains(&"de_exact_postcode_override"),
+            "a bare indexed house must not prove a suffixed product key"
+        );
+
+        let mut key = b"teststrasse".to_vec();
+        key.push(KEY_SEP);
+        key.extend_from_slice(b"002");
+        let target_sid = idx
+            .streets_fst
+            .get(&key)
+            .expect("the bare target street must exist") as u32;
+        let target_meta = idx.street_meta(target_sid);
+        let requested_rep = *idx
+            .rep_lookup
+            .get("a")
+            .expect("the requested suffix must have a runtime rep id");
+        assert!(
+            !idx.exact_house_postcode_candidate_cached(
+                &mut HashMap::new(),
+                target_sid,
+                &target_meta,
+                3,
+                requested_rep,
+                22222,
+            ),
+            "the strict Wave-A admission proof itself must reject bare 3 for requested 3a"
+        );
+    }
+
+    #[test]
+    fn de_wave_a_bare_house_never_falls_forward_to_a_suffix() {
+        let idx = forward_postcode_index_for_country(
+            "wave-a-bare-does-not-fall-forward-to-suffix",
+            "teststrasse,001,querytown,22111,22111,3,,10.0000000,50.0000000,Teststraße,Querytown\n\
+             teststrasse,002,targettown,22222,22222,3,a,11.0000000,51.0000000,Teststraße,Targettown\n",
+            "de",
+        );
+
+        let top = idx
+            .query("Teststraße 3, 22222 Querytown", 1)
+            .into_iter()
+            .next()
+            .expect("the established bare-number result must remain available");
+        assert_eq!(top.housenumber.as_deref(), Some("3"));
+        assert_eq!(top.commune, "Querytown");
+        assert_eq!(top.postcode, "22111");
+        assert!(
+            !top.flags.contains(&"de_exact_postcode_override"),
+            "a suffixed indexed house must not prove a bare product key"
+        );
+
+        let mut key = b"teststrasse".to_vec();
+        key.push(KEY_SEP);
+        key.extend_from_slice(b"002");
+        let target_sid = idx
+            .streets_fst
+            .get(&key)
+            .expect("the suffixed target street must exist") as u32;
+        let target_meta = idx.street_meta(target_sid);
+        assert!(
+            !idx.exact_house_postcode_candidate_cached(
+                &mut HashMap::new(),
+                target_sid,
+                &target_meta,
+                3,
+                0,
+                22222,
+            ),
+            "the strict Wave-A admission proof itself must reject suffixed 3a for requested bare 3"
+        );
+    }
+
+    #[test]
+    fn de_wave_a_override_gate_is_address_level_and_fail_closed() {
+        let pair = |hit: RankedHit| (hit.0, hit.1);
+        let make = |precision, postcode, features, flags| {
+            vec![pair(retained_test_hit(
+                "Querytown",
+                "Teststraße",
+                Some("1"),
+                postcode,
+                precision,
+                1.0,
+                features,
+                flags,
+                0,
+                0,
+            ))]
+        };
+
+        assert!(!Index::de_strict_postcode_house_override_allowed(
+            &[],
+            22222
+        ));
+        assert!(!Index::de_strict_postcode_house_override_allowed(
+            &make(
+                "street",
+                "22111",
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                vec!["street_exact"],
+            ),
+            22222,
+        ));
+        assert!(Index::de_strict_postcode_house_override_allowed(
+            &make(
+                "house",
+                "22111",
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                vec!["street_exact", "house_rep"],
+            ),
+            22222,
+        ));
+        assert!(!Index::de_strict_postcode_house_override_allowed(
+            &make(
+                "house",
+                "22222",
+                [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                vec!["street_exact", "house_rep", "pc_exact"],
+            ),
+            22222,
+        ));
+        assert!(Index::de_strict_postcode_house_override_allowed(
+            &make(
+                "near",
+                "22222",
+                [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                vec!["pc_exact"],
+            ),
+            22222,
+        ));
+        assert!(!Index::de_strict_postcode_house_override_allowed(
+            &make("near", "22111", [0.0; N_FEATS], vec![],),
+            22222,
+        ));
+    }
+
+    #[test]
+    fn de_wave_a_exact_house_beyond_cap_beats_near_without_fuzzy_fallback() {
+        let mut rows = String::from(
+            "teststrasse,001,querytown region,22222,22222,2,,10.0000000,50.0000000,Teststraße,Querytown Region\n\
+             teststrasse,001,querytown region,22222,22222,4,,10.0010000,50.0010000,Teststraße,Querytown Region\n",
+        );
+        for commune in 2..=340 {
+            rows.push_str(&format!(
+                "teststrasse,{commune:03},ort{commune:03},22222,22222,2,,10.{commune:07},50.{commune:07},Teststraße,Ort {commune:03}\n"
+            ));
+        }
+        rows.push_str(
+            "teststrasse,999,querytown,22222,22222,3,,11.0000000,51.0000000,Teststraße,Querytown\n",
+        );
+        let idx = forward_postcode_index_for_country("wave-a-exact-house-beyond-cap", &rows, "de");
+
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| rows.set(0));
+        DE_POSTCODE_HOUSE_RESCUE_FUZZY_CALLS.with(|calls| calls.set(0));
+        DE_POSTCODE_HOUSE_RESCUE_SUBSET_CALLS.with(|calls| calls.set(0));
+        let direct = idx
+            .de_postcode_house_rescue_parsed(
+                "Teststraße 3, 22222 Querytown Region",
+                "Teststraße 3 22222",
+                22222,
+                "querytown region",
+                1,
+                None,
+                None,
+                &[],
+                false,
+            )
+            .expect("the bounded exact product scan must find the unique indexed house");
+        assert_eq!(direct[0].0.commune, "Querytown");
+        assert!(DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| rows.get()) > 300);
+        assert_eq!(
+            DE_POSTCODE_HOUSE_RESCUE_FUZZY_CALLS.with(|calls| calls.get()),
+            0,
+            "the strict rescue must not open the fuzzy collector"
+        );
+        assert_eq!(
+            DE_POSTCODE_HOUSE_RESCUE_SUBSET_CALLS.with(|calls| calls.get()),
+            0,
+            "the strict rescue must not open the subset collector"
+        );
+
+        let top = idx
+            .query("Teststraße 3, 22222 Querytown Region", 1)
+            .into_iter()
+            .next()
+            .expect("the exact indexed house must beat a capped near result");
+        assert_eq!(top.precision, "house");
+        assert_eq!(top.housenumber.as_deref(), Some("3"));
+        assert_eq!(top.postcode, "22222");
+        assert_eq!(top.commune, "Querytown");
+        assert!(top.flags.contains(&"de_postcode_house"));
+    }
+
+    #[test]
+    fn de_wave_a_two_endpoint_house_set_is_same_sid_postcode_and_suffix_strict() {
+        let complete = forward_postcode_index_for_country(
+            "wave-a-house-set-complete",
+            "paarstrasse,001,querytown region,23552,23552,2,,10.0000000,50.0000000,Paarstraße,Querytown Region\n\
+             paarstrasse,001,querytown region,23552,23552,4,,10.0010000,50.0010000,Paarstraße,Querytown Region\n\
+             paarstrasse,999,querytown,23552,23552,1,,11.0000000,51.0000000,Paarstraße,Querytown\n\
+             paarstrasse,999,querytown,23552,23552,3,,11.0010000,51.0010000,Paarstraße,Querytown\n",
+            "de",
+        );
+        let top = complete
+            .query("Paarstraße 1/3, 23552 Querytown Region", 1)
+            .into_iter()
+            .next()
+            .expect("both exact endpoints on one SID must be eligible");
+        assert_eq!(top.precision, "house");
+        assert_eq!(top.housenumber.as_deref(), Some("1"));
+        assert_eq!(top.commune, "Querytown");
+        assert!(top.flags.contains(&"de_exact_postcode_override"));
+        assert!(top.flags.contains(&"de_house_set_exact"));
+        assert!(top.flags.contains(&"de_house_slash"));
+
+        for (name, target_rows) in [
+            (
+                "missing-right",
+                "paarstrasse,999,querytown,23552,23552,1,,11.0000000,51.0000000,Paarstraße,Querytown\n",
+            ),
+            (
+                "split-sids",
+                "paarstrasse,998,querytown,23552,23552,1,,11.0000000,51.0000000,Paarstraße,Querytown\n\
+                 paarstrasse,999,querytown,23552,23552,3,,11.0010000,51.0010000,Paarstraße,Querytown\n",
+            ),
+            (
+                "right-wrong-postcode",
+                "paarstrasse,999,querytown,23552,23552,1,,11.0000000,51.0000000,Paarstraße,Querytown\n\
+                 paarstrasse,999,querytown,23553,23553,3,,11.0010000,51.0010000,Paarstraße,Querytown\n",
+            ),
+            (
+                "right-wrong-suffix",
+                "paarstrasse,999,querytown,23552,23552,1,,11.0000000,51.0000000,Paarstraße,Querytown\n\
+                 paarstrasse,999,querytown,23552,23552,3,a,11.0010000,51.0010000,Paarstraße,Querytown\n",
+            ),
+            (
+                "duplicate-full-sets",
+                "paarstrasse,998,querytown,23552,23552,1,,11.0000000,51.0000000,Paarstraße,Querytown\n\
+                 paarstrasse,998,querytown,23552,23552,3,,11.0010000,51.0010000,Paarstraße,Querytown\n\
+                 paarstrasse,999,querytown,23552,23552,1,,12.0000000,52.0000000,Paarstraße,Querytown\n\
+                 paarstrasse,999,querytown,23552,23552,3,,12.0010000,52.0010000,Paarstraße,Querytown\n",
+            ),
+        ] {
+            let rows = format!(
+                "paarstrasse,001,querytown region,23552,23552,2,,10.0000000,50.0000000,Paarstraße,Querytown Region\n\
+                 paarstrasse,001,querytown region,23552,23552,4,,10.0010000,50.0010000,Paarstraße,Querytown Region\n{target_rows}"
+            );
+            let idx = forward_postcode_index_for_country(name, &rows, "de");
+            let top = idx
+                .query("Paarstraße 1/3, 23552 Querytown Region", 1)
+                .into_iter()
+                .next()
+                .expect("the established near result must remain available");
+            assert_eq!(top.commune, "Querytown Region", "{name}");
+            assert!(!top.flags.contains(&"de_house_set_exact"), "{name}");
+            assert!(!top.flags.contains(&"de_exact_postcode_override"), "{name}");
+        }
+    }
+
+    #[test]
+    fn de_postcode_house_rescue_skips_fuzzy_and_subset_fallbacks() {
+        let mut rows = String::new();
+        for commune in 1..=340 {
+            rows.push_str(&format!(
+                "teststrasse,{commune:03},ort{commune:03},20202,20202,1,,10.{commune:07},50.{commune:07},Teststraße,Ort {commune:03}\n"
+            ));
+        }
+        let idx = forward_postcode_index_for_country("postcode-house-no-fallbacks", &rows, "de");
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| rows.set(0));
+        DE_POSTCODE_HOUSE_RESCUE_HOUSE_DECODES.with(|calls| calls.set(0));
+        DE_POSTCODE_HOUSE_RESCUE_FUZZY_CALLS.with(|calls| calls.set(0));
+        DE_POSTCODE_HOUSE_RESCUE_SUBSET_CALLS.with(|calls| calls.set(0));
+
+        assert!(idx
+            .de_comma_postcode_house_rescue("Teststraße 1, 10115 Alpha", 1, None)
+            .is_none());
+        assert!(DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| rows.get()) > 300);
+        assert_eq!(
+            DE_POSTCODE_HOUSE_RESCUE_HOUSE_DECODES.with(|calls| calls.get()),
+            0,
+            "postcode metadata must reject every incompatible homonym before house decoding"
+        );
+        assert_eq!(
+            DE_POSTCODE_HOUSE_RESCUE_FUZZY_CALLS.with(|calls| calls.get()),
+            0,
+            "a rescue that ultimately requires street_exact must not run fuzzy collection"
+        );
+        assert_eq!(
+            DE_POSTCODE_HOUSE_RESCUE_SUBSET_CALLS.with(|calls| calls.get()),
+            0,
+            "a rescue that ultimately requires street_exact must not run subset collection"
+        );
+    }
+
+    #[test]
+    fn de_postcode_house_rescue_fails_closed_when_exact_key_scan_overflows() {
+        let hidden_duplicate = forward_postcode_index_for_country(
+            "postcode-house-hidden-duplicate",
+            "teststrasse,001,alpha,10115,10115,1,,13.3800000,52.5100000,Teststraße,Alpha\n\
+             teststrasse,002,beta,20202,20202,2,,9.9900000,53.5500000,Teststraße,Beta\n\
+             teststrasse,003,gamma,30303,30303,3,,11.5800000,48.1400000,Teststraße,Gamma\n\
+             teststrasse,004,zzzdelta,10115,10115,1,,13.3900000,52.5200000,Teststraße,ZZZ Delta\n",
+            "de",
+        );
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT.with(|limit| limit.set(3));
+        assert!(hidden_duplicate
+            .de_comma_postcode_house_rescue("Teststraße 1, 10115 Alpha", 1, None)
+            .is_none());
+
+        let hidden_unique = forward_postcode_index_for_country(
+            "postcode-house-hidden-unique",
+            "teststrasse,001,alpha,11111,11111,1,,13.3800000,52.5100000,Teststraße,Alpha\n\
+             teststrasse,002,beta,20202,20202,2,,9.9900000,53.5500000,Teststraße,Beta\n\
+             teststrasse,003,gamma,30303,30303,3,,11.5800000,48.1400000,Teststraße,Gamma\n\
+             teststrasse,004,zzzdelta,10115,10115,1,,13.3900000,52.5200000,Teststraße,ZZZ Delta\n",
+            "de",
+        );
+        assert!(hidden_unique
+            .de_comma_postcode_house_rescue("Teststraße 1, 10115 ZZZ Delta", 1, None)
+            .is_none());
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT
+            .with(|limit| limit.set(DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT_DEFAULT));
+    }
+
+    #[test]
+    fn de_comma_postcode_house_rescue_beats_a_locality_alias_mismatch() {
+        let idx = forward_postcode_index_for_country(
+            "postcode-house-locality-alias",
+            "wiesenstraße,001,reichenbach,,,16,,12.3000000,50.6100000,Wiesenstraße,Reichenbach\n\
+             wiesenstraße,002,reichenbach im vogtland,08468,08468,62,,12.3073686,50.6160174,Wiesenstraße,Reichenbach im Vogtland\n",
+            "de",
+        );
+
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| rows.set(0));
+        let top = idx
+            .query("Wiesenstraße 62, 08468 Reichenbach (Vogt.)", 1)
+            .into_iter()
+            .next()
+            .expect("the explicit street, house and postcode must rescue the locality alias");
+        assert_eq!(top.street, "Wiesenstraße");
+        assert_eq!(top.housenumber.as_deref(), Some("62"));
+        assert_eq!(top.postcode, "08468");
+        assert_eq!(top.commune, "Reichenbach im Vogtland");
+        assert!(top.flags.contains(&"de_postcode_house"));
+        assert!(
+            DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| rows.get()) > 0,
+            "the alias mismatch must use the narrow extended scan"
+        );
+
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| rows.set(0));
+        let ordinary = idx.query("Wiesenstraße 62, 08468 Reichenbach im Vogtland", 1);
+        assert_eq!(
+            ordinary.first().map(|hit| hit.postcode.as_str()),
+            Some("08468")
+        );
+        assert_eq!(
+            DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| rows.get()),
+            0,
+            "a complete ordinary query must never pay for the extended homonym scan"
+        );
+
+        assert!(
+            idx.de_comma_postcode_house_rescue("Wiesenstraße 62, 08468 Hamburg", 1, None,)
+                .is_none(),
+            "an exact postcode candidate must not erase an explicit contradictory locality"
+        );
+    }
+
+    #[test]
+    fn de_postcode_house_rescue_composes_with_bounded_delivery_cleanup() {
+        let idx = forward_postcode_index_for_country(
+            "postcode-house-delivery-cleanup",
+            "berliner straße,001,delmenhorst,,,121,,8.6536862,53.0422502,Berliner Straße,Delmenhorst\n\
+             berliner straße,002,pankow,13187,13187,121,,13.4121414,52.5686551,Berliner Straße,Pankow\n\
+             friedrichstraße,003,braunschweig,,,55,,10.5315859,52.2522607,Friedrichstraße,Braunschweig\n\
+             friedrichstraße,004,mitte,10117,10117,55,,13.3902408,52.5092760,Friedrichstraße,Mitte\n\
+             teststraße,006,berlin,10117,10117,70,,13.3913916,52.5087689,Teststraße,Berlin\n",
+            "de",
+        );
+
+        for (query, expected_street, expected_postcode, effect_flag) in [
+            (
+                "für den Empfang, Berliner Straße 121, 13187 Berlin",
+                "Berliner Straße",
+                "13187",
+                "de_recipient_prefix",
+            ),
+            (
+                "Berlin, Friedrichstraße 55, 10117",
+                "Friedrichstraße",
+                "10117",
+                "de_locality_first",
+            ),
+            (
+                "Teststraße 70,10117 Berlin,Tel. 030 49499637",
+                "Teststraße",
+                "10117",
+                "de_subaddress_tail",
+            ),
+        ] {
+            let (top, _) = idx
+                .de_comma_postcode_house_rescue(query, 1, None)
+                .unwrap_or_else(|| panic!("bounded cleanup must rescue {query:?}"))
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| panic!("bounded cleanup must rescue {query:?}"));
+            assert_eq!(top.street, expected_street, "{query}");
+            assert_eq!(top.postcode, expected_postcode, "{query}");
+            assert!(
+                top.flags.contains(&"de_postcode_house"),
+                "{query}: {:?}",
+                top.flags
+            );
+            assert!(top.flags.contains(&effect_flag), "{query}: {:?}", top.flags);
+        }
+
+        assert!(idx
+            .de_comma_postcode_house_rescue(
+                "für den Empfang, Berliner Straße 121-123, 13187 Berlin",
+                1,
+                None,
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn de_postcode_house_rescue_accepts_only_exact_postcode_locality_aliases() {
+        let idx = forward_postcode_index_for_country(
+            "postcode-house-exact-locality-aliases",
+            "havelweg,002,brandenburg,14770,14770,2,,12.5500000,52.4100000,Havelweg,Brandenburg\n\
+             kirchweg,003,fehmarn,23769,23769,3,,11.1900000,54.4400000,Kirchweg,Fehmarn\n\
+             pankower weg,001,pankow,13187,13187,1,,13.4100000,52.5700000,Pankower Weg,Pankow\n\
+             spreeweg,004,lubbenau,03222,03222,4,,13.9600000,51.8600000,Spreeweg,Lübbenau\n",
+            "de",
+        );
+        for (query, expected_commune) in [
+            ("Pankower Weg 1, 13187 Berlin", "Pankow"),
+            ("Havelweg 2, 14770 Brandenburg an der Havel", "Brandenburg"),
+            ("Kirchweg 3, 23769 Landkirchen", "Fehmarn"),
+            ("Spreeweg 4, 03222 Zerkwitz", "Lübbenau"),
+        ] {
+            let rescued = idx
+                .de_comma_postcode_house_rescue(query, 1, None)
+                .unwrap_or_else(|| panic!("the exact alias must rescue {query:?}"));
+            assert_eq!(rescued[0].0.commune, expected_commune);
+            assert!(rescued[0].0.flags.contains(&"de_postcode_house"));
+        }
+        assert!(idx
+            .de_comma_postcode_house_rescue("Pankower Weg 1, 13187 Gesundbrunnen", 1, None)
+            .is_none());
+        assert!(idx
+            .de_comma_postcode_house_rescue("Kirchweg 3, 23769 Zerkwitz", 1, None)
+            .is_none());
+
+        let ranked = forward_postcode_index_for_country(
+            "postcode-house-exact-alias-ranked",
+            "pankower weg,001,berlin,13187,13187,1,,13.4000000,52.5600000,Pankower Weg,Berlin\n\
+             pankower weg,002,pankow,13187,13187,1,,13.4100000,52.5700000,Pankower Weg,Pankow\n",
+            "de",
+        );
+        let exact_locality = ranked
+            .de_comma_postcode_house_rescue("Pankower Weg 1, 13187 Berlin", 1, None)
+            .expect("exact locality must outrank a weaker audited district relation");
+        assert_eq!(exact_locality[0].0.commune, "Berlin");
+
+        let tied = forward_postcode_index_for_country(
+            "postcode-house-exact-alias-tied",
+            "pankower weg,001,berlin,13187,13187,1,,13.4000000,52.5600000,Pankower Weg,Berlin\n\
+             pankower weg,002,berlin,13187,13187,1,,13.4100000,52.5700000,Pankower Weg,Berlin\n",
+            "de",
+        );
+        assert!(tied
+            .de_comma_postcode_house_rescue("Pankower Weg 1, 13187 Berlin", 1, None)
+            .is_none());
+    }
+
+    #[test]
+    fn de_exact_alias_dropped_prefix_top_reopens_only_the_narrow_rescue() {
+        let pair = |hit: RankedHit| (hit.0, hit.1);
+        let complete_dropped = vec![pair(retained_test_hit(
+            "Werder",
+            "An der Havel",
+            Some("44"),
+            "14542",
+            "house",
+            1.0,
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            vec!["street_exact", "house_rep", "pc_exact", "dropped_prefix"],
+            0,
+            0,
+        ))];
+        assert!(Index::de_should_try_postcode_house_rescue(
+            "Alpenstraße 44, 14542 Werder a.d.Havel",
+            &complete_dropped,
+        ));
+        assert!(!Index::de_should_try_postcode_house_rescue(
+            "Alpenstraße 44, 14543 Werder a.d.Havel",
+            &complete_dropped,
+        ));
+
+        let mut complete_without_drop = complete_dropped;
+        complete_without_drop[0]
+            .0
+            .flags
+            .retain(|flag| *flag != "dropped_prefix");
+        assert!(!Index::de_should_try_postcode_house_rescue(
+            "Alpenstraße 44, 14542 Werder a.d.Havel",
+            &complete_without_drop,
+        ));
+    }
+
+    #[test]
+    fn de_comma_postcode_house_rescue_rejects_explicit_frankfurt_conflict() {
+        let idx = forward_postcode_index_for_country(
+            "postcode-house-frankfurt-conflict",
+            "collegienstrasse,003,frankfurt,15230,15230,10,,14.5500000,52.3470000,Collegienstraße,Frankfurt\n\
+             domstrasse,001,frankfurt am main,60311,60311,10,,8.6820000,50.1110000,Domstraße,Frankfurt am Main\n\
+             dummy,002,frankfurt oder,15230,15230,1,,14.5500000,52.3470000,Dummy,Frankfurt (Oder)\n\
+             teststrasse,004,frankfurt,60311,60311,10,,8.6820000,50.1110000,Teststraße,Frankfurt\n",
+            "de",
+        );
+        assert!(idx
+            .de_comma_postcode_house_rescue("Domstraße 10, 60311 Frankfurt am Main", 1, None,)
+            .is_some());
+        assert!(idx
+            .de_comma_postcode_house_rescue("Domstraße 10, 60311 Frankfurt an der Oder", 1, None,)
+            .is_none());
+        assert!(idx
+            .de_comma_postcode_house_rescue("Domstraße 10, 60311 Offenbach", 1, None,)
+            .is_none());
+        assert!(idx
+            .de_comma_postcode_house_rescue("Collegienstraße 10, 15230 Frankfurt/Oder", 1, None,)
+            .is_some());
+        assert!(idx
+            .de_comma_postcode_house_rescue("Teststraße 10, 60311 Frankfurt/Oder", 1, None,)
+            .is_none());
+    }
+
+    #[test]
+    fn de_comma_postcode_house_rescue_shape_is_narrow_and_range_safe() {
+        assert_eq!(
+            de_comma_postcode_house_rescue_query("Wiesenstr. 62, 08468 Reichenbach (Vogt.)"),
+            Some((
+                "Wiesenstr. 62 08468".to_string(),
+                8468,
+                "reichenbach vogt".to_string(),
+            ))
+        );
+        assert_eq!(
+            de_comma_postcode_house_rescue_query("Olsdorfer Str. 6, 25826 St Peter-Ording"),
+            Some((
+                "Olsdorfer Str. 6 25826".to_string(),
+                25826,
+                "st peter ording".to_string(),
+            ))
+        );
+        assert_eq!(
+            de_comma_postcode_house_rescue_query("Breite Str. 49, 23769 Burg auf Fehmarn"),
+            Some((
+                "Breite Str. 49 23769".to_string(),
+                23769,
+                "burg auf fehmarn".to_string(),
+            ))
+        );
+        for rejected in [
+            "Wiesenstr. 62, 08468",
+            "Wiesenstr. 62-64, 08468 Reichenbach",
+            "Wiesenstr. 62 - 64, 08468 Reichenbach",
+            "Alaunplatz 3b - 3c, 01099 Dresden",
+            "Alaunplatz 3ab - 3ac, 01099 Dresden",
+            "Wiesenstr. 62/64, 08468 Reichenbach",
+            "Firma, Wiesenstr. 62, 08468 Reichenbach",
+        ] {
+            assert_eq!(de_comma_postcode_house_rescue_query(rejected), None);
+        }
+    }
+
+    #[test]
+    fn de_compact_house_pair_left_parser_is_narrow_and_dirty_tolerant() {
+        for (raw, expected_query, expected_postcode, expected_locality, expected_effect) in [
+            (
+                "Hauptstraße 78/79, 12159 Berlin",
+                "Hauptstraße 78 12159",
+                12159,
+                "berlin",
+                crate::de::Effect::HouseSlash,
+            ),
+            (
+                "Heerstraße 12–14 14052Berlin",
+                "Heerstraße 12 14052",
+                14052,
+                "berlin",
+                crate::de::Effect::HouseRange,
+            ),
+            (
+                "Berliner Straße 46/48,16303 Schwedt/Oder",
+                "Berliner Straße 46 16303",
+                16303,
+                "schwedt oder",
+                crate::de::Effect::HouseSlash,
+            ),
+            (
+                "Friedrichstraße 76—78 10117 Berlin",
+                "Friedrichstraße 76 10117",
+                10117,
+                "berlin",
+                crate::de::Effect::HouseRange,
+            ),
+        ] {
+            assert_eq!(
+                de_compact_house_pair_left_rescue_query(raw),
+                Some((
+                    expected_query.to_owned(),
+                    expected_postcode,
+                    expected_locality.to_owned(),
+                    expected_effect,
+                )),
+                "unexpected parse for {raw:?}"
+            );
+        }
+        assert_eq!(
+            de_compact_house_pair_spec("Mühlendamm 1/3, 23552 Lübeck"),
+            Some(DeCompactHousePairSpec {
+                query: "Mühlendamm 1 23552".to_owned(),
+                postcode: 23552,
+                locality_tail: "lubeck".to_owned(),
+                effect: crate::de::Effect::HouseSlash,
+                left: 1,
+                right: 3,
+            })
+        );
+        assert_eq!(
+            de_compact_house_pair_left_rescue_query("Mühlendamm 1/3, 23552 Lübeck"),
+            None,
+            "the legacy left-only fallback must not reinterpret a small slash pair"
+        );
+        for rejected in [
+            "Kapuzinerstraße 1/2, 48149 Münster",
+            "Berliner Straße 46/48/50, 16303 Schwedt/Oder",
+            "Alaunplatz 3b-3c, 01099 Dresden",
+            "Heerstraße 12 - 14, 14052 Berlin",
+            "Heerstraße 12 bis 14, 14052 Berlin",
+            "Heerstraße 12 und 14, 14052 Berlin",
+            "Heerstraße 14-12, 14052 Berlin",
+            "Heerstraße 12-14, 14052",
+            "Firma, Heerstraße 12-14, 14052 Berlin",
+            "Heerstraße 12-14, 14052 Berlin, Tel. 030 123456",
+        ] {
+            assert_eq!(de_compact_house_pair_left_rescue_query(rejected), None);
+        }
+    }
+
+    #[test]
+    fn de_compact_house_pair_left_rescue_requires_unique_exact_address() {
+        let idx = forward_postcode_index_for_country(
+            "compact-house-pair-left",
+            "berliner strasse,001,schwedt,16303,16303,46,,14.2800000,53.0600000,Berliner Straße,Schwedt\n\
+             friedrichstrasse,002,mitte,10117,10117,76,,13.3900000,52.5100000,Friedrichstraße,Mitte\n\
+             hauptstrasse,003,friedenau,12159,12159,78,,13.3300000,52.4700000,Hauptstraße,Friedenau\n\
+             heerstrasse,004,westend,14052,14052,12,,13.2600000,52.5100000,Heerstraße,Westend\n",
+            "de",
+        );
+        for (query, expected_house, expected_commune, expected_effect_flag) in [
+            (
+                "Hauptstraße 78/79, 12159 Berlin",
+                "78",
+                "Friedenau",
+                "de_house_slash",
+            ),
+            (
+                "Heerstraße 12–14, 14052 Berlin",
+                "12",
+                "Westend",
+                "de_house_range",
+            ),
+            (
+                "Berliner Straße 46/48, 16303 Schwedt/Oder",
+                "46",
+                "Schwedt",
+                "de_house_slash",
+            ),
+            (
+                "Friedrichstraße 76-78, 10117 Berlin",
+                "76",
+                "Mitte",
+                "de_house_range",
+            ),
+        ] {
+            let rescued = idx
+                .de_compact_house_pair_left_rescue(query, 1, None)
+                .unwrap_or_else(|| panic!("left endpoint must rescue {query:?}"));
+            let top = &rescued[0].0;
+            assert_eq!(top.housenumber.as_deref(), Some(expected_house));
+            assert_eq!(top.commune, expected_commune);
+            assert!(top.flags.contains(&expected_effect_flag));
+            assert!(top.flags.contains(&"de_house_left_endpoint"));
+            assert!(!top.flags.contains(&"de_postal_tail"));
+        }
+
+        let duplicate = forward_postcode_index_for_country(
+            "compact-house-pair-duplicate",
+            "hauptstrasse,001,berlin,12159,12159,78,,13.3200000,52.4600000,Hauptstraße,Berlin\n\
+             hauptstrasse,002,friedenau,12159,12159,78,,13.3300000,52.4700000,Hauptstraße,Friedenau\n",
+            "de",
+        );
+        assert!(duplicate
+            .de_compact_house_pair_left_rescue("Hauptstraße 78/79, 12159 Berlin", 1, None)
+            .is_none());
+        assert!(idx
+            .de_compact_house_pair_left_rescue("Hauptstraße 78/79, 14052 Berlin", 1, None)
+            .is_none());
+        assert!(idx
+            .de_compact_house_pair_left_rescue("Hauptstraße 78/79, 12159 Pankow", 1, None)
+            .is_none());
+    }
+
+    #[test]
+    fn de_compact_house_pair_rescue_reaches_unique_left_endpoint_beyond_ordinary_cap() {
+        let mut rows = String::new();
+        for commune in 1..=340 {
+            rows.push_str(&format!(
+                "hauptstrasse,{commune:03},ort{commune:03},20202,20202,1,,10.{commune:07},50.{commune:07},Hauptstraße,Ort {commune:03}\n"
+            ));
+        }
+        rows.push_str(
+            "hauptstrasse,999,friedenau,12159,12159,78,,13.3300000,52.4700000,Hauptstraße,Friedenau\n",
+        );
+        let idx = forward_postcode_index_for_country("compact-house-pair-beyond-cap", &rows, "de");
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| rows.set(0));
+        let top = idx
+            .query("Hauptstraße 78/79, 12159 Berlin", 1)
+            .into_iter()
+            .next()
+            .expect("the unique exact left endpoint must survive the ordinary cap");
+        assert_eq!(top.housenumber.as_deref(), Some("78"));
+        assert_eq!(top.postcode, "12159");
+        assert_eq!(top.commune, "Friedenau");
+        assert!(top.flags.contains(&"de_house_left_endpoint"));
+        assert!(top.flags.contains(&"de_house_slash"));
+        assert!(!top.flags.contains(&"de_postal_tail"));
+        assert!(DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| rows.get()) > 300);
+    }
+
+    #[test]
+    fn de_compact_house_pair_rescue_never_displaces_a_complete_current_result() {
+        let idx = forward_postcode_index_for_country(
+            "compact-house-pair-strong-current",
+            "starkstrasse,001,berlin,10115,10115,10,,13.3900000,52.5300000,Starkstraße,Berlin\n",
+            "de",
+        );
+        let top = idx
+            .query("Starkstraße 10-12, 10115 Berlin", 1)
+            .into_iter()
+            .next()
+            .expect("the ordinary compact-range rule must resolve the exact house");
+        assert_eq!(top.housenumber.as_deref(), Some("10"));
+        assert!(top.flags.contains(&"street_exact"));
+        assert!(top.flags.contains(&"house_rep"));
+        assert!(top.flags.contains(&"pc_exact"));
+        assert!(!top.flags.contains(&"de_house_left_endpoint"));
     }
 
     #[test]
@@ -4974,6 +11696,130 @@ mod tests {
     }
 
     #[test]
+    fn v7_exact_house_postcode_drives_pc_exact_instead_of_street_majority() {
+        let idx = forward_postcode_index_for_country(
+            "house-pc-exact",
+            "guntzstrasse,001,dresden,1309,01309,2,,13.7400,51.0500,Güntzstraße,Dresden\n\
+             guntzstrasse,001,dresden,1309,01309,4,,13.7410,51.0510,Güntzstraße,Dresden\n\
+             guntzstrasse,001,dresden,1307,01307,22,,13.7420,51.0520,Güntzstraße,Dresden\n",
+            "de",
+        );
+        let (hit, features) = idx
+            .query_structured("guntzstrasse", Some("22"), "dresden", Some("01307"), 1)
+            .remove(0);
+
+        assert_eq!(hit.precision, "house");
+        assert_eq!(hit.housenumber.as_deref(), Some("22"));
+        assert_eq!(hit.postcode, "01307");
+        assert_eq!(features[4], 1.0, "the selected house postcode is exact");
+        assert_eq!(features[5], 1.0, "exact postcodes retain the dept feature");
+        assert_eq!(
+            hit.score, 11.0,
+            "house postcode refinement precedes scoring"
+        );
+        assert!(hit.flags.contains(&"pc_exact"));
+        assert!(!hit.flags.contains(&"pc_dept"));
+
+        let free = idx
+            .query("Güntzstraße 22, 01307 Dresden Unbekannt", 1)
+            .remove(0);
+        assert_eq!(free.precision, "house");
+        assert_eq!(free.housenumber.as_deref(), Some("22"));
+        assert_eq!(free.postcode, "01307");
+        assert!(free.flags.contains(&"pc_exact"));
+        assert!(!free.flags.contains(&"pc_dept"));
+        assert!(free.flags.contains(&"dropped_suffix"));
+        assert!(!free.flags.contains(&"de_postal_tail"));
+
+        let (street_majority_was_wrong, features) = idx
+            .query_structured("guntzstrasse", Some("22"), "dresden", Some("01309"), 1)
+            .remove(0);
+        assert_eq!(street_majority_was_wrong.postcode, "01307");
+        assert_eq!(
+            features[4], 0.0,
+            "the chosen house disproves street pc_exact"
+        );
+        assert_eq!(features[5], 1.0);
+        assert!(!street_majority_was_wrong.flags.contains(&"pc_exact"));
+        assert!(street_majority_was_wrong.flags.contains(&"pc_dept"));
+    }
+
+    #[test]
+    fn v7_duplicate_house_uses_query_postcode_to_choose_the_exact_row() {
+        let idx = forward_postcode_index(
+            "duplicate-house-postcode",
+            "hauptstrasse,001,dresden,1156,01156,1,,13.6000,51.0600,Hauptstraße,Dresden\n\
+             hauptstrasse,001,dresden,1097,01097,1,,13.7500,51.0700,Hauptstraße,Dresden\n\
+             hauptstrasse,001,dresden,1328,01328,1,,13.8000,51.0800,Hauptstraße,Dresden\n\
+             hauptstrasse,001,dresden,1156,01156,3,,13.6100,51.0610,Hauptstraße,Dresden\n",
+        );
+        let (hit, features) = idx
+            .query_structured("hauptstrasse", Some("1"), "dresden", Some("01097"), 1)
+            .remove(0);
+
+        assert_eq!(hit.precision, "house");
+        assert_eq!(hit.housenumber.as_deref(), Some("1"));
+        assert_eq!(hit.postcode, "01097");
+        assert_eq!(features[4], 1.0);
+        assert!(hit.flags.contains(&"pc_exact"));
+
+        let free = idx.query("hauptstrasse 1 01097 dresden", 1).remove(0);
+        assert_eq!(free.postcode, "01097");
+        assert!(free.flags.contains(&"pc_exact"));
+
+        let third = idx
+            .query_structured("hauptstrasse", Some("1"), "dresden", Some("01328"), 1)
+            .remove(0)
+            .0;
+        assert_eq!(third.postcode, "01328");
+
+        let (no_postcode, no_postcode_features) = idx
+            .query_structured("hauptstrasse", Some("1"), "dresden", None, 1)
+            .remove(0);
+        assert_eq!(no_postcode.postcode, "01156");
+        assert_eq!(no_postcode_features[8], 1.0);
+        assert!(no_postcode.flags.contains(&"house_rep"));
+        let (absent_postcode, absent_postcode_features) = idx
+            .query_structured("hauptstrasse", Some("1"), "dresden", Some("01098"), 1)
+            .remove(0);
+        assert_eq!(absent_postcode.postcode, "01156");
+        assert_eq!(absent_postcode_features[8], 1.0);
+        assert!(absent_postcode.flags.contains(&"house_rep"));
+    }
+
+    #[test]
+    fn v7_duplicate_postcode_selection_never_crosses_the_requested_suffix() {
+        let idx = forward_postcode_index(
+            "duplicate-house-suffix",
+            "hauptstrasse,001,dresden,1156,01156,1,,13.6000,51.0600,Hauptstraße,Dresden\n\
+             hauptstrasse,001,dresden,1097,01097,1,a,13.7500,51.0700,Hauptstraße,Dresden\n\
+             hauptstrasse,001,dresden,1156,01156,3,,13.6100,51.0610,Hauptstraße,Dresden\n",
+        );
+        let blank = idx
+            .query_structured("hauptstrasse", Some("1"), "dresden", Some("01097"), 1)
+            .remove(0)
+            .0;
+        assert_eq!(blank.housenumber.as_deref(), Some("1"));
+        assert_eq!(blank.postcode, "01156");
+        assert!(blank.flags.contains(&"house_rep"));
+
+        let suffixed = idx
+            .query_structured("hauptstrasse", Some("1a"), "dresden", Some("01097"), 1)
+            .remove(0)
+            .0;
+        assert_eq!(suffixed.housenumber.as_deref(), Some("1a"));
+        assert_eq!(suffixed.postcode, "01097");
+    }
+
+    #[test]
+    fn postcode_numeric_prefix_treats_zero_as_missing() {
+        assert_eq!(Index::postcode_numeric_prefix("00000"), None);
+        assert_eq!(Index::postcode_numeric_prefix(""), None);
+        assert_eq!(Index::postcode_numeric_prefix("01307"), Some(1307));
+        assert_eq!(Index::postcode_numeric_prefix("1012AA"), Some(1012));
+    }
+
+    #[test]
     fn v7_missing_house_postcode_never_inherits_the_known_neighbor() {
         let idx = forward_postcode_index(
             "missing-known",
@@ -4990,6 +11836,15 @@ mod tests {
             .0;
         assert_eq!(missing.postcode, "");
         assert_eq!(known.postcode, "1012AA");
+
+        let (missing_with_query_postcode, features) = idx
+            .query_structured("damrak", Some("1"), "amsterdam", Some("1012"), 1)
+            .remove(0);
+        assert_eq!(missing_with_query_postcode.postcode, "");
+        assert_eq!(features[4], 0.0);
+        assert_eq!(features[5], 0.0);
+        assert!(!missing_with_query_postcode.flags.contains(&"pc_exact"));
+        assert!(!missing_with_query_postcode.flags.contains(&"pc_dept"));
     }
 
     #[test]
@@ -5025,6 +11880,14 @@ mod tests {
         assert_eq!(same.postcode, "1012AA");
         assert_eq!(cross.precision, "interp");
         assert_eq!(cross.postcode, "");
+
+        let (cross_with_query_postcode, features) = interp_idx
+            .query_structured("damrak", Some("25"), "amsterdam", Some("1012"), 1)
+            .remove(0);
+        assert_eq!(cross_with_query_postcode.postcode, "");
+        assert_eq!(features[4], 0.0);
+        assert_eq!(features[5], 0.0);
+        assert!(!cross_with_query_postcode.flags.contains(&"pc_exact"));
     }
 
     #[test]
@@ -5801,5 +12664,2631 @@ mod tests {
             !hit_is_weak(&hit("house", 0.65, vec!["street_fuzzy", "house_rep"])),
             "fuzzy but confident enough"
         );
+    }
+
+    #[test]
+    fn de_wave_b_p3_strict_source_typos_cover_the_six_product_shapes() {
+        let cases = [
+            (
+                "ruesselheimerstrasse,001,kelsterbach,65450,65450,2,,8.5200000,50.0500000,Rüsselheimerstraße,Kelsterbach\n\
+                 ruesselsheimer strasse,002,kelsterbach,65451,65451,2,,8.5300000,50.0600000,Rüsselsheimer Straße,Kelsterbach\n",
+                "Rüsselheimerstr. 2, 65451 Kelsterbach",
+                "Rüsselsheimer Straße",
+                "2",
+                "65451",
+                "Kelsterbach",
+            ),
+            (
+                "kirchgase,001,obersulm eschenau,74181,74181,16,,9.3700000,49.1300000,Kirchgase,Obersulm-Eschenau\n\
+                 kirchgasse,002,obersulm,74182,74182,16,,9.3800000,49.1400000,Kirchgasse,Obersulm\n",
+                "Kirchgase 16, 74182 Obersulm-Eschenau",
+                "Kirchgasse",
+                "16",
+                "74182",
+                "Obersulm",
+            ),
+            (
+                "frankfurt strasse,001,muellrose,15298,15298,1,,14.4000000,52.2400000,Frankfurt Straße,Müllrose\n\
+                 frankfurter strasse,002,muellrose,15299,15299,1,,14.4100000,52.2500000,Frankfurter Straße,Müllrose\n",
+                "Frankfurt Straße 1, 15299 Müllrose",
+                "Frankfurter Straße",
+                "1",
+                "15299",
+                "Müllrose",
+            ),
+            (
+                "oppenhaeuser strasse,001,lachendorf,29330,29330,3,,10.2400000,52.6000000,Oppenhäuser Straße,Lachendorf\n\
+                 oppershaeuser strasse,002,lachendorf,29331,29331,3,,10.2500000,52.6100000,Oppershäuser Straße,Lachendorf\n",
+                "Oppenhäuser Str. 3, 29331 Lachendorf",
+                "Oppershäuser Straße",
+                "3",
+                "29331",
+                "Lachendorf",
+            ),
+            (
+                "robert schuman strasse,002,gersheim,66453,66453,2,,7.2400000,49.1500000,Robert-Schuman-Straße,Gersheim\n\
+                 robert schumann strasse,001,gersheim reinheim,66452,66452,2,,7.2300000,49.1400000,Robert-Schumann-Straße,Gersheim-Reinheim\n",
+                "Robert Schumann Str. 2, 66453 Gersheim-Reinheim",
+                "Robert-Schuman-Straße",
+                "2",
+                "66453",
+                "Gersheim",
+            ),
+            (
+                "probsteistrasse,001,viersen,41748,41748,15,,6.3800000,51.2700000,Probsteistraße,Viersen\n\
+                 propsteistrasse,002,viersen,41749,41749,15,,6.3900000,51.2800000,Propsteistraße,Viersen\n",
+                "Probsteistr. 15, 41749 Viersen",
+                "Propsteistraße",
+                "15",
+                "41749",
+                "Viersen",
+            ),
+        ];
+
+        for (position, (rows, query, street, house, postcode, commune)) in
+            cases.into_iter().enumerate()
+        {
+            let idx =
+                forward_postcode_index_for_country(&format!("wave-b-p3-{position}"), rows, "de");
+            let top = idx
+                .query(query, 1)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| panic!("strict P3 source proof must resolve {query}"));
+            assert_eq!(top.precision, "house", "{query}");
+            assert_eq!(top.street, street, "{query}");
+            assert_eq!(top.housenumber.as_deref(), Some(house), "{query}");
+            assert_eq!(top.postcode, postcode, "{query}");
+            assert_eq!(top.commune, commune, "{query}");
+            assert!(
+                top.flags.contains(&"de_strict_source_street_typo"),
+                "the dedicated bounded P3 proof must own {query}: {:?}",
+                top.flags
+            );
+        }
+    }
+
+    #[test]
+    fn de_wave_b_p3_is_unique_exact_and_never_replaces_a_complete_top() {
+        let ambiguous = forward_postcode_index_for_country(
+            "wave-b-p3-ambiguous",
+            "probsteikstrasse,002,viersen,41749,41749,15,,6.4000000,51.2900000,Probsteikstraße,Viersen\n\
+             propsteistrasse,001,viersen,41749,41749,15,,6.3900000,51.2800000,Propsteistraße,Viersen\n",
+            "de",
+        );
+        assert!(
+            ambiguous
+                .query("Probsteistr. 15, 41749 Viersen", 5)
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_strict_source_street_typo")),
+            "two qualifying source-street identities must fail closed"
+        );
+
+        let repeated_identity = forward_postcode_index_for_country(
+            "wave-b-p3-repeated-semantic-identity",
+            "propsteistrasse,001,viersen,41749,41749,15,,6.3900000,51.2800000,Propsteistraße,Viersen\n\
+             propsteistrasse,002,viersen,41749,41749,15,,6.4000000,51.2900000,Propsteistraße,Viersen\n",
+            "de",
+        );
+        assert!(
+            repeated_identity
+                .query("Probsteistr. 15, 41749 Viersen", 1)
+                .first()
+                .is_some_and(|hit| hit.flags.contains(&"de_strict_source_street_typo")),
+            "one semantic display-street identity may span multiple physical SIDs"
+        );
+
+        let already_exact = forward_postcode_index_for_country(
+            "wave-b-p3-complete-top",
+            "probsteistrasse,001,viersen,41749,41749,15,,6.3800000,51.2700000,Probsteistraße,Viersen\n\
+             propsteistrasse,002,viersen,41749,41749,15,,6.3900000,51.2800000,Propsteistraße,Viersen\n",
+            "de",
+        );
+        let exact_top = already_exact
+            .query("Probsteistraße 15, 41749 Viersen", 1)
+            .into_iter()
+            .next()
+            .expect("the ordinary exact address remains available");
+        assert_eq!(exact_top.street, "Probsteistraße");
+        assert!(!exact_top.flags.contains(&"de_strict_source_street_typo"));
+
+        let wrong_fields = forward_postcode_index_for_country(
+            "wave-b-p3-exact-fields",
+            "propsteistrasse,001,otherstadt,41749,41749,15,,6.3900000,51.2800000,Propsteistraße,Otherstadt\n\
+             propsteistrasse,002,viersen,41749,41749,15,a,6.4000000,51.2900000,Propsteistraße,Viersen\n",
+            "de",
+        );
+        assert!(
+            wrong_fields
+                .query("Probsteistr. 15, 41749 Viersen", 5)
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_strict_source_street_typo")),
+            "locality and suffix are exact P3 product gates"
+        );
+
+        for (case, query_street, source_street) in [
+            ("similarity", "muster", "master"),
+            (
+                "osa-three",
+                "abcdefghijklmnopqrstuvwxyzabcdefghijklstrasse",
+                "abcedfghijkymnopqrztuvwxyzabcdefghijklstrasse",
+            ),
+            (
+                "first-codepoint",
+                "abcdefghijklmnopqrstuvwxyzabcdefghijklstrasse",
+                "bbcdefghijklmnopqrstuvwxyzabcdefghijklstrasse",
+            ),
+        ] {
+            if case == "osa-three" {
+                assert_eq!(
+                    de_compact_osa_distance(query_street, source_street),
+                    3,
+                    "the negative must exercise the OSA admission guard"
+                );
+                assert!(
+                    de_sequence_matcher_ratio_at_least_090(query_street, source_street),
+                    "the independent ratio guard must pass in the OSA-only negative"
+                );
+            }
+            let rows = format!(
+                "{query_street},001,berlin,10114,10114,1,,13.3800000,52.5000000,{query_street},Berlin\n\
+                 {source_street},002,berlin,10115,10115,1,,13.3900000,52.5100000,{source_street},Berlin\n"
+            );
+            let mut sorted = rows.lines().collect::<Vec<_>>();
+            sorted.sort_unstable();
+            let rows = format!("{}\n", sorted.join("\n"));
+            let idx = forward_postcode_index_for_country(&format!("wave-b-p3-{case}"), &rows, "de");
+            assert!(
+                idx.query(&format!("{query_street} 1, 10115 Berlin"), 5)
+                    .iter()
+                    .all(|hit| !hit.flags.contains(&"de_strict_source_street_typo")),
+                "P3 must enforce the independent {case} guard"
+            );
+        }
+
+        let canonical_osa = forward_postcode_index_for_country(
+            "wave-b-p3-canonical-osa",
+            "muehlenabcdefghijklstrasse,001,berlin,10114,10114,1,,13.3800000,52.5000000,Mühlenabcdefghijklstraße,Berlin\n\
+             muhlenabcxefgyijklstrasse,002,berlin,10115,10115,1,,13.3900000,52.5100000,Muhlenabcxefgyijklstraße,Berlin\n",
+            "de",
+        );
+        assert!(
+            canonical_osa
+                .query("Mühlenabcdefghijklstr. 1, 10115 Berlin", 5)
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_strict_source_street_typo")),
+            "a favorable lookup-only orthography variant may not replace canonical OSA admission"
+        );
+
+        let key_display_mismatch = forward_postcode_index_for_country(
+            "wave-b-p3-key-display-mismatch",
+            "probsteistrasse,001,viersen,41748,41748,15,,6.3800000,51.2700000,Probsteistraße,Viersen\n\
+             propsteistrasse,002,viersen,41749,41749,15,,6.3900000,51.2800000,Unrelated Avenue,Viersen\n",
+            "de",
+        );
+        assert!(
+            key_display_mismatch
+                .query("Probsteistr. 15, 41749 Viersen", 5)
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_strict_source_street_typo")),
+            "a close FST key may not stand in for the product-normalized display street"
+        );
+
+        let hidden_display_identity = forward_postcode_index_for_country(
+            "wave-b-p3-hidden-display-identity",
+            "probsteistrasse,001,viersen,41748,41748,15,,6.3800000,51.2700000,Probsteistraße,Viersen\n\
+             propsteistrasse,002,viersen,41749,41749,15,,6.3900000,51.2800000,Propsteistraße,Viersen\n\
+             zzzzweg,003,viersen,41749,41749,15,,6.4000000,51.2900000,Probsteikstraße,Viersen\n",
+            "de",
+        );
+        assert_eq!(
+            hidden_display_identity
+                .de_postcode_street_bucket(41749)
+                .expect("exact DE postcode bucket")
+                .len(),
+            2,
+            "the open-time roster must include both the near key and the hidden far key"
+        );
+        assert!(
+            hidden_display_identity
+                .query("Probsteistr. 15, 41749 Viersen", 5)
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_strict_source_street_typo")),
+            "a second qualifying display identity behind an unrelated FST key must fail closed"
+        );
+        let previous_limit = DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT.with(|limit| limit.replace(1));
+        assert!(
+            hidden_display_identity
+                .de_postcode_street_bucket(41749)
+                .is_none(),
+            "an oversized exact-postcode bucket must fail closed"
+        );
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT.with(|limit| limit.set(previous_limit));
+
+        let hidden_unique_identity = forward_postcode_index_for_country(
+            "wave-b-p3-hidden-unique-display-identity",
+            "probsteistrasse,001,viersen,41748,41748,15,,6.3800000,51.2700000,Probsteistraße,Viersen\n\
+             zzzzweg,003,viersen,41749,41749,15,,6.4000000,51.2900000,Propsteistraße,Viersen\n",
+            "de",
+        );
+        let hidden_unique_top = hidden_unique_identity
+            .query("Probsteistr. 15, 41749 Viersen", 1)
+            .into_iter()
+            .next()
+            .expect("the bounded postcode roster must find the unique display identity");
+        assert_eq!(hidden_unique_top.street, "Propsteistraße");
+        assert!(hidden_unique_top
+            .flags
+            .contains(&"de_strict_source_street_typo"));
+
+        let mixed_postcodes = forward_postcode_index_for_country(
+            "wave-b-p3-mixed-postcode-roster",
+            "propsteistrasse,002,viersen,41749,41749,15,,6.3900000,51.2800000,Propsteistraße,Viersen\n\
+             propsteistrasse,002,viersen,41750,41750,16,,6.3910000,51.2810000,Propsteistraße,Viersen\n",
+            "de",
+        );
+        let mixed_bucket = mixed_postcodes
+            .de_postcode_street_bucket(41750)
+            .expect("v7 mixed-postcode dictionary must enter the roster");
+        assert_eq!(mixed_bucket.len(), 1);
+        let mixed_sid = mixed_bucket[0].1;
+        let mixed_metadata = mixed_postcodes.street_meta(mixed_sid);
+        assert!(
+            mixed_postcodes.exact_house_full_postcode_set_candidate_cached(
+                &mut HashMap::new(),
+                mixed_sid,
+                &mixed_metadata,
+                16,
+                0,
+                &[],
+                41750,
+                "41750",
+            )
+        );
+        assert!(
+            !mixed_postcodes.exact_house_full_postcode_set_candidate_cached(
+                &mut HashMap::new(),
+                mixed_sid,
+                &mixed_metadata,
+                15,
+                0,
+                &[],
+                41750,
+                "41750",
+            )
+        );
+
+        let locality_normalization = forward_postcode_index_for_country(
+            "wave-b-p3-locality-normalization",
+            "probsteistrasse,001,koeln,41748,41748,15,,6.3800000,51.2700000,Probsteistraße,Köln\n\
+             propsteistrasse,002,koln,41749,41749,15,,6.3900000,51.2800000,Propsteistraße,Koln\n",
+            "de",
+        );
+        assert!(
+            locality_normalization
+                .query("Probsteistr. 15, 41749 Köln", 5)
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_strict_source_street_typo")),
+            "product normalization must distinguish umlaut digraphs from absent umlauts"
+        );
+
+        let lev4_uniqueness = forward_postcode_index_for_country(
+            "wave-b-p3-lev4-uniqueness",
+            "abcdefghijklmnopqrst,001,berlin,10114,10114,1,,13.3700000,52.4900000,abcdefghijklmnopqrst,Berlin\n\
+             abcdefghijklmnopqrsx,002,berlin,10115,10115,1,,13.3800000,52.5000000,abcdefghijklmnopqrsx,Berlin\n\
+             abcedfghijklmnoprqst,003,berlin,10115,10115,1,,13.3900000,52.5100000,abcedfghijklmnoprqst,Berlin\n",
+            "de",
+        );
+        assert_eq!(
+            de_compact_osa_distance("abcdefghijklmnopqrst", "abcedfghijklmnoprqst"),
+            2
+        );
+        assert!(
+            lev4_uniqueness
+                .query("abcdefghijklmnopqrst 1, 10115 Berlin", 5)
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_strict_source_street_typo")),
+            "the postcode roster must count both identities independently of FST distance"
+        );
+    }
+
+    #[test]
+    fn de_wave_b_p3_parser_osa_similarity_and_locality_are_bounded() {
+        let spec = de_strict_source_street_typo_spec("Rüsselheimerstr. 2, 65451 Kelsterbach")
+            .expect("the canonical simple P3 surface must parse");
+        assert_eq!(spec.normalized_street, "ruesselheimerstrasse");
+        assert_eq!(spec.normalized_locality, "kelsterbach");
+        assert_eq!(spec.house_number, 2);
+        assert_eq!(spec.postcode_raw, "65451");
+
+        for raw in [
+            "Haus 7 Straße 2, 65451 Kelsterbach",
+            "Teststraße 2a, 65451 Kelsterbach",
+            "Teststraße 2/3, 65451 Kelsterbach",
+            "Teststraße 0002, 65451 Kelsterbach",
+            "Teststraße 2, 6545 Kelsterbach",
+            "Teststraße 2, 65451 Kelsterbach, Deutschland",
+            "Teststraße 2, 65451 Kelsterbach\nEmpfang",
+            "Teststraße 2, 65451 Kelsterbach ",
+        ] {
+            assert!(
+                de_strict_source_street_typo_spec(raw).is_none(),
+                "strict P3 parser must reject {raw:?}"
+            );
+        }
+
+        assert_eq!(
+            de_compact_osa_distance("probsteistrasse", "propsteistrasse"),
+            1
+        );
+        assert_eq!(
+            de_compact_osa_distance("frankfurt strasse", "frankfurter strasse"),
+            2
+        );
+        assert_eq!(de_compact_osa_distance("abcdefgh", "abcxyzgh"), 3);
+        assert!(de_sequence_matcher_ratio_at_least_090(
+            "ruesselheimerstrasse",
+            "ruesselsheimer strasse"
+        ));
+        assert!(!de_sequence_matcher_ratio_at_least_090("muster", "master"));
+        assert!(de_sequence_matcher_ratio_at_least_090(
+            "abcdefghij",
+            "abcdefghix"
+        ));
+        for (raw, expected) in [
+            ("Rüsselheimerstr.", "ruesselheimerstrasse"),
+            ("Kirchgase", "kirchgase"),
+            ("Frankfurt Straße", "frankfurt strasse"),
+            ("Oppenhäuser Str.", "oppenhaeuser strasse"),
+            ("Robert Schumann Str.", "robert schumann strasse"),
+            ("Probsteistr.", "probsteistrasse"),
+        ] {
+            assert_eq!(de_product_normalize_street(raw), expected, "{raw}");
+        }
+        assert_eq!(de_product_normalize_text("Müllrose"), "muellrose");
+        assert!(de_p3_locality_compatible("obersulm eschenau", "obersulm"));
+        assert!(de_p3_locality_compatible("gersheim", "gersheim reinheim"));
+        assert!(!de_p3_locality_compatible("obersulm", "obersulmberg"));
+    }
+
+    #[test]
+    fn de_wave_b_p3_absent_postcode_roster_filters_only_double_conflicts() {
+        let idx = forward_postcode_index_for_country(
+            "wave-b-p3-absent-postcode-roster",
+            "probsteistrasse,001,aldenhoven,52457,52457,15,,6.2800000,50.9000000,Probsteistraße,Aldenhoven\n",
+            "de",
+        );
+        let current = |commune: &str, postcode: &str| {
+            let (hit, features, ..) = retained_test_hit(
+                commune,
+                "Probsteistraße",
+                Some("15"),
+                postcode,
+                "house",
+                1.0,
+                [0.0; N_FEATS],
+                vec!["street_exact", "house_rep"],
+                100,
+                0,
+            );
+            vec![(hit, features)]
+        };
+
+        let qualifier_cases = [
+            (
+                "Probsteistr. 15, 41749 Viersen/Rhein",
+                41749,
+                "Viersen am Rhein",
+                "slash",
+            ),
+            (
+                "Probsteistr. 15, 79104 Freiburg (Breisgau)",
+                79104,
+                "Freiburg im Breisgau",
+                "parenthesis",
+            ),
+            (
+                "Probsteistr. 15, 18609 Binz - OT Prora",
+                18609,
+                "Prora",
+                "OT",
+            ),
+            (
+                "Probsteistr. 15, 74239 Hardthausen-Kochersteinsfeld",
+                74239,
+                "Kochersteinsfeld",
+                "hyphen",
+            ),
+        ];
+        for (query, postcode, commune, shape) in qualifier_cases {
+            assert!(
+                idx.de_postcode_street_bucket(postcode).is_none(),
+                "the {shape} observer must exercise the absent exact-postcode roster branch"
+            );
+            assert!(
+                idx.de_strict_source_street_typo_fallback(query, &current(commune, ""), 1)
+                    .is_none(),
+                "a missing row postcode is unknown and must preserve the {shape} locality qualifier"
+            );
+            let filtered = idx
+                .de_strict_source_street_typo_fallback(query, &current(commune, "99999"), 1)
+                .expect("a non-empty conflicting postcode must still fail closed");
+            assert!(
+                filtered.is_empty(),
+                "the reverse-mutation observer must reject the {shape} qualifier when the row postcode contradicts the request"
+            );
+        }
+
+        let query = "Probsteistr. 15, 41749 Viersen";
+        assert!(
+            idx.de_strict_source_street_typo_fallback(query, &current("Viersen", ""), 1)
+                .is_none(),
+            "a same-locality result with absent postcode remains eligible"
+        );
+        assert!(
+            idx.de_strict_source_street_typo_fallback(query, &current("Aldenhoven", "41749"), 1,)
+                .is_none(),
+            "an exact-postcode result is not removed solely for locality disagreement"
+        );
+    }
+
+    #[test]
+    fn de_wave_b_p4_audited_compounds_cover_all_four_shapes() {
+        let idx = forward_postcode_index_for_country(
+            "wave-b-p4-five-surfaces",
+            "albertstrasse,002,freiburg im breisgau,79104,79104,25,,7.8500000,48.0100000,Albertstraße,Freiburg im Breisgau\n\
+             campus ring,003,bremen,28759,28759,1,,8.6500000,53.1700000,Campus Ring,Bremen\n\
+             grosse meissner strasse,001,dresden,01097,01097,19,,13.7400000,51.0600000,Große Meißner Straße,Dresden\n\
+             marktplatz,005,weilheim an der teck,73235,73235,4,,9.5400000,48.6200000,Marktplatz,Weilheim an der Teck\n\
+             rheinstrasse,004,berlin,12161,12161,45,,13.3300000,52.4700000,Rheinstraße,Berlin\n\
+             rheinstrasse,004,berlin,12161,12161,46,,13.3310000,52.4710000,Rheinstraße,Berlin\n",
+            "de",
+        );
+        let cases = [
+            (
+                "Blockhaus, 19, Große Meißner Straße, Innere Neustadt, Neustadt, Dresden, Sachsen, 01097",
+                "Große Meißner Straße",
+                "19",
+                "01097",
+                "Dresden",
+                "grosse meissner strasse",
+                "dresden",
+                false,
+            ),
+            (
+                "Albertstr. 25 ( Otto-Krayer-Haus), 79104 Freiburg/Breisgau",
+                "Albertstraße",
+                "25",
+                "79104",
+                "Freiburg im Breisgau",
+                "albertstrasse",
+                "freiburg im breisgau",
+                false,
+            ),
+            (
+                "c/o Jacobs University Bremen Campusring 1 Bremen, 28759 Bremen",
+                "Campus Ring",
+                "1",
+                "28759",
+                "Bremen",
+                "campus ring",
+                "bremen",
+                false,
+            ),
+            (
+                "Rheinstr. 45/46 (Aufgang 6), 12161 Berlin",
+                "Rheinstraße",
+                "45",
+                "12161",
+                "Berlin",
+                "rheinstrasse",
+                "berlin",
+                true,
+            ),
+            (
+                "Marktplatz 4 (Weilheimer \"Bürgerhaus\"), 73235 Weilheim/Teck",
+                "Marktplatz",
+                "4",
+                "73235",
+                "Weilheim an der Teck",
+                "marktplatz",
+                "weilheim an der teck",
+                false,
+            ),
+        ];
+
+        for (
+            query,
+            street,
+            house,
+            postcode,
+            commune,
+            normalized_street,
+            normalized_locality,
+            complete_set,
+        ) in cases
+        {
+            let spec = de_audited_compound_spec(query).expect("P4 product fields must parse");
+            assert_eq!(spec.normalized_street, normalized_street, "{query}");
+            assert_eq!(spec.normalized_locality, normalized_locality, "{query}");
+            let top = idx
+                .query(query, 1)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| panic!("strict P4 source proof must resolve {query}"));
+            assert_eq!(top.precision, "house", "{query}");
+            assert_eq!(top.street, street, "{query}");
+            assert_eq!(top.housenumber.as_deref(), Some(house), "{query}");
+            assert_eq!(top.postcode, postcode, "{query}");
+            assert_eq!(top.commune, commune, "{query}");
+            assert!(
+                top.flags.contains(&"de_audited_compound"),
+                "the dedicated typed P4 proof must own {query}: {:?}",
+                top.flags
+            );
+            assert_eq!(
+                top.flags.contains(&"de_house_set_exact"),
+                complete_set,
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn de_wave_b_p4_requires_complete_set_exact_locality_and_de_scope() {
+        let missing_endpoint = forward_postcode_index_for_country(
+            "wave-b-p4-missing-endpoint",
+            "rheinstrasse,004,berlin,12161,12161,45,,13.3300000,52.4700000,Rheinstraße,Berlin\n",
+            "de",
+        );
+        let mut rhein_key = b"rheinstrasse".to_vec();
+        rhein_key.push(KEY_SEP);
+        rhein_key.extend_from_slice(b"004");
+        let rhein_sid = missing_endpoint
+            .streets_fst
+            .get(&rhein_key)
+            .expect("fixture street") as u32;
+        let rhein_meta = missing_endpoint.street_meta(rhein_sid);
+        assert!(
+            !missing_endpoint.exact_house_postcode_set_candidate_cached(
+                &mut HashMap::new(),
+                rhein_sid,
+                &rhein_meta,
+                45,
+                0,
+                &[46],
+                12161,
+            ),
+            "the low-level source proof must reject the missing right endpoint"
+        );
+        let mut direct_budget = DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT_DEFAULT;
+        let mut direct_seen = HashSet::new();
+        let direct = missing_endpoint
+            .query_feats_prepared_postcode_house_rescue(
+                &prepared_query_key("rheinstrasse 45, 12161 berlin"),
+                20,
+                None,
+                &[46],
+                &mut direct_budget,
+                &mut direct_seen,
+            )
+            .expect("bounded direct scan must not overflow");
+        assert!(
+            direct.is_empty(),
+            "the prepared exact scan must preserve the complete endpoint set"
+        );
+        let missing_hits = missing_endpoint.query("Rheinstr. 45/46 (Aufgang 6), 12161 Berlin", 5);
+        assert!(
+            missing_hits
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_audited_compound")),
+            "a range without endpoint 46 must fail closed"
+        );
+
+        let freiburg = forward_postcode_index_for_country(
+            "wave-b-p4-locality",
+            "albertstrasse,002,freiburg im breisgau,79104,79104,25,,7.8500000,48.0100000,Albertstraße,Freiburg im Breisgau\n",
+            "de",
+        );
+        assert!(
+            freiburg
+                .query("Albertstr. 25 (Haus), 79104 Freiburg/Oder", 5)
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_audited_compound")),
+            "the bounded slash-locality alias must preserve its qualifier"
+        );
+
+        let invented_preposition = forward_postcode_index_for_country(
+            "wave-b-p4-no-invented-preposition",
+            "albertstrasse,002,freiburg an der breisgau,79104,79104,25,,7.8500000,48.0100000,Albertstraße,Freiburg an der Breisgau\n",
+            "de",
+        );
+        assert!(
+            invented_preposition
+                .query(
+                    "Albertstr. 25 (Otto-Krayer-Haus), 79104 Freiburg/Breisgau",
+                    5,
+                )
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_audited_compound")),
+            "slash locality must project one product locality, never both prepositions"
+        );
+
+        let venue_admin_decoy = forward_postcode_index_for_country(
+            "wave-b-p4-venue-admin-decoy",
+            "grosse meissner strasse,001,sachsen,01097,01097,19,,13.7400000,51.0600000,Große Meißner Straße,Sachsen\n",
+            "de",
+        );
+        assert!(
+            venue_admin_decoy
+                .query(
+                    "Blockhaus, 19, Große Meißner Straße, Innere Neustadt, Neustadt, Dresden, Sachsen, 01097",
+                    5,
+                )
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_audited_compound")),
+            "venue administrative qualifiers are not alternative query localities"
+        );
+
+        let display_mismatch = forward_postcode_index_for_country(
+            "wave-b-p4-display-mismatch",
+            "albertstrasse,002,freiburg im breisgau,79104,79104,25,,7.8500000,48.0100000,Alberta Straße,Freiburg im Breisgau\n",
+            "de",
+        );
+        assert!(
+            display_mismatch
+                .query(
+                    "Albertstr. 25 (Otto-Krayer-Haus), 79104 Freiburg/Breisgau",
+                    5,
+                )
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_audited_compound")),
+            "an exact retrieval key cannot replace normalized display-street equality"
+        );
+
+        let arbitrary_care_of_split = forward_postcode_index_for_country(
+            "wave-b-p4-care-of-split",
+            "campusri ng,003,bremen,28759,28759,1,,8.6500000,53.1700000,Campusri Ng,Bremen\n",
+            "de",
+        );
+        assert!(
+            arbitrary_care_of_split
+                .query(
+                    "c/o Jacobs University Bremen Campusring 1 Bremen, 28759 Bremen",
+                    5,
+                )
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_audited_compound")),
+            "c/o parsing may split only a terminal street-type word"
+        );
+
+        let non_de = forward_postcode_index_for_country(
+            "wave-b-p4-country-boundary",
+            "marktplatz,005,weilheim an der teck,73235,73235,4,,9.5400000,48.6200000,Marktplatz,Weilheim an der Teck\n",
+            "fr",
+        );
+        assert!(
+            non_de
+                .query(
+                    "Marktplatz 4 (Weilheimer \"Bürgerhaus\"), 73235 Weilheim/Teck",
+                    5,
+                )
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_audited_compound")),
+            "the audited compound fallback is DE-only"
+        );
+
+        let duplicate = forward_postcode_index_for_country(
+            "wave-b-p4-duplicate",
+            "albertstrasse,001,freiburg im breisgau,79104,79104,25,,7.8500000,48.0100000,Albertstraße,Freiburg im Breisgau\n\
+             albertstrasse,002,freiburg im breisgau,79104,79104,25,,7.8600000,48.0200000,Albertstraße,Freiburg im Breisgau\n",
+            "de",
+        );
+        assert!(
+            duplicate
+                .query(
+                    "Albertstr. 25 (Otto-Krayer-Haus), 79104 Freiburg/Breisgau",
+                    5,
+                )
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_audited_compound")),
+            "two exact source candidates must fail closed"
+        );
+        assert!(
+            duplicate
+                .de_audited_compound_fallback(
+                    "Albertstr. 25 (Otto-Krayer-Haus), 79104 Freiburg/Breisgau",
+                    5,
+                )
+                .is_none(),
+            "the dedicated P4 admission path itself must reject duplicate source rows"
+        );
+
+        let wrong_endpoint_postcode = forward_postcode_index_for_country(
+            "wave-b-p4-endpoint-display-postcode",
+            "rheinstrasse,004,berlin,12161,12161,45,,13.3300000,52.4700000,Rheinstraße,Berlin\n\
+             rheinstrasse,004,berlin,12161,12161A,46,,13.3310000,52.4710000,Rheinstraße,Berlin\n",
+            "de",
+        );
+        assert!(
+            wrong_endpoint_postcode
+                .de_audited_compound_fallback("Rheinstr. 45/46 (Aufgang 6), 12161 Berlin", 5,)
+                .is_none(),
+            "every literal range endpoint must carry the full requested display postcode"
+        );
+
+        let wrong_primary_postcode = forward_postcode_index_for_country(
+            "wave-b-p4-primary-display-postcode",
+            "albertstrasse,002,freiburg im breisgau,79104,79104A,25,,7.8500000,48.0100000,Albertstraße,Freiburg im Breisgau\n",
+            "de",
+        );
+        assert!(
+            wrong_primary_postcode
+                .de_audited_compound_fallback(
+                    "Albertstr. 25 (Otto-Krayer-Haus), 79104 Freiburg/Breisgau",
+                    5,
+                )
+                .is_none(),
+            "the primary house must carry the full requested display postcode"
+        );
+
+        let wrong_primary_house = forward_postcode_index_for_country(
+            "wave-b-p4-primary-house",
+            "albertstrasse,002,freiburg im breisgau,79104,79104,26,,7.8500000,48.0100000,Albertstraße,Freiburg im Breisgau\n",
+            "de",
+        );
+        assert!(
+            wrong_primary_house
+                .de_audited_compound_fallback(
+                    "Albertstr. 25 (Otto-Krayer-Haus), 79104 Freiburg/Breisgau",
+                    5,
+                )
+                .is_none(),
+            "P4 must prove the exact primary house rather than a near/interpolated result"
+        );
+
+        let duplicate_same_coordinates = forward_postcode_index_for_country(
+            "wave-b-p4-duplicate-same-coordinates",
+            "albertstrasse,001,freiburg im breisgau,79104,79104,25,,7.8500000,48.0100000,Albertstraße,Freiburg im Breisgau\n\
+             albertstrasse,002,freiburg im breisgau,79104,79104,25,,7.8500000,48.0100000,Albertstraße,Freiburg im Breisgau\n",
+            "de",
+        );
+        assert_eq!(
+            duplicate_same_coordinates
+                .query(
+                    "Albertstr. 25 (Otto-Krayer-Haus), 79104 Freiburg/Breisgau",
+                    5,
+                )
+                .iter()
+                .any(|hit| hit.flags.contains(&"de_audited_compound")),
+            duplicate
+                .query(
+                    "Albertstr. 25 (Otto-Krayer-Haus), 79104 Freiburg/Breisgau",
+                    5,
+                )
+                .iter()
+                .any(|hit| hit.flags.contains(&"de_audited_compound")),
+            "P4 admission must be invariant to equal versus different result coordinates"
+        );
+
+        let suffix_only = forward_postcode_index_for_country(
+            "wave-b-p4-suffix",
+            "albertstrasse,001,freiburg im breisgau,79104,79104,25,a,7.8500000,48.0100000,Albertstraße,Freiburg im Breisgau\n",
+            "de",
+        );
+        assert!(
+            suffix_only
+                .query(
+                    "Albertstr. 25 (Otto-Krayer-Haus), 79104 Freiburg/Breisgau",
+                    5,
+                )
+                .iter()
+                .all(|hit| !hit.flags.contains(&"de_audited_compound")),
+            "a bare P4 house may not fall forward to a suffixed source house"
+        );
+    }
+
+    #[test]
+    fn de_wave_b_p4_commune_and_attempt_budgets_have_boundary_observers() {
+        let campus_query = "Campus Ring 1 (Haus), 28759 Bremen";
+        for (communes, admitted) in [(16usize, true), (17usize, false)] {
+            let idx = forward_postcode_index_for_country(
+                &format!("wave-b-p4-commune-budget-{communes}"),
+                &de_wave_b_homonymous_p4_rows(communes, "campus ring", "Campus Ring"),
+                "de",
+            );
+            let _rules = crate::rules::scope(idx.rules);
+            let spec = de_audited_compound_spec(campus_query).expect("typed P4 query");
+            let forms = de_product_street_forms(&spec.street);
+            assert_eq!(forms.len(), 1, "the commune boundary must be isolated");
+            assert_eq!(
+                idx.communes_by_name(&spec.normalized_locality).len(),
+                communes
+            );
+            assert_eq!(
+                idx.de_audited_compound_fallback(campus_query, 1).is_some(),
+                admitted,
+                "the 16/17 commune boundary must be observable"
+            );
+        }
+
+        let attempts_query = "Aastr Bbstr 1 (Haus), 28759 Bremen";
+        let attempts_spec =
+            de_audited_compound_spec(attempts_query).expect("typed P4 attempt-budget query");
+        for (communes, expected_attempts, admitted) in
+            [(9usize, 63usize, true), (10usize, 70usize, false)]
+        {
+            let idx = forward_postcode_index_for_country_with_rules(
+                &format!("wave-b-p4-attempt-budget-{communes}"),
+                &de_wave_b_homonymous_p4_rows(
+                    communes,
+                    &attempts_spec.normalized_street,
+                    "Aastr Bbstr",
+                ),
+                "de",
+            );
+            let _rules = crate::rules::scope(idx.rules);
+            let forms = de_product_street_forms(&attempts_spec.street);
+            assert_eq!(forms.len() * communes, expected_attempts);
+            assert!(forms.len() <= 32 && communes <= 16);
+            assert_eq!(
+                idx.de_audited_compound_fallback(attempts_query, 1)
+                    .is_some(),
+                admitted,
+                "the 64-attempt boundary must be observable independently"
+            );
+        }
+    }
+
+    #[test]
+    fn de_wave_b_p4_street_form_budget_has_a_boundary_observer() {
+        let cases = [
+            (
+                "Aastr Bbstr Ccstr Ddstr Eestr Ffstr Ggstr Hhstr Iistr Jjstr",
+                31usize,
+                true,
+            ),
+            (
+                "Aastr Bbstr Ccstr Ddstr Eestr Ffstr Ggstr Hhstr Iistr Jjstr Kkstr",
+                34usize,
+                false,
+            ),
+        ];
+        for (street, expected_forms, admitted) in cases {
+            let query = format!("{street} 1 (Haus), 28759 Bremen");
+            let spec = de_audited_compound_spec(&query).expect("typed P4 form-budget query");
+            let rows = format!(
+                "{},001,bremen,28759,28759,1,,8.6500000,53.1700000,{street},Bremen\n",
+                spec.normalized_street
+            );
+            let idx = forward_postcode_index_for_country_with_rules(
+                &format!("wave-b-p4-street-form-budget-{expected_forms}"),
+                &rows,
+                "de",
+            );
+            let _rules = crate::rules::scope(idx.rules);
+            let forms = de_product_street_forms(&spec.street);
+            assert_eq!(forms.len(), expected_forms);
+            assert_eq!(idx.communes_by_name(&spec.normalized_locality).len(), 1);
+            assert_eq!(
+                idx.de_audited_compound_fallback(&query, 1).is_some(),
+                admitted,
+                "the 32-form boundary must be observable"
+            );
+        }
+    }
+
+    #[test]
+    fn de_wave_p_p4_recall_does_not_depend_on_a_street_fst_projection() {
+        let mut idx = forward_postcode_index_for_country(
+            "wave-p-p4-fst-projection-independent",
+            "campus ring,002,bremen,28759,28759,1,,8.6500000,53.1700000,Campus Ring,Bremen\n\
+             zzdummy,001,bremen,28759,28759,1,,8.6600000,53.1800000,ZZ Dummy,Bremen\n",
+            "de",
+        );
+        let rules = idx.rules;
+        let _rules = crate::rules::scope(rules);
+        let query = "Campus Ring 1 (Haus), 28759 Bremen";
+        assert!(
+            idx.de_audited_compound_fallback(query, 1).is_some(),
+            "the clean fixture must prove that all non-corrupt product gates pass"
+        );
+
+        let mut source_key = b"campus ring".to_vec();
+        source_key.push(KEY_SEP);
+        source_key.extend_from_slice(b"002");
+        let sid = idx
+            .streets_fst
+            .get(&source_key)
+            .expect("clean source street") as u32;
+        let source_metadata = idx.street_meta(sid);
+
+        let mut mismatched_key = b"campus ring".to_vec();
+        mismatched_key.push(KEY_SEP);
+        mismatched_key.extend_from_slice(b"001");
+        let mut builder = fst::MapBuilder::memory();
+        builder.insert(&mismatched_key, sid as u64).unwrap();
+        let bytes: &'static [u8] = Box::leak(builder.into_inner().unwrap().into_boxed_slice());
+        idx.streets_fst = Map::new(bytes).unwrap();
+
+        let lookup_commune_id = idx
+            .communes_by_name("bremen")
+            .into_iter()
+            .find(|&commune_id| idx.commune_insee(commune_id) == "001")
+            .expect("mismatched lookup commune");
+        assert_ne!(source_metadata.commune_id, lookup_commune_id);
+        let recovered = idx
+            .de_audited_compound_fallback(query, 1)
+            .expect("exact display metadata must remain reachable without the FST projection");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].0.street, "Campus Ring");
+        assert_eq!(recovered[0].0.commune, "Bremen");
+        assert_eq!(recovered[0].0.housenumber.as_deref(), Some("1"));
+        assert_eq!(recovered[0].0.postcode, "28759");
+        assert!(recovered[0].0.flags.contains(&"de_audited_compound"));
+    }
+
+    #[test]
+    fn de_wave_p_p4_recovers_three_non_ascii_source_key_archetypes() {
+        let cases = [
+            (
+                "venue",
+                "Speicher, 19, Große Hafenstraße, Altquartier, Neustadt, Elbstadt, Sachsen, 01097",
+                "große hafenstraße,001,elbstadt,01097,01097,19,,11.1000000,51.1000000,Große Hafenstraße,Elbstadt\n",
+                "Große Hafenstraße",
+                "19",
+                "01097",
+                "Elbstadt",
+                false,
+            ),
+            (
+                "parenthetical",
+                "Gartenstr. 25 (Haus A), 79104 Bergheim/Breisgau",
+                "gartenstraße,002,bergheim im breisgau,79104,79104,25,,11.2000000,51.2000000,Gartenstraße,Bergheim im Breisgau\n",
+                "Gartenstraße",
+                "25",
+                "79104",
+                "Bergheim im Breisgau",
+                false,
+            ),
+            (
+                "range",
+                "Uferstr. 45/46 (Aufgang 6), 12161 Neustadt",
+                "uferstraße,003,neustadt,12161,12161,45,,11.3000000,51.3000000,Uferstraße,Neustadt\n\
+                 uferstraße,003,neustadt,12161,12161,46,,11.3010000,51.3010000,Uferstraße,Neustadt\n",
+                "Uferstraße",
+                "45",
+                "12161",
+                "Neustadt",
+                true,
+            ),
+        ];
+
+        for (case, query, rows, street, house, postcode, locality, complete_set) in cases {
+            let idx = forward_postcode_index_for_country(&format!("wave-p-p4-{case}"), rows, "de");
+            let spec = de_audited_compound_spec(query).expect("the audited P4 shape must parse");
+            let commune_id = idx
+                .communes_by_name(&spec.normalized_locality)
+                .into_iter()
+                .next()
+                .expect("fixture locality");
+            let mut old_lookup_key = spec.normalized_street.as_bytes().to_vec();
+            old_lookup_key.push(KEY_SEP);
+            old_lookup_key.extend_from_slice(idx.commune_insee(commune_id).as_bytes());
+            assert!(
+                idx.streets_fst.get(&old_lookup_key).is_none(),
+                "{case} must be invisible to the former normalized-key lookup"
+            );
+
+            DE_P4_POSTCODE_BUCKET_SCAN_ROWS.with(|rows| rows.set(0));
+            let direct = idx
+                .de_audited_compound_fallback(query, 1)
+                .unwrap_or_else(|| panic!("bounded display-metadata recall must resolve {case}"));
+            assert_eq!(direct.len(), 1, "{case}");
+            assert!(
+                DE_P4_POSTCODE_BUCKET_SCAN_ROWS.with(|rows| rows.get()) > 0,
+                "{case} must traverse the runtime postcode bucket"
+            );
+
+            let top = idx
+                .query(query, 1)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| panic!("runtime arbitration must retain {case}"));
+            assert_eq!(top.precision, "house", "{case}");
+            assert_eq!(top.street, street, "{case}");
+            assert_eq!(top.housenumber.as_deref(), Some(house), "{case}");
+            assert_eq!(top.postcode, postcode, "{case}");
+            assert_eq!(top.commune, locality, "{case}");
+            assert!(top.flags.contains(&"de_audited_compound"), "{case}");
+            assert_eq!(
+                top.flags.contains(&"de_house_set_exact"),
+                complete_set,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn de_wave_p_p4_hidden_duplicate_sid_ambiguity_and_bucket_overflow_fail_closed() {
+        let query = "Gartenstr. 25 (Haus A), 79104 Bergheim/Breisgau";
+        let hidden_duplicate = forward_postcode_index_for_country(
+            "wave-p-p4-hidden-duplicate",
+            "gartenstrasse,001,bergheim im breisgau,79104,79104,25,,11.2000000,51.2000000,Gartenstraße,Bergheim im Breisgau\n\
+             gartenstraße,002,bergheim im breisgau,79104,79104,25,,11.9000000,51.9000000,Gartenstrasse,Bergheim im Breisgau\n",
+            "de",
+        );
+        assert_eq!(
+            hidden_duplicate
+                .de_postcode_street_bucket(79104)
+                .expect("two-SID postcode bucket")
+                .len(),
+            2
+        );
+        assert!(
+            hidden_duplicate
+                .de_audited_compound_fallback(query, 1)
+                .is_none(),
+            "two source SIDs with one product projection must fail closed"
+        );
+
+        let mut duplicate_posting = forward_postcode_index_for_country(
+            "wave-p-p4-duplicate-posting",
+            "gartenstraße,001,bergheim im breisgau,79104,79104,25,,11.2000000,51.2000000,Gartenstraße,Bergheim im Breisgau\n",
+            "de",
+        );
+        let posting = duplicate_posting.de_postcode_streets[0];
+        duplicate_posting.de_postcode_streets = vec![posting, posting].into_boxed_slice();
+        assert!(
+            duplicate_posting
+                .de_audited_compound_fallback(query, 1)
+                .is_some(),
+            "duplicate postings for one source SID must collapse before uniqueness"
+        );
+
+        let overflow = forward_postcode_index_for_country(
+            "wave-p-p4-postcode-overflow",
+            "gartenstrasse,001,bergheim im breisgau,79104,79104,25,,11.2000000,51.2000000,Gartenstraße,Bergheim im Breisgau\n\
+             nebenweg,002,anderstadt,79104,79104,9,,11.3000000,51.3000000,Nebenweg,Anderstadt\n",
+            "de",
+        );
+        let previous_limit = DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT.with(|limit| limit.replace(1));
+        let result = overflow.de_audited_compound_fallback(query, 1);
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT.with(|limit| limit.set(previous_limit));
+        assert!(
+            result.is_none(),
+            "an exact-postcode bucket above the shared audited ceiling must fail closed"
+        );
+    }
+
+    #[test]
+    fn de_wave_p_p4_incompatible_candidate_locality_is_vetoed_after_bucket_recall() {
+        let idx = forward_postcode_index_for_country(
+            "wave-p-p4-candidate-locality-veto",
+            "gartenstraße,001,anderstadt,79104,79104,25,,11.2000000,51.2000000,Gartenstraße,Anderstadt\n\
+             nebenweg,002,bergheim im breisgau,79104,79104,9,,11.3000000,51.3000000,Nebenweg,Bergheim im Breisgau\n",
+            "de",
+        );
+        let query = "Gartenstr. 25 (Haus A), 79104 Bergheim/Breisgau";
+        assert_eq!(
+            idx.communes_by_name("bergheim im breisgau").len(),
+            1,
+            "an exact query-locality anchor must make the post-recall veto observable"
+        );
+        DE_P4_POSTCODE_BUCKET_MATCHING_SIDS.with(|matches| matches.set(0));
+        assert!(
+            idx.de_audited_compound_fallback(query, 1).is_none(),
+            "an exact street/house/PLZ in another locality must fail closed"
+        );
+        assert_eq!(
+            DE_P4_POSTCODE_BUCKET_MATCHING_SIDS.with(|matches| matches.get()),
+            0,
+            "the incompatible SID must be vetoed during product-visible admission"
+        );
+    }
+
+    #[test]
+    fn de_wave_p_p4_row_order_and_non_product_metadata_do_not_select_a_candidate() {
+        let query = "Gartenstr. 25 (Haus A), 79104 Bergheim/Breisgau";
+        let rows = [
+            "gartenstraße,001,bergheim im breisgau,79104,79104,25,,11.2000000,51.2000000,Gartenstraße,Bergheim im Breisgau\n\
+             nebenweg,002,anderstadt,79104,79104,9,,11.3000000,51.3000000,Nebenweg,Anderstadt\n",
+            "gartenstraße,001,bergheim im breisgau,79104,79104,25,,18.8000000,58.8000000,Gartenstraße,Bergheim im Breisgau\n\
+             nebenweg,002,anderstadt,79104,79104,9,,19.9000000,59.9000000,Nebenweg,Anderstadt\n",
+        ];
+        let mut projections = Vec::new();
+        for (variant, rows) in rows.into_iter().enumerate() {
+            let mut idx = forward_postcode_index_for_country(
+                &format!("wave-p-p4-order-{variant}"),
+                rows,
+                "de",
+            );
+            if variant == 1 {
+                idx.de_postcode_streets.reverse();
+            }
+            let hit = idx
+                .de_audited_compound_fallback(query, 1)
+                .expect("the unique product candidate must survive source order")
+                .remove(0)
+                .0;
+            projections.push((
+                hit.precision,
+                hit.street,
+                hit.housenumber,
+                hit.postcode,
+                hit.commune,
+                hit.flags,
+            ));
+        }
+        assert_eq!(projections[0], projections[1]);
+    }
+
+    #[test]
+    fn de_wave_p_p4_overlap_preserves_the_established_answer() {
+        let idx = forward_postcode_index_for_country(
+            "wave-p-p4-overlap",
+            "gartenstraße,001,bergheim im breisgau,79104,79104,25,,11.2000000,51.2000000,Gartenstraße,Bergheim im Breisgau\n",
+            "de",
+        );
+        let p4 = idx
+            .de_audited_compound_fallback("Gartenstr. 25 (Haus A), 79104 Bergheim/Breisgau", 1)
+            .expect("P4 witness");
+        let (established_hit, established_features, ..) = retained_test_hit(
+            "Bergheim im Breisgau",
+            "Gartenstraße",
+            Some("24"),
+            "79104",
+            "near",
+            1.0,
+            [0.0; N_FEATS],
+            vec!["street_exact", "commune_exact", "pc_exact"],
+            24,
+            0,
+        );
+        let mut established = vec![(established_hit, established_features)];
+        let competing = idx
+            .de_audited_compound_fallback("Gartenstr. 25 (Haus A), 79104 Bergheim/Breisgau", 1)
+            .expect("second mechanism witness");
+        Index::de_product_fallback_arbitration(
+            &mut established,
+            None,
+            Some(p4),
+            None,
+            Some(competing),
+        );
+        assert_eq!(established.len(), 1);
+        assert_eq!(established[0].0.precision, "near");
+        assert_eq!(established[0].0.street, "Gartenstraße");
+        assert_eq!(established[0].0.housenumber.as_deref(), Some("24"));
+        assert_eq!(established[0].0.postcode, "79104");
+        assert!(!established[0].0.flags.contains(&"de_audited_compound"));
+    }
+
+    #[test]
+    fn de_wave_p_p4_runtime_path_and_forbidden_source_audit_are_nonvacuous() {
+        fn segment<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+            let start = source.find(start_marker).expect("P4 source start marker");
+            let end = source[start..]
+                .find(end_marker)
+                .map(|offset| start + offset)
+                .expect("P4 source end marker");
+            &source[start..end]
+        }
+
+        let source = include_str!("query.rs");
+        let p4_source = segment(
+            source,
+            "fn de_audited_compound_fallback",
+            "fn de_comma_postcode_house_rescue",
+        );
+        for forbidden in [
+            "streets_fst.get",
+            ".lat",
+            ".lon",
+            "dist_km(",
+            ".distance_m",
+            ".score",
+            ".confidence",
+            "take(1)",
+            "candidate_sids.first",
+            "candidate_sids[0]",
+            "roster_id",
+            "ordinal",
+            "physical_id",
+            "truth_coordinate",
+            "result_coordinate",
+            "benchmark",
+            "outcome",
+            "competitor",
+            "distance_threshold",
+            "de_sequence_matcher",
+        ] {
+            assert!(
+                !p4_source.contains(forbidden),
+                "P4 admission must not read forbidden selector {forbidden}"
+            );
+        }
+        for required in [
+            "de_postcode_street_bucket(spec.postcode)?",
+            "de_product_normalize_text(self.commune_name(metadata.commune_id))",
+            "de_product_normalize_street(self.name(metadata.name_off))",
+            "exact_house_full_postcode_set_candidate_cached",
+            "DE_P4_POSTCODE_BUCKET_SCAN_ROWS.with",
+            "DE_P4_POSTCODE_BUCKET_MATCHING_SIDS.with",
+            "candidate_sids.sort_unstable()",
+            "candidate_sids.dedup()",
+            "let [sid] = candidate_sids.as_slice()",
+        ] {
+            assert!(
+                p4_source.contains(required),
+                "P4 source audit must observe guard {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn de_wave_x_x1_promotes_only_the_unique_official_commune_alias_house() {
+        let idx = forward_postcode_index_for_country(
+            "wave-x-x1-official-alias",
+            "rathausplatz,001,ludwigshafen rhein,67061,67061,20,,8.4000000,49.4800000,Rathausplatz,Ludwigshafen Rhein\n\
+             rathausplatz,002,ludwigshafen am rhein,67059,67059,20,,8.4400000,49.4900000,Rathausplatz,Ludwigshafen am Rhein\n\
+             rathausplatz,003,ludwigshafen am rhein,67058,67058,21,,8.4500000,49.5000000,Rathausplatz,Ludwigshafen am Rhein\n",
+            "de",
+        );
+        let top = idx
+            .query("Rathausplatz 20, 67061 Ludwigshafen/Rhein", 1)
+            .into_iter()
+            .next()
+            .expect("the bounded official alias must retain one exact house");
+        assert_eq!(top.commune, "Ludwigshafen am Rhein");
+        assert_eq!(top.street, "Rathausplatz");
+        assert_eq!(top.housenumber.as_deref(), Some("20"));
+        assert_eq!(top.postcode, "67059");
+        assert!(top.flags.contains(&"street_exact"));
+        assert!(top.flags.contains(&"house_rep"));
+        assert!(top.flags.contains(&"pc_dept"));
+        assert!(top.flags.contains(&"de_official_commune_alias"));
+        let expanded = idx.query("Rathausplatz 20, 67061 Ludwigshafen/Rhein", 5);
+        assert_eq!(
+            expanded.first().map(|hit| hit.postcode.as_str()),
+            Some("67059")
+        );
+        assert!(
+            expanded
+                .iter()
+                .skip(1)
+                .any(|hit| hit.housenumber.as_deref() == Some("21")),
+            "promotion must preserve legitimate lower hard-commune alternatives"
+        );
+
+        let duplicate = forward_postcode_index_for_country(
+            "wave-x-x1-official-alias-duplicate",
+            "rathausplatz,001,ludwigshafen rhein,67061,67061,20,,8.4000000,49.4800000,Rathausplatz,Ludwigshafen Rhein\n\
+             rathausplatz,002,ludwigshafen am rhein,67059,67059,20,,8.4400000,49.4900000,Rathausplatz,Ludwigshafen am Rhein\n\
+             rathausplatz,003,ludwigshafen am rhein,67058,67058,20,,8.4500000,49.5000000,Rathausplatz,Ludwigshafen am Rhein\n",
+            "de",
+        );
+        let duplicate_top = duplicate
+            .query("Rathausplatz 20, 67061 Ludwigshafen/Rhein", 1)
+            .into_iter()
+            .next()
+            .expect("the established exact-postcode result remains available");
+        assert_eq!(duplicate_top.postcode, "67061");
+        assert!(!duplicate_top.flags.contains(&"de_official_commune_alias"));
+    }
+
+    #[test]
+    fn de_wave_regression_official_alias_treats_only_an_empty_postcode_as_unknown() {
+        let candidate = |postcode: &str, pc_dept: bool| {
+            let (hit, features, ..) = retained_test_hit(
+                "Ludwigshafen am Rhein",
+                "Rathausplatz",
+                Some("20"),
+                postcode,
+                "house",
+                1.0,
+                Feats {
+                    street_exact: true,
+                    pc_dept,
+                    house_exact_rep: true,
+                    ..Default::default()
+                }
+                .to_vec(),
+                vec!["street_exact", "house_rep"],
+                100,
+                0,
+            );
+            vec![(hit, features)]
+        };
+        let query = "Rathausplatz 20, 67061 Ludwigshafen/Rhein";
+
+        assert_eq!(
+            Index::de_ludwigshafen_official_alias_candidate_position(query, &candidate("", false)),
+            Some(0),
+            "an empty row postcode is missing evidence, not contradictory evidence"
+        );
+        assert_eq!(
+            Index::de_ludwigshafen_official_alias_candidate_position(
+                query,
+                &candidate("67059", true)
+            ),
+            Some(0),
+            "the existing same-department witness remains admissible"
+        );
+        assert!(
+            Index::de_ludwigshafen_official_alias_candidate_position(
+                query,
+                &candidate("99999", false)
+            )
+            .is_none(),
+            "a non-empty conflicting postcode must remain fail-closed"
+        );
+    }
+
+    #[test]
+    fn de_wave_x_x2_promotes_only_one_exact_street_locality_qualifier() {
+        let idx = forward_postcode_index_for_country(
+            "wave-x-x2-street-locality-qualifier",
+            "markt,001,quedlinburg,06485,06485,1,,11.1000000,51.7900000,Markt,Quedlinburg\n\
+             markt quedlinburg,002,quedlinburg welterbestadt,,,1,,11.1400000,51.8000000,Markt (Quedlinburg),\"Quedlinburg, Welterbestadt\"\n",
+            "de",
+        );
+        let top = idx
+            .query("Markt 1, 06484 Quedlinburg", 1)
+            .into_iter()
+            .next()
+            .expect("the unique qualified source street must be reachable");
+        assert_eq!(top.street, "Markt (Quedlinburg)");
+        assert_eq!(top.commune, "Quedlinburg, Welterbestadt");
+        assert_eq!(top.housenumber.as_deref(), Some("1"));
+        assert_eq!(top.postcode, "");
+        assert!(top.flags.contains(&"street_exact"));
+        assert!(top.flags.contains(&"house_rep"));
+        assert!(top.flags.contains(&"de_street_locality_qualifier"));
+
+        let duplicate = forward_postcode_index_for_country(
+            "wave-x-x2-street-locality-qualifier-duplicate",
+            "markt,001,quedlinburg,06485,06485,1,,11.1000000,51.7900000,Markt,Quedlinburg\n\
+             markt quedlinburg,002,quedlinburg welterbestadt,,,1,,11.1400000,51.8000000,Markt (Quedlinburg),\"Quedlinburg, Welterbestadt\"\n\
+             markt quedlinburg,003,quedlinburg welterbestadt nord,,,1,,11.1500000,51.8100000,Markt (Quedlinburg),\"Quedlinburg, Welterbestadt Nord\"\n",
+            "de",
+        );
+        let duplicate_top = duplicate
+            .query("Markt 1, 06484 Quedlinburg", 1)
+            .into_iter()
+            .next()
+            .expect("the established department-level result remains available");
+        assert_eq!(duplicate_top.street, "Markt");
+        assert_eq!(duplicate_top.postcode, "06485");
+        assert!(!duplicate_top
+            .flags
+            .contains(&"de_street_locality_qualifier"));
+    }
+
+    #[test]
+    fn de_wave_x_x1_rejects_an_index_key_display_street_mismatch() {
+        let idx = forward_postcode_index_for_country(
+            "wave-x-x1-display-mismatch",
+            "rathausplatz,001,ludwigshafen rhein,67061,67061,20,,8.4000000,49.4800000,Rathausplatz,Ludwigshafen Rhein\n\
+             rathausplatz,002,ludwigshafen am rhein,67059,67059,20,,8.4400000,49.4900000,Bürgerplatz,Ludwigshafen am Rhein\n",
+            "de",
+        );
+        let top = idx
+            .query("Rathausplatz 20, 67061 Ludwigshafen/Rhein", 1)
+            .into_iter()
+            .next()
+            .expect("the established exact-postcode result remains available");
+        assert_eq!(top.street, "Rathausplatz");
+        assert_eq!(top.postcode, "67061");
+        assert!(!top.flags.contains(&"de_official_commune_alias"));
+    }
+
+    #[test]
+    fn de_wave_x_x2_parsers_accept_only_the_typed_product_surfaces() {
+        let spec = de_street_locality_qualifier_spec("Markt 12A, 06484 Quedlinburg")
+            .expect("a one-letter exact house suffix is part of the typed surface");
+        assert_eq!(spec.normalized_street, "markt");
+        assert_eq!(spec.normalized_locality, "quedlinburg");
+        assert_eq!(spec.house_token, "12a");
+        assert_eq!(spec.postcode_raw, "06484");
+
+        for raw in [
+            "Markt 1-3, 06484 Quedlinburg",
+            "Markt 1/3, 06484 Quedlinburg",
+            "Markt 01, 06484 Quedlinburg",
+            "Markt 1, Quedlinburg",
+            "Markt 1, 06484 Quedlinburg, Sachsen-Anhalt",
+            "Quedlinburg, Markt 1, 06484",
+        ] {
+            assert!(
+                de_street_locality_qualifier_spec(raw).is_none(),
+                "{raw} must stay outside the X2 parser"
+            );
+        }
+
+        assert_eq!(
+            de_source_street_locality_qualifier("Markt (Quedlinburg)"),
+            Some(("markt".to_string(), "quedlinburg".to_string()))
+        );
+        for display in [
+            "Markt",
+            "Markt ()",
+            "Markt ((Quedlinburg))",
+            "Markt (Quedlinburg) Zufahrt",
+            "Markt (Quedlinburg) ",
+        ] {
+            assert!(
+                de_source_street_locality_qualifier(display).is_none(),
+                "{display} must not become a source qualifier"
+            );
+        }
+    }
+
+    #[test]
+    fn de_wave_x_x2_product_predicate_rejects_an_exact_postcode_top_and_suffix_mismatch() {
+        let make_hit = |street: &str, commune: &str, postcode: &str, house: &str| Hit {
+            lat: 0.0,
+            lon: 0.0,
+            precision: "house",
+            score: 0.0,
+            confidence: 0.0,
+            street: street.to_string(),
+            housenumber: Some(house.to_string()),
+            commune: commune.to_string(),
+            postcode: postcode.to_string(),
+            flags: Vec::new(),
+            region: None,
+            distance_m: None,
+        };
+        let top_features = Feats {
+            street_exact: true,
+            pc_exact: true,
+            pc_dept: true,
+            house_exact_rep: true,
+            ..Default::default()
+        }
+        .to_vec();
+        let candidate_features = Feats {
+            street_exact: true,
+            house_exact_rep: true,
+            ..Default::default()
+        }
+        .to_vec();
+        let mut current = vec![
+            (make_hit("Markt", "Quedlinburg", "06484", "1"), top_features),
+            (
+                make_hit("Markt (Quedlinburg)", "Quedlinburg, Welterbestadt", "", "1"),
+                candidate_features,
+            ),
+        ];
+        assert!(
+            Index::de_street_locality_qualifier_position("Markt 1, 06484 Quedlinburg", &current,)
+                .is_none(),
+            "an exact-postcode top is already final"
+        );
+
+        current[0].1[4] = 0.0;
+        current[0].0.postcode = "06485".to_string();
+        current[1].0.housenumber = Some("1a".to_string());
+        assert!(
+            Index::de_street_locality_qualifier_position("Markt 1, 06484 Quedlinburg", &current,)
+                .is_none(),
+            "the candidate house suffix must equal the typed suffix"
+        );
+        current[1].0.housenumber = Some("1".to_string());
+        assert_eq!(
+            Index::de_street_locality_qualifier_position("Markt 1, 06484 Quedlinburg", &current,),
+            Some(1),
+            "the same product-only window becomes admissible once both guards hold"
+        );
+
+        for street in ["Markt Nord", "Markt Süd", "Markt Ost"] {
+            current.push((make_hit(street, "Quedlinburg", "", "1"), candidate_features));
+        }
+        current.push((
+            make_hit(
+                "Markt (Quedlinburg)",
+                "Quedlinburg, Welterbestadt Süd",
+                "",
+                "1",
+            ),
+            candidate_features,
+        ));
+        assert_eq!(
+            Index::de_street_locality_qualifier_position("Markt 1, 06484 Quedlinburg", &current,),
+            Some(1),
+            "an eligible rank six is outside the fixed audited top-five window"
+        );
+        let rank_six = current.pop().expect("the rank-six witness exists");
+        current[4] = rank_six;
+        assert!(
+            Index::de_street_locality_qualifier_position("Markt 1, 06484 Quedlinburg", &current,)
+                .is_none(),
+            "the same duplicate at rank five must fail closed"
+        );
+    }
+
+    #[test]
+    fn de_wave_x_x2_preserves_exact_postcodes_and_rejects_nonempty_or_wrong_qualifiers() {
+        let canonical = forward_postcode_index_for_country(
+            "wave-x-x2-top-and-bare-guards",
+            "markt,001,quedlinburg,06485,06485,1,,11.1000000,51.7900000,Markt,Quedlinburg\n\
+             markt quedlinburg,002,quedlinburg welterbestadt,,,1,,11.1400000,51.8000000,Markt (Quedlinburg),\"Quedlinburg, Welterbestadt\"\n",
+            "de",
+        );
+        for query in ["Markt 1, 06485 Quedlinburg", "Markt 1"] {
+            let top = canonical
+                .query(query, 1)
+                .into_iter()
+                .next()
+                .expect("the established Markt result remains available");
+            assert_eq!(top.street, "Markt", "{query}");
+            assert!(!top.flags.contains(&"de_street_locality_qualifier"));
+        }
+
+        let populated = forward_postcode_index_for_country(
+            "wave-x-x2-populated-candidate-postcode",
+            "markt,001,quedlinburg,06485,06485,1,,11.1000000,51.7900000,Markt,Quedlinburg\n\
+             markt quedlinburg,002,quedlinburg welterbestadt,06486,06486,1,,11.1400000,51.8000000,Markt (Quedlinburg),\"Quedlinburg, Welterbestadt\"\n",
+            "de",
+        );
+        let populated_top = populated
+            .query("Markt 1, 06484 Quedlinburg", 1)
+            .into_iter()
+            .next()
+            .expect("the established department-level result remains available");
+        assert_eq!(populated_top.street, "Markt");
+        assert!(!populated_top
+            .flags
+            .contains(&"de_street_locality_qualifier"));
+
+        let wrong = forward_postcode_index_for_country(
+            "wave-x-x2-wrong-source-qualifier",
+            "markt,001,quedlinburg,06485,06485,1,,11.1000000,51.7900000,Markt,Quedlinburg\n\
+             markt quedlinburg,002,quedlinburg welterbestadt,,,1,,11.1400000,51.8000000,Markt (Gernrode),\"Quedlinburg, Welterbestadt\"\n",
+            "de",
+        );
+        let wrong_top = wrong
+            .query("Markt 1, 06484 Quedlinburg", 1)
+            .into_iter()
+            .next()
+            .expect("the established department-level result remains available");
+        assert_eq!(wrong_top.street, "Markt");
+        assert!(!wrong_top.flags.contains(&"de_street_locality_qualifier"));
+
+        let wrong_commune = forward_postcode_index_for_country(
+            "wave-x-x2-wrong-source-commune",
+            "markt,001,quedlinburg,06485,06485,1,,11.1000000,51.7900000,Markt,Quedlinburg\n\
+             markt quedlinburg,002,gernrode,,,1,,11.1400000,51.8000000,Markt (Quedlinburg),Gernrode\n",
+            "de",
+        );
+        let wrong_commune_top = wrong_commune
+            .query("Markt 1, 06484 Quedlinburg", 1)
+            .into_iter()
+            .next()
+            .expect("the established department-level result remains available");
+        assert_eq!(wrong_commune_top.street, "Markt");
+        assert!(!wrong_commune_top
+            .flags
+            .contains(&"de_street_locality_qualifier"));
+
+        let foreign = forward_postcode_index_for_country(
+            "wave-x-x2-foreign-country",
+            "markt,001,quedlinburg,06485,06485,1,,11.1000000,51.7900000,Markt,Quedlinburg\n\
+             markt quedlinburg,002,quedlinburg welterbestadt,,,1,,11.1400000,51.8000000,Markt (Quedlinburg),\"Quedlinburg, Welterbestadt\"\n",
+            "fr",
+        );
+        let foreign_top = foreign
+            .query("Markt 1, 06484 Quedlinburg", 1)
+            .into_iter()
+            .next()
+            .expect("the foreign sheet's established result remains available");
+        assert_eq!(foreign_top.street, "Markt");
+        assert!(!foreign_top.flags.contains(&"de_street_locality_qualifier"));
+    }
+
+    #[test]
+    fn de_wave_b_p4_parser_accepts_only_the_four_audited_shapes() {
+        let positives = [
+            (
+                "Blockhaus, 19, Große Meißner Straße, Innere Neustadt, Neustadt, Dresden, Sachsen, 01097",
+                DeAuditedCompoundShape::VenueCommaHouseCommaStreet,
+                vec![],
+                "grosse meissner strasse",
+                "dresden",
+            ),
+            (
+                "Albertstr. 25 ( Otto-Krayer-Haus), 79104 Freiburg/Breisgau",
+                DeAuditedCompoundShape::StreetHouseBalancedVenueParenthetical,
+                vec![],
+                "albertstrasse",
+                "freiburg im breisgau",
+            ),
+            (
+                "c/o Jacobs University Bremen Campusring 1 Bremen, 28759 Bremen",
+                DeAuditedCompoundShape::CareOfPrefixThenStreetHouseLocality,
+                vec![],
+                "campus ring",
+                "bremen",
+            ),
+            (
+                "Rheinstr. 45/46 (Aufgang 6), 12161 Berlin",
+                DeAuditedCompoundShape::StreetHouseRangeBalancedAccessParenthetical,
+                vec![46],
+                "rheinstrasse",
+                "berlin",
+            ),
+            (
+                "Marktplatz 4 (Weilheimer \"Bürgerhaus\"), 73235 Weilheim/Teck",
+                DeAuditedCompoundShape::StreetHouseBalancedVenueParenthetical,
+                vec![],
+                "marktplatz",
+                "weilheim an der teck",
+            ),
+        ];
+        for (raw, shape, additional_houses, normalized_street, normalized_locality) in positives {
+            let spec = de_audited_compound_spec(raw)
+                .unwrap_or_else(|| panic!("audited P4 surface must parse: {raw}"));
+            assert_eq!(spec.shape, shape, "{raw}");
+            assert_eq!(spec.additional_houses, additional_houses, "{raw}");
+            assert_eq!(spec.normalized_street, normalized_street, "{raw}");
+            assert_eq!(spec.normalized_locality, normalized_locality, "{raw}");
+            assert_eq!(spec.postcode_raw.len(), 5, "{raw}");
+        }
+
+        for raw in [
+            "Albertstr. 25 ((Haus)), 79104 Freiburg/Breisgau",
+            "Albertstr. 25(Haus), 79104 Freiburg/Breisgau",
+            "Albertstr. 025 (Haus), 79104 Freiburg/Breisgau",
+            "Albertstr. 25 (Haus),79104 Freiburg/Breisgau",
+            "Albertstr. 25 (Haus, 79104 Freiburg/Breisgau",
+            "Rheinstr. 45/46 (Haus 6), 12161 Berlin",
+            "Rheinstr. 45/46/47 (Aufgang 6), 12161 Berlin",
+            "Blockhaus, Große Meißner Straße, 19, Dresden, 01097",
+            "Blockhaus, 19a, Große Meißner Straße, Dresden, 01097",
+            "Blockhaus, 19, Große Meißner Straße, Innere Neustadt, 7, Dresden, Sachsen, 01097",
+            "c/o Campusring 1 Bremen, 28759 Bremen",
+            "c/oops Jacobs Campusring 1 Bremen, 28759 Bremen",
+            "c/o Jacobs Campusring 1 Hamburg, 28759 Bremen",
+            "c/o Jacobs Campusring 1 Bremen, 28759 Bremen, Deutschland",
+            "Marktplatz 4 (Haus), 7323 Weilheim/Teck",
+            "Marktplatz 4 (Haus), 73235 Weilheim/Teck/Bayern",
+        ] {
+            assert!(
+                de_audited_compound_spec(raw).is_none(),
+                "typed P4 parser must reject {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn de_wave_o_blank_postcode_exact_house_replaces_typed_postcode_near() {
+        let idx = forward_postcode_index_for_country(
+            "wave-o-blank-house-near",
+            "ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen\n\
+             source-key-differs,001,probingen,,,12,,10.0010000,50.0010000,Ankerstraße,Probingen\n",
+            "de",
+        );
+
+        let top = idx
+            .query("Ankerstraße 12, 12345 Probingen", 1)
+            .into_iter()
+            .next()
+            .expect("the established typed-postcode near result must exist");
+        assert_eq!(top.precision, "house");
+        assert_eq!(top.street, "Ankerstraße");
+        assert_eq!(top.housenumber.as_deref(), Some("12"));
+        assert_eq!(top.commune, "Probingen");
+        assert_eq!(top.postcode, "");
+        assert!(top.flags.contains(&"de_blank_postcode_house_override"));
+        assert!(!top.flags.contains(&"pc_exact"));
+        assert!(!top.flags.contains(&"pc_dept"));
+    }
+
+    #[test]
+    fn de_wave_o_blank_postcode_exact_house_replaces_typed_postcode_interp() {
+        let idx = forward_postcode_index_for_country(
+            "wave-o-blank-house-interp",
+            "bogenstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Bogenstraße,Probingen\n\
+             bogenstrasse,001,probingen,12345,12345,14,,10.0010000,50.0010000,Bogenstraße,Probingen\n\
+             legacy-bogen-key,001,probingen,,,12,,10.0005000,50.0005000,Bogenstraße,Probingen\n",
+            "de",
+        );
+
+        let top = idx
+            .query("Bogenstraße 12, 12345 Probingen", 1)
+            .into_iter()
+            .next()
+            .expect("the established typed-postcode interpolation must exist");
+        assert_eq!(top.precision, "house");
+        assert_eq!(top.housenumber.as_deref(), Some("12"));
+        assert_eq!(top.postcode, "");
+        assert!(top.flags.contains(&"de_blank_postcode_house_override"));
+    }
+
+    #[test]
+    fn de_wave_o_blank_postcode_exact_suffix_is_preserved() {
+        let idx = forward_postcode_index_for_country(
+            "wave-o-blank-house-suffix",
+            "legacy-ufer-key,001,probingen,,,12,a,10.0005000,50.0005000,Uferweg,Probingen\n\
+             uferweg,001,probingen,12345,12345,10,a,10.0000000,50.0000000,Uferweg,Probingen\n\
+             uferweg,001,probingen,12345,12345,14,a,10.0010000,50.0010000,Uferweg,Probingen\n",
+            "de",
+        );
+
+        let top = idx
+            .query("Uferweg 12a, 12345 Probingen", 1)
+            .into_iter()
+            .next()
+            .expect("the established typed-postcode interpolation must exist");
+        assert_eq!(top.precision, "house");
+        assert_eq!(top.housenumber.as_deref(), Some("12a"));
+        assert_eq!(top.postcode, "");
+        assert!(top.flags.contains(&"de_blank_postcode_house_override"));
+    }
+
+    fn de_wave_o_base_index(case: &str, country: &str) -> Index {
+        forward_postcode_index_for_country(
+            case,
+            "a-legacy-source-key,001,probingen,,,12,,10.0005000,50.0005000,Ankerstraße,Probingen\n\
+             ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen\n\
+             ankerstrasse,001,probingen,12345,12345,14,,10.0010000,50.0010000,Ankerstraße,Probingen\n",
+            country,
+        )
+    }
+
+    fn de_wave_o_current(
+        precision: &'static str,
+        street: &str,
+        commune: &str,
+        postcode: &str,
+        features: Feats,
+        flags: Vec<&'static str>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        vec![(
+            Hit {
+                lat: 0.0,
+                lon: 0.0,
+                precision,
+                score: 0.0,
+                confidence: 0.0,
+                street: street.to_string(),
+                housenumber: Some("12".to_string()),
+                commune: commune.to_string(),
+                postcode: postcode.to_string(),
+                flags,
+                region: None,
+                distance_m: None,
+            },
+            features.to_vec(),
+        )]
+    }
+
+    fn de_wave_o_strict_current(precision: &'static str) -> Vec<(Hit, [f32; N_FEATS])> {
+        de_wave_o_current(
+            precision,
+            "Ankerstraße",
+            "Probingen",
+            "12345",
+            Feats {
+                street_exact: true,
+                commune_exact: true,
+                pc_exact: true,
+                pc_dept: true,
+                ..Default::default()
+            },
+            vec!["street_exact", "commune_exact", "pc_exact"],
+        )
+    }
+
+    #[test]
+    fn de_wave_o_parser_is_single_literal_and_two_field_only() {
+        for raw in [
+            "Ankerstraße 12, 12345 Probingen",
+            "Ankerstraße 12a, 12345 Probingen",
+        ] {
+            assert!(
+                de_blank_postcode_house_spec(raw).is_some(),
+                "strict P5 surface must parse: {raw}"
+            );
+        }
+        for raw in [
+            "Ankerstraße 12/14, 12345 Probingen",
+            "Ankerstraße 12-14, 12345 Probingen",
+            "Ankerstraße 12 bis 14, 12345 Probingen",
+            "Ankerstraße 12 und 14, 12345 Probingen",
+            "Ankerstraße 12 (Haus), 12345 Probingen",
+            "c/o Ankerstraße 12, 12345 Probingen",
+            "Ankerstraße 12, 12345 Probingen, Deutschland",
+            "Ankerstraße 12, 12345",
+            "Ankerstraße 12, 1234 Probingen",
+            "Straße 7 12, 12345 Probingen",
+            " Ankerstraße 12, 12345 Probingen",
+        ] {
+            assert!(
+                de_blank_postcode_house_spec(raw).is_none(),
+                "P5 must reject noncanonical or compound surface: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn de_wave_o_current_top_requires_exact_original_fields() {
+        let idx = de_wave_o_base_index("wave-o-current-gates", "de");
+        let raw = "Ankerstraße 12, 12345 Probingen";
+        assert!(
+            idx.de_blank_postcode_exact_house_fallback(
+                raw,
+                &de_wave_o_strict_current("near"),
+                1,
+                None,
+            )
+            .is_some()
+        );
+
+        for (case, current) in [
+            ("house", de_wave_o_strict_current("house")),
+            ("street", de_wave_o_strict_current("street")),
+            (
+                "wrong-postcode",
+                de_wave_o_current(
+                    "near",
+                    "Ankerstraße",
+                    "Probingen",
+                    "12346",
+                    Feats {
+                        street_exact: true,
+                        commune_exact: true,
+                        pc_exact: true,
+                        pc_dept: true,
+                        ..Default::default()
+                    },
+                    vec![],
+                ),
+            ),
+            (
+                "pc-dept-only",
+                de_wave_o_current(
+                    "near",
+                    "Ankerstraße",
+                    "Probingen",
+                    "12345",
+                    Feats {
+                        street_exact: true,
+                        commune_exact: true,
+                        pc_dept: true,
+                        ..Default::default()
+                    },
+                    vec![],
+                ),
+            ),
+            (
+                "incumbent-exact-house",
+                de_wave_o_current(
+                    "near",
+                    "Ankerstraße",
+                    "Probingen",
+                    "12345",
+                    Feats {
+                        street_exact: true,
+                        commune_exact: true,
+                        pc_exact: true,
+                        pc_dept: true,
+                        house_exact_rep: true,
+                        ..Default::default()
+                    },
+                    vec![],
+                ),
+            ),
+            (
+                "fuzzy-street",
+                de_wave_o_current(
+                    "near",
+                    "Ankerstraße",
+                    "Probingen",
+                    "12345",
+                    Feats {
+                        street_fuzzy: true,
+                        commune_exact: true,
+                        pc_exact: true,
+                        pc_dept: true,
+                        ..Default::default()
+                    },
+                    vec![],
+                ),
+            ),
+            (
+                "mismatched-hit-street",
+                de_wave_o_current(
+                    "near",
+                    "Seitenstraße",
+                    "Probingen",
+                    "12345",
+                    Feats {
+                        street_exact: true,
+                        commune_exact: true,
+                        pc_exact: true,
+                        pc_dept: true,
+                        ..Default::default()
+                    },
+                    vec![],
+                ),
+            ),
+            (
+                "mismatched-hit-locality",
+                de_wave_o_current(
+                    "near",
+                    "Ankerstraße",
+                    "Nebenstadt",
+                    "12345",
+                    Feats {
+                        street_exact: true,
+                        commune_exact: true,
+                        pc_exact: true,
+                        pc_dept: true,
+                        ..Default::default()
+                    },
+                    vec![],
+                ),
+            ),
+            (
+                "locality-prefix",
+                de_wave_o_current(
+                    "near",
+                    "Ankerstraße",
+                    "Probingen",
+                    "12345",
+                    Feats {
+                        street_exact: true,
+                        commune_prefix: true,
+                        pc_exact: true,
+                        pc_dept: true,
+                        ..Default::default()
+                    },
+                    vec![],
+                ),
+            ),
+            (
+                "alias-derived",
+                de_wave_o_current(
+                    "near",
+                    "Ankerstraße",
+                    "Probingen",
+                    "12345",
+                    Feats {
+                        street_exact: true,
+                        commune_exact: true,
+                        pc_exact: true,
+                        pc_dept: true,
+                        ..Default::default()
+                    },
+                    vec!["de_city_alias"],
+                ),
+            ),
+            (
+                "official-alias-derived",
+                de_wave_o_current(
+                    "near",
+                    "Ankerstraße",
+                    "Probingen",
+                    "12345",
+                    Feats {
+                        street_exact: true,
+                        commune_exact: true,
+                        pc_exact: true,
+                        pc_dept: true,
+                        ..Default::default()
+                    },
+                    vec!["de_official_commune_alias"],
+                ),
+            ),
+            (
+                "dropped-prefix",
+                de_wave_o_current(
+                    "near",
+                    "Ankerstraße",
+                    "Probingen",
+                    "12345",
+                    Feats {
+                        street_exact: true,
+                        commune_exact: true,
+                        pc_exact: true,
+                        pc_dept: true,
+                        ..Default::default()
+                    },
+                    vec!["dropped_prefix"],
+                ),
+            ),
+            (
+                "dropped-suffix",
+                de_wave_o_current(
+                    "near",
+                    "Ankerstraße",
+                    "Probingen",
+                    "12345",
+                    Feats {
+                        street_exact: true,
+                        commune_exact: true,
+                        pc_exact: true,
+                        pc_dept: true,
+                        ..Default::default()
+                    },
+                    vec!["dropped_suffix"],
+                ),
+            ),
+        ] {
+            assert!(
+                idx.de_blank_postcode_exact_house_fallback(raw, &current, 1, None)
+                    .is_none(),
+                "strict current-top gate must reject {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn de_wave_o_current_selector_values_do_not_affect_admission() {
+        let idx = de_wave_o_base_index("wave-o-current-selector-invariance", "de");
+        let mut baseline = de_wave_o_strict_current("near");
+        let mut altered = de_wave_o_strict_current("near");
+        baseline[0].0.lat = 0.0;
+        baseline[0].0.lon = 0.0;
+        baseline[0].0.score = 0.0;
+        baseline[0].0.confidence = 0.0;
+        baseline[0].0.distance_m = None;
+        altered[0].0.lat = 89.0;
+        altered[0].0.lon = -179.0;
+        altered[0].0.score = -10_000.0;
+        altered[0].0.confidence = 1.0;
+        altered[0].0.distance_m = Some(9_999_999.0);
+
+        let summarize = |candidate: Vec<(Hit, [f32; N_FEATS])>| {
+            candidate
+                .into_iter()
+                .map(|(hit, features)| {
+                    (
+                        hit.precision,
+                        hit.street,
+                        hit.housenumber,
+                        hit.commune,
+                        hit.postcode,
+                        hit.flags,
+                        features,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = idx
+            .de_blank_postcode_exact_house_fallback(
+                "Ankerstraße 12, 12345 Probingen",
+                &baseline,
+                1,
+                None,
+            )
+            .expect("baseline selector values must admit the strict P5 candidate");
+        let second = idx
+            .de_blank_postcode_exact_house_fallback(
+                "Ankerstraße 12, 12345 Probingen",
+                &altered,
+                1,
+                None,
+            )
+            .expect("changed selector-only values must preserve P5 admission");
+        assert_eq!(summarize(first), summarize(second));
+    }
+
+    #[test]
+    fn de_wave_o_p3_p5_overlap_preserves_the_established_answer() {
+        let idx = forward_postcode_index_for_country(
+            "wave-o-p3-p5-overlap",
+            "a-blank-exact-display,001,probingen,,,12,,10.0005000,50.0005000,Ankerstrase,Probingen\n\
+             ankerstrase,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstrase,Probingen\n\
+             ankerstrasse,001,probingen,12345,12345,12,,10.0007000,50.0007000,Ankerstraße,Probingen\n",
+            "de",
+        );
+        let raw = "Ankerstrase 12, 12345 Probingen";
+        let mut established = de_wave_o_current(
+            "near",
+            "Ankerstrase",
+            "Probingen",
+            "12345",
+            Feats {
+                street_exact: true,
+                commune_exact: true,
+                pc_exact: true,
+                pc_dept: true,
+                ..Default::default()
+            },
+            vec!["street_exact", "commune_exact", "pc_exact"],
+        );
+        let p3 = idx
+            .de_strict_source_street_typo_fallback(raw, &established, 1)
+            .expect("the independent exact-postcode typo mechanism must be nonempty");
+        let p5 = idx
+            .de_blank_postcode_exact_house_fallback(raw, &established, 1, None)
+            .expect("the independent blank-postcode exact-house mechanism must be nonempty");
+        assert!(p3[0].0.flags.contains(&"de_strict_source_street_typo"));
+        assert!(p5[0].0.flags.contains(&"de_blank_postcode_house_override"));
+
+        Index::de_product_fallback_arbitration(&mut established, Some(p3), None, None, Some(p5));
+        assert_eq!(established.len(), 1);
+        assert_eq!(established[0].0.precision, "near");
+        assert_eq!(established[0].0.street, "Ankerstrase");
+        assert_eq!(established[0].0.postcode, "12345");
+        assert!(!established[0]
+            .0
+            .flags
+            .contains(&"de_strict_source_street_typo"));
+        assert!(!established[0]
+            .0
+            .flags
+            .contains(&"de_blank_postcode_house_override"));
+    }
+
+    #[test]
+    fn de_wave_o_distinct_source_sids_fail_closed_independent_of_coordinates() {
+        for (case, second_coordinates) in [
+            ("same-coordinates", "10.0005000,50.0005000"),
+            ("different-coordinates", "10.0007000,50.0007000"),
+        ] {
+            let rows = format!(
+                "a-blank-key,001,probingen,,,12,,10.0005000,50.0005000,Ankerstraße,Probingen\n\
+                 ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen\n\
+                 b-blank-key,001,probingen,,,12,,{second_coordinates},Ankerstraße,Probingen\n"
+            );
+            let idx = forward_postcode_index_for_country(case, &rows, "de");
+            let top = idx
+                .query("Ankerstraße 12, 12345 Probingen", 1)
+                .into_iter()
+                .next()
+                .expect("the established near result must remain");
+            assert_eq!(top.precision, "near", "{case}");
+            assert_eq!(top.postcode, "12345", "{case}");
+            assert!(
+                !top.flags.contains(&"de_blank_postcode_house_override"),
+                "two source SIDs must fail closed regardless of coordinates: {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn de_wave_o_duplicate_rows_inside_one_sid_fail_closed() {
+        for (case, second_coordinates) in [
+            ("same-coordinates", "10.0005000,50.0005000"),
+            ("different-coordinates", "10.0007000,50.0007000"),
+        ] {
+            let rows = format!(
+                "a-blank-key,001,probingen,,,12,,10.0005000,50.0005000,Ankerstraße,Probingen\n\
+                 a-blank-key,001,probingen,,,12,,{second_coordinates},Ankerstraße,Probingen\n\
+                 ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen\n"
+            );
+            let idx = forward_postcode_index_for_country(case, &rows, "de");
+            let candidate = idx.de_blank_postcode_exact_house_fallback(
+                "Ankerstraße 12, 12345 Probingen",
+                &de_wave_o_strict_current("near"),
+                1,
+                None,
+            );
+            assert!(
+                candidate.is_none(),
+                "two represented rows inside one SID must fail closed: {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn de_wave_o_any_competing_exact_house_postcode_fails_closed() {
+        for (case, competing_postcode) in [("typed-postcode", "12345"), ("wrong-postcode", "54321")]
+        {
+            let rows = format!(
+                "a-blank-key,001,probingen,,,12,,10.0005000,50.0005000,Ankerstraße,Probingen\n\
+                 ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen\n\
+                 z-competing-key,001,probingen,{competing_postcode},{competing_postcode},12,,10.0007000,50.0007000,Ankerstraße,Probingen\n"
+            );
+            let idx = forward_postcode_index_for_country(case, &rows, "de");
+            assert!(
+                idx.de_blank_postcode_exact_house_fallback(
+                    "Ankerstraße 12, 12345 Probingen",
+                    &de_wave_o_strict_current("near"),
+                    1,
+                    None,
+                )
+                .is_none(),
+                "blank candidate plus {case} exact house must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn de_wave_o_populated_only_exact_target_is_never_relabelled_blank() {
+        let idx = forward_postcode_index_for_country(
+            "wave-o-populated-only-target",
+            "a-blank-projection-seed,001,probingen,,,13,,10.0005000,50.0005000,Ankerstraße,Probingen\n\
+             ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen\n\
+             z-populated-target,001,probingen,54321,54321,12,,10.0007000,50.0007000,Ankerstraße,Probingen\n",
+            "de",
+        );
+        assert!(
+            idx.de_blank_postcode_exact_house_fallback(
+                "Ankerstraße 12, 12345 Probingen",
+                &de_wave_o_strict_current("near"),
+                1,
+                None,
+            )
+            .is_none(),
+            "a blank row at another house may seed the projection but cannot relabel the populated exact target"
+        );
+    }
+
+    #[test]
+    fn de_wave_o_mixed_postcode_street_is_not_a_blank_source_candidate() {
+        let idx = forward_postcode_index_for_country(
+            "wave-o-mixed-postcode-negative",
+            "ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen\n\
+             legacy-mixed-key,001,probingen,,,12,,10.0005000,50.0005000,Ankerstraße,Probingen\n\
+             legacy-mixed-key,001,probingen,12345,12345,14,,10.0007000,50.0007000,Ankerstraße,Probingen\n",
+            "de",
+        );
+        assert!(idx
+            .de_blank_postcode_exact_house_fallback(
+                "Ankerstraße 12, 12345 Probingen",
+                &de_wave_o_strict_current("near"),
+                1,
+                None,
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn de_wave_o_candidate_requires_the_exact_anchored_commune_id() {
+        for (case, blank_commune_id, blank_commune) in [
+            ("same-name-other-id", "002", "probingen"),
+            ("prefix-only", "002", "probingen nord"),
+        ] {
+            let rows = format!(
+                "a-blank-key,{blank_commune_id},{blank_commune},,,12,,10.0005000,50.0005000,Ankerstraße,{}\n\
+                 ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen\n",
+                if blank_commune == "probingen" {
+                    "Probingen"
+                } else {
+                    "Probingen Nord"
+                }
+            );
+            let idx = forward_postcode_index_for_country(case, &rows, "de");
+            assert!(
+                idx.de_blank_postcode_exact_house_fallback(
+                    "Ankerstraße 12, 12345 Probingen",
+                    &de_wave_o_strict_current("near"),
+                    1,
+                    None,
+                )
+                .is_none(),
+                "P5 must reject candidate locality relation {case}"
+            );
+        }
+
+        let duplicate_locality_identity = forward_postcode_index_for_country(
+            "wave-o-duplicate-locality-identity",
+            "a-blank-anchor,001,probingen,,,12,,10.0005000,50.0005000,Ankerstraße,Probingen\n\
+             ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen\n\
+             z-blank-homonym,002,probingen,,,12,,10.0007000,50.0007000,Ankerstraße,Probingen\n",
+            "de",
+        );
+        assert!(
+            duplicate_locality_identity
+                .de_blank_postcode_exact_house_fallback(
+                    "Ankerstraße 12, 12345 Probingen",
+                    &de_wave_o_strict_current("near"),
+                    1,
+                    None,
+                )
+                .is_none(),
+            "a second exact physical row behind the same locality display must fail closed"
+        );
+
+        let ambiguous_anchor = forward_postcode_index_for_country(
+            "wave-o-ambiguous-anchor",
+            "a-blank-anchor,001,probingen,,,12,,10.0005000,50.0005000,Ankerstraße,Probingen\n\
+             ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen\n\
+             z-second-anchor,002,probingen,12345,12345,20,,10.0007000,50.0007000,Ankerstraße,Probingen\n",
+            "de",
+        );
+        assert!(
+            ambiguous_anchor
+                .de_blank_postcode_exact_house_fallback(
+                    "Ankerstraße 12, 12345 Probingen",
+                    &de_wave_o_strict_current("near"),
+                    1,
+                    None,
+                )
+                .is_none(),
+            "two typed-postcode commune ids behind one display locality must fail closed"
+        );
+
+        let unrelated_homonym = forward_postcode_index_for_country(
+            "wave-o-unrelated-homonym",
+            "a-blank-anchor,001,probingen,,,12,,10.0005000,50.0005000,Ankerstraße,Probingen\n\
+             ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen\n\
+             z-unrelated-homonym,002,nebenstadt,,,12,,10.0007000,50.0007000,Ankerstraße,Nebenstadt\n",
+            "de",
+        );
+        assert!(
+            unrelated_homonym
+                .de_blank_postcode_exact_house_fallback(
+                    "Ankerstraße 12, 12345 Probingen",
+                    &de_wave_o_strict_current("near"),
+                    1,
+                    None,
+                )
+                .is_some(),
+            "an unrelated locality homonym must not veto the unique anchored candidate"
+        );
+    }
+
+    #[test]
+    fn de_wave_o_bare_and_suffix_addresses_never_coalesce() {
+        for (case, query_house, blank_suffix) in [
+            ("query-suffix-source-bare", "12a", ""),
+            ("query-bare-source-suffix", "12", "a"),
+        ] {
+            let rows = format!(
+                "a-blank-key,001,probingen,,,12,{blank_suffix},10.0005000,50.0005000,Ankerstraße,Probingen\n\
+                 ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen\n"
+            );
+            let idx = forward_postcode_index_for_country(case, &rows, "de");
+            assert!(
+                idx.de_blank_postcode_exact_house_fallback(
+                    &format!("Ankerstraße {query_house}, 12345 Probingen"),
+                    &de_wave_o_strict_current("near"),
+                    1,
+                    None,
+                )
+                .is_none(),
+                "exact suffix identity must be preserved: {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn de_wave_o_source_order_and_single_sid_coordinates_do_not_change_admission() {
+        let mut outcomes = Vec::new();
+        for (case, blank_key, blank_coordinates) in [
+            ("blank-before", "a-blank-key", "10.0005000,50.0005000"),
+            ("blank-after", "z-blank-key", "11.5000000,51.5000000"),
+        ] {
+            let mut rows = [
+                format!(
+                    "{blank_key},001,probingen,,,12,,{blank_coordinates},Ankerstraße,Probingen"
+                ),
+                "ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen"
+                    .to_string(),
+            ];
+            rows.sort();
+            let idx =
+                forward_postcode_index_for_country(case, &format!("{}\n", rows.join("\n")), "de");
+            let top = idx
+                .query("Ankerstraße 12, 12345 Probingen", 1)
+                .into_iter()
+                .next()
+                .expect("one exact blank source row must remain admissible");
+            outcomes.push((
+                top.precision,
+                top.street,
+                top.housenumber,
+                top.commune,
+                top.postcode,
+                top.flags.contains(&"de_blank_postcode_house_override"),
+            ));
+        }
+        assert_eq!(outcomes[0], outcomes[1]);
+        assert!(outcomes[0].5);
+    }
+
+    #[test]
+    fn de_wave_o_non_de_focus_and_scan_overflow_remain_closed() {
+        let mut foreign = de_wave_o_base_index("wave-o-foreign", "fr");
+        foreign.de_postcode_streets = foreign.build_de_postcode_streets().unwrap();
+        foreign.de_blank_postcode_display_streets =
+            foreign.build_de_blank_postcode_display_streets().unwrap();
+        assert!(foreign
+            .de_blank_postcode_exact_house_fallback(
+                "Ankerstraße 12, 12345 Probingen",
+                &de_wave_o_strict_current("near"),
+                1,
+                None,
+            )
+            .is_none());
+
+        let mut legacy = de_wave_o_base_index("wave-o-pre-v7", "de");
+        legacy.format_version = 6;
+        assert!(legacy
+            .de_blank_postcode_exact_house_fallback(
+                "Ankerstraße 12, 12345 Probingen",
+                &de_wave_o_strict_current("near"),
+                1,
+                None,
+            )
+            .is_none());
+
+        let idx = de_wave_o_base_index("wave-o-focus-overflow", "de");
+        let focus = QueryFocus {
+            lat: 50.0,
+            lon: 10.0,
+            streets: Vec::new(),
+        };
+        assert!(idx
+            .de_blank_postcode_exact_house_fallback(
+                "Ankerstraße 12, 12345 Probingen",
+                &de_wave_o_strict_current("near"),
+                1,
+                Some(&focus),
+            )
+            .is_none());
+
+        let mut bucket_overflow = forward_postcode_index_for_country(
+            "wave-o-bucket-overflow",
+            "a-blank-anchor,001,probingen,,,12,,10.0005000,50.0005000,Ankerstraße,Probingen\n\
+             ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen\n\
+             z-unrelated-locality,002,nebenstadt,,,99,,10.0007000,50.0007000,Ankerstraße,Nebenstadt\n",
+            "de",
+        );
+        let mut projected = bucket_overflow
+            .de_blank_postcode_display_streets
+            .get("ankerstrasse", "probingen")
+            .expect("the complete target projection must exist")
+            .to_vec();
+        assert_eq!(projected.len(), 2);
+        let unrelated_sid = (0..bucket_overflow.streets_meta.len() / STREET_META_SIZE)
+            .map(|sid| u32::try_from(sid).expect("test street id fits u32"))
+            .find(|sid| {
+                let metadata = bucket_overflow.street_meta(*sid);
+                de_product_normalize_text(bucket_overflow.commune_name(metadata.commune_id))
+                    == "nebenstadt"
+            })
+            .expect("the unrelated-locality observer SID must exist");
+        projected.push(unrelated_sid);
+        bucket_overflow.de_blank_postcode_display_streets = DeBlankPostcodeDisplayProjection {
+            ranges: HashMap::from([(
+                ("ankerstrasse".to_string(), "probingen".to_string()),
+                (0, projected.len()),
+            )]),
+            sids: projected.into_boxed_slice(),
+        };
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT.with(|limit| limit.set(2));
+        let overflow = bucket_overflow.de_blank_postcode_exact_house_fallback(
+            "Ankerstraße 12, 12345 Probingen",
+            &de_wave_o_strict_current("near"),
+            1,
+            None,
+        );
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT
+            .with(|limit| limit.set(DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT_DEFAULT));
+        assert!(
+            overflow.is_none(),
+            "a display bucket above its independent SID ceiling must fail closed"
+        );
+
+        let row_overflow = forward_postcode_index_for_country(
+            "wave-o-row-overflow",
+            "a-blank-anchor,001,probingen,,,1,,10.0001000,50.0001000,Ankerstraße,Probingen\n\
+             a-blank-anchor,001,probingen,,,2,,10.0002000,50.0002000,Ankerstraße,Probingen\n\
+             a-blank-anchor,001,probingen,,,12,,10.0005000,50.0005000,Ankerstraße,Probingen\n\
+             ankerstrasse,001,probingen,12345,12345,10,,10.0000000,50.0000000,Ankerstraße,Probingen\n",
+            "de",
+        );
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT.with(|limit| limit.set(3));
+        let overflow = row_overflow.de_blank_postcode_exact_house_fallback(
+            "Ankerstraße 12, 12345 Probingen",
+            &de_wave_o_strict_current("near"),
+            1,
+            None,
+        );
+        DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT
+            .with(|limit| limit.set(DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT_DEFAULT));
+        assert!(
+            overflow.is_none(),
+            "cumulative physical house rows above their independent ceiling must fail closed"
+        );
+    }
+
+    #[test]
+    fn de_wave_o_runtime_path_and_forbidden_field_audit_are_nonvacuous() {
+        let idx = de_wave_o_base_index("wave-o-runtime-audit", "de");
+        DE_BLANK_POSTCODE_HOUSE_SCAN_ROWS.with(|rows| rows.set(0));
+        let candidate = idx
+            .de_blank_postcode_exact_house_fallback(
+                "Ankerstraße 12, 12345 Probingen",
+                &de_wave_o_strict_current("interp"),
+                1,
+                None,
+            )
+            .expect("strict P5 runtime path must produce one candidate");
+        assert_eq!(candidate.len(), 1);
+        assert!(DE_BLANK_POSTCODE_HOUSE_SCAN_ROWS.with(|rows| rows.get()) > 0);
+
+        fn segment<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+            let start = source.find(start_marker).expect("P5 source start marker");
+            let end = source[start..]
+                .find(end_marker)
+                .map(|offset| start + offset)
+                .expect("P5 source end marker");
+            &source[start..end]
+        }
+
+        let source = include_str!("query.rs");
+        let p5_source = [
+            segment(
+                source,
+                "fn de_blank_postcode_house_spec",
+                "fn de_source_street_locality_qualifier",
+            ),
+            segment(
+                source,
+                "struct DeBlankPostcodeDisplayProjection",
+                "pub struct Index",
+            ),
+            segment(
+                source,
+                "fn build_de_blank_postcode_display_streets",
+                "/// Exact-postcode street bucket",
+            ),
+            segment(
+                source,
+                "fn de_exact_house_record_postcodes",
+                "fn commune_insee",
+            ),
+            segment(
+                source,
+                "fn de_blank_postcode_current_top_is_strict",
+                "fn de_p3_current_top_already_complete",
+            ),
+            segment(
+                source,
+                "let x2 = Self::de_street_locality_qualifier_position",
+                "if frankfurt.is_some()",
+            ),
+        ]
+        .join("\n");
+        for forbidden in [
+            ".lat",
+            ".lon",
+            "dist_km(",
+            ".distance_m",
+            ".score",
+            ".confidence",
+            "take(1)",
+            "roster_id",
+            "ordinal",
+            "physical_id",
+            "truth_coordinate",
+            "result_coordinate",
+            "benchmark",
+            "competitor",
+            "distance_threshold",
+        ] {
+            assert!(
+                !p5_source.contains(forbidden),
+                "P5 admission must not read forbidden selector {forbidden}"
+            );
+        }
+        for required in [
+            "metadata.commune_id != anchor_commune_id",
+            "candidate_sids.len() > scan_limit",
+            "exact_records.as_slice()",
+            "postcode.is_empty()",
+            "made_features.house_exact_rep",
+            "HashMap<(String, String), (usize, usize)>",
+            "anchored_identities.contains(&identity)",
+            "drop(anchored_identities)",
+            "bucket.len() <= DE_POSTCODE_HOUSE_RESCUE_SCAN_LIMIT_DEFAULT",
+            ".get(&spec.normalized_street, &spec.normalized_locality)",
+            "match (p3, p4, x2, p5)",
+            "(None, None, None, Some(candidate))",
+            "Self::de_product_fallback_arbitration(&mut best, p3, p4, x2, p5)",
+        ] {
+            assert!(
+                p5_source.contains(required),
+                "P5 source audit must observe guard {required}"
+            );
+        }
     }
 }

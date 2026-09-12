@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "gridpin"
-version = "0.1.0"
+version = "0.2.0"
 description = "Offline forward and reverse geocoder: country files, no server or database import, no per-request fees; queries stay local"
 readme = "README.md"
 requires-python = ">=3.9"

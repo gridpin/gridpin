@@ -1,4 +1,6 @@
-data/
+# Heavy data stays out of Git; the small provenance manifest must exist in a clone.
+data/*
+!data/de_manifest.json
 eval/eval_set.parquet
 eval/queries.jsonl
 gridpin/target/

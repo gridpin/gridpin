@@ -1,0 +1,137 @@
+{
+  "attribution": "Contains information from the European Environment Agency (EEA) Discodata IED fixed schema v1r2, acquired 2026-08-29, reused under the EEA CC-BY policy (https://www.eea.europa.eu/en/legal-notice). Related Industrial Reporting release metadata: edition 16, DOI 10.2909/657ac3cb-affa-4295-a4a9-27b4f539adab, CC BY 4.0. Extracted and modified by GridPin as a Germany-only normalized address overlay; no exact byte equivalence to the v16 ACCDB package is asserted.",
+  "dataset": {
+    "api_source": "[IED].[v1r2].[ProductionFacility]",
+    "service": "EEA Discodata",
+    "title": "EEA Discodata IED ProductionFacility fixed schema v1r2",
+    "related_catalogue_release": {
+      "dataset_identifier": "eea_t_ied-eprtr_p_2007-2024_v16_r00",
+      "doi": "10.2909/657ac3cb-affa-4295-a4a9-27b4f539adab",
+      "edition": "16.00",
+      "publication_date": "2026-02-20",
+      "title": "Industrial Emissions Directive 2010/75/EU and European Pollutant Release and Transfer Register Regulation (EC) No 166/2006 - ver. 16.0 Feb. 2026 (Tabular data)"
+    }
+  },
+  "frozen_source": {
+    "acquisition_receipt": {
+      "bytes": 5143,
+      "path": "code/eval/de_eea_ied_v16_acquisition_receipt_v1.json",
+      "sha256": "8296c8310394b693dbf2112d55e58dbc7ea1f0aa2b0af8e7a71e46888c0aceae"
+    },
+    "api": {
+      "endpoint": "https://discodata.eea.europa.eu/sql",
+      "method": "GET",
+      "query_parameters": {
+        "nrOfHits": 11000,
+        "p": 1,
+        "query": "SELECT countryCode, reportingYear, streetName, buildingNumber, city, postalCode FROM [IED].[v1r2].[ProductionFacility] WHERE countryCode = 'DE' AND reportingYear = 2024 AND addressConfidentiality IS NULL AND facilityNameConfidentiality IS NULL AND parentCompanyConfidentiality IS NULL AND streetName IS NOT NULL AND LEN(streetName) > 0 AND buildingNumber IS NOT NULL AND LEN(buildingNumber) > 0 AND city IS NOT NULL AND LEN(city) > 0 AND postalCode LIKE '[0-9][0-9][0-9][0-9][0-9]' ORDER BY streetName, buildingNumber, city, postalCode"
+      },
+      "request_encoding": "application/x-www-form-urlencoded query string; percent-encode the SQL query value",
+      "response_contract": {
+        "expected_result_fields": [
+          "countryCode",
+          "reportingYear",
+          "streetName",
+          "buildingNumber",
+          "city",
+          "postalCode"
+        ],
+        "results_path": "$.results",
+        "top_level_type": "object"
+      }
+    },
+    "raw_response": {
+      "bytes": 1412566,
+      "path": "code/eval/work/de_eea_ied_v16_acquisition_20260830/de_2024_production_facility_address_v1r2.json",
+      "records": 10470,
+      "sha256": "d865bc2fdde93db2a19902bf4a34815ddb7fb2a4a25b9ef95d831434b10faf73"
+    },
+    "response_headers": {
+      "bytes": 609,
+      "path": "code/eval/work/de_eea_ied_v16_acquisition_20260830/de_2024_production_facility_address_v1r2.response.headers.txt",
+      "sha256": "86ee9780d691658e1741500a1860dc533ceef66b96be18890c1439a5d6f6328a"
+    },
+    "retrieved_at_utc": "2026-08-29T20:09:44Z"
+  },
+  "license": {
+    "attribution_required": true,
+    "basis": "The frozen EEA legal notice applies CC-BY to EEA-held website materials unless a different condition is stated; the related Industrial Reporting metadata independently states CC BY 4.0 and EEA copyright.",
+    "changes_marked": true,
+    "copyright_holder": "European Environment Agency (EEA)",
+    "identifier": "CC-BY-4.0",
+    "name": "Creative Commons Attribution 4.0 International",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "license_freeze": {
+    "bytes": 6418,
+    "path": "code/eval/de_eea_ied_eprtr_v16_license_freeze_v1.json",
+    "sha256": "a862371523ee049ff8d0961c73039094ed6b60b7f77fdf90e3e0dbf89efb11e0"
+  },
+  "naming_compatibility": "The additive filename/schema family was allocated while version-16 package equivalence was still being tested. It is retained for path stability only; the canonical source is fixed Discodata v1r2 and exact equivalence to the related v16 ACCDB package is explicitly not asserted.",
+  "publisher": "European Environment Agency (EEA)",
+  "schema_binding_evidence": {
+    "catalogue_snapshot": {
+      "bytes": 24375367,
+      "path": "code/eval/work/de_eea_ied_v16_acquisition_20260830/discodata_metadata_catalog_full.json",
+      "sha256": "b560ef90898dc70557f121e92cdebaf024fe17d8be545a923369c2a281132d58"
+    },
+    "catalogue_snapshot_headers": {
+      "bytes": 667,
+      "path": "code/eval/work/de_eea_ied_v16_acquisition_20260830/discodata_metadata_catalog_full.response.headers.txt",
+      "sha256": "f5efe08dbfb91a57584d53d6c3dc9e7defda17951553545a00c791cde1a9adbb"
+    },
+    "observed_tables": [
+      "[IED].[latest].[ProductionFacility]",
+      "[IED].[v1r2].[ProductionFacility]"
+    ],
+    "safe_field_multiset_equivalence": {
+      "equal": true,
+      "fields": [
+        "countryCode",
+        "reportingYear",
+        "streetName",
+        "buildingNumber",
+        "city",
+        "postalCode"
+      ],
+      "duplicate_safe_field_tuple_surplus": 492,
+      "fixed_v1r2_rows": 10470,
+      "fixed_v1r2_unique_safe_field_tuples": 9978,
+      "latest_rows": 10470,
+      "latest_witness": {
+        "bytes": 1412566,
+        "path": "code/eval/work/de_eea_ied_v16_acquisition_20260830/de_2024_production_facility_address.json",
+        "sha256": "bd2f891c674b417619c9dd2a9500c9b0ec53c2bc26d8569d74c272b584f82a57"
+      }
+    }
+  },
+  "safe_field_policy": {
+    "confidentiality_fields_inspected_but_not_exported": [
+      "addressConfidentiality",
+      "facilityNameConfidentiality",
+      "parentCompanyConfidentiality"
+    ],
+    "fixed_country_code": "DE",
+    "fixed_reporting_year": 2024,
+    "selected_fields": [
+      "countryCode",
+      "reportingYear",
+      "streetName",
+      "buildingNumber",
+      "city",
+      "postalCode"
+    ],
+    "source_values_not_acquired": "all source-row identifiers; coordinates and geometry; facility, parent-company and site names; activities, status, contacts, URLs, NUTS/RBD fields, benchmark data, competitor data and every other source column"
+  },
+  "schema": "gridpin-de-eea-ied-eprtr-v16-source-card-v1",
+  "transformation": "Outcome-blind Germany-only normalized address extraction from all 10,470 frozen rows. The server-side query retains only rows with all three ProductionFacility confidentiality fields null, exact country DE, reporting year 2024, non-empty street/building/locality and exactly five decimal postcode characters. Read and normalize only the six selected fields; never use coordinates or source identifiers. Reject placeholder, conflicting, incomplete, range-ambiguous or parser-ambiguous address projections fail closed.",
+  "version_binding": {
+    "canonical_api_table": "[IED].[v1r2].[ProductionFacility]",
+    "catalogue_witness": "The frozen current Discodata metadata catalogue contains ProductionFacility under both latest and v1r2 with the same 36-column schema. The six selected-field multisets from latest and the canonical fixed v1r2 acquisition are equal at 10,470 rows.",
+    "mutable_alias_policy": "latest is retained only as an equivalence witness and is not the canonical frozen source.",
+    "related_catalogue_edition": "16.00",
+    "schema": "v1r2",
+    "v16_package_equivalence": "not_asserted; proving it would require a 2,031,214,592-byte ACCDB acquisition solely for provenance comparison, which is not justified for this bounded development experiment"
+  },
+  "warning": "The wider API exposes confidential, identifying and coordinate fields outside the overlay scope. The frozen canonical response contains exactly the six allowlisted fields and no identifiers or coordinates; do not infer or reacquire excluded values."
+}

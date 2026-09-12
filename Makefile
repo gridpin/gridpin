@@ -11,7 +11,7 @@ GEONAMES_RS=data/geonames_rs.txt
 # All recipes are phony (not files). Without this, a file named like a target (e.g. `regen-manifests`)
 # in the working dir makes `make` consider the target up to date and silently skip the recipe — which
 # let the release gate skip its provenance check.
-.PHONY: engine bindings fr nl it rs fr-poi mc smoke test test-py test-duckdb \
+.PHONY: engine bindings fr nl it rs de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb \
 	provision regen-manifests public-gate http public-bench-contract public-bench
 
 engine:
@@ -75,6 +75,46 @@ rs: engine
 	nice -n 19 python3 prep/overture.py RS $(GEONAMES_RS)
 	nice -n 19 python3 prep/export_build.py data/rs_norm.parquet data/build_rs.csv.gz
 	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_rs.csv.gz data/rs.bin $(MODELS) --meta data/rs_manifest.json
+
+# Germany is intentionally not wired as three independently repeatable recipes.  Its
+# release pin, shared cross-worktree lock, irrevocable receipt, local-toolchain
+# preflight, run-scoped scratch and continuous disk checks live in one orchestrator.
+# The target is one-shot: a receipt from an attempted run is never bypassed here.
+DE_EXPECTED_SHA ?= $(shell git rev-parse --verify HEAD)
+de: engine
+	.venv-py/bin/python prep/de_build.py --expected-sha "$(DE_EXPECTED_SHA)"
+
+# The ordinary target stays permanently blocked by attempt #1.  This distinct
+# surface can consume only the fixed, owner-authorized attempt #2; there is no
+# general attempt number, force, resume, or cleanup.
+de-recovery: engine
+	.venv-py/bin/python prep/de_build.py --recovery-attempt-2 --expected-sha "$(DE_EXPECTED_SHA)"
+
+# A second fixed surface exists only for the separately authorized attempt #3.
+# It has its own immutable receipt/auth/snapshot anchors and no attempt #4 form.
+de-recovery-attempt-3: engine
+	.venv-py/bin/python prep/de_build.py --recovery-attempt-3 --expected-sha "$(DE_EXPECTED_SHA)"
+
+# Repeatable, offline product regression guard over the frozen Germany 5k.
+# The output directory is content-addressed by track, HEAD, and shipping-sheet
+# hash.  A repeated run is fail-closed unless the caller explicitly sets
+# DE_REGRESS_FORCE=1; the manifest records that overwrite event.
+DE_REGRESS_INDEX ?= data/de.bin
+DE_REGRESS_BASELINE ?= eval/de_regress_baseline.json
+DE_REGRESS_OUTPUT_ROOT ?= eval/work/de_regress
+DE_REGRESS_TIMEOUT ?= 3600
+DE_REGRESS_FORCE_ARG = $(if $(filter 1,$(DE_REGRESS_FORCE)),--force,)
+de-regress: engine
+	.venv-py/bin/python eval/de_5k_regress.py --track clean --gridpin-bin "$(BIN)" \
+		--index "$(DE_REGRESS_INDEX)" --baseline "$(DE_REGRESS_BASELINE)" \
+		--output-root "$(DE_REGRESS_OUTPUT_ROOT)" --timeout "$(DE_REGRESS_TIMEOUT)" \
+		$(DE_REGRESS_FORCE_ARG)
+
+de-regress-dirty: engine
+	.venv-py/bin/python eval/de_5k_regress.py --track dirty --gridpin-bin "$(BIN)" \
+		--index "$(DE_REGRESS_INDEX)" --baseline "$(DE_REGRESS_BASELINE)" \
+		--output-root "$(DE_REGRESS_OUTPUT_ROOT)" --timeout "$(DE_REGRESS_TIMEOUT)" \
+		$(DE_REGRESS_FORCE_ARG)
 
 # POI layer (opt-in, a SEPARATE file — never mixed into the address index).
 # The engine cascades when you pass it: --poi <file> / Geocoder(poi=...) / gridpin_load_poi.

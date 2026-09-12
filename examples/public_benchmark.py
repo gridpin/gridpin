@@ -4063,7 +4063,11 @@ def command_capture_status(args: argparse.Namespace) -> None:
             "schema": STATUS_EVIDENCE_SCHEMA,
             "engine": args.engine,
             "endpoint": status_endpoint,
-            "fetched_at": _utc_now(),
+            # The DE 5k acquisition runner deliberately accepts one canonical
+            # UTC spelling only.  Emit ``Z`` here so status evidence produced
+            # by this command can be consumed directly without a semantically
+            # equivalent ``+00:00`` normalization copy.
+            "fetched_at": _utc_now().replace("+00:00", "Z"),
             "response": raw_response,
         }
         _validate_utc_timestamp(evidence["fetched_at"], "status evidence fetched_at")

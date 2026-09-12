@@ -1,0 +1,27 @@
+{
+  "attribution": "Bundesnetzagentur.de",
+  "candidate_frame": {
+    "bytes": 227731750,
+    "path": "code/eval/work/de_f5_wave_c_bnetza_20260821/candidate_frame_v1.jsonl",
+    "sha256": "11d8485e78e40cd173e40ea42b0942583bd54985590f27791517f0cde4104c3c"
+  },
+  "license": "CC BY 4.0",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/deed.de",
+  "raw_source": {
+    "bytes": 54596908,
+    "embedded_update": "Letzte Aktualisierung vom: 28.07.2026",
+    "path": "code/eval/work/de_f5_wave_c_bnetza_20260821/Ladesaeulenregister_BNetzA_2026-07-28.csv",
+    "sha256": "18e10299d7af901854a043b03595263dd2beb67cb9d66a8a0be0101ce47780d5",
+    "snapshot_date": "2026-07-28",
+    "url": "https://data.bundesnetzagentur.de/Bundesnetzagentur/DE/Fachthemen/ElektrizitaetundGas/E-Mobilitaet/Ladesaeulenregister_BNetzA_2026-07-28.csv"
+  },
+  "schema": "gridpin-de-bnetza-source-card-v1",
+  "terms_snapshot": {
+    "bytes": 65626,
+    "path": "code/eval/work/de_continuous_product_optimization_v1/bnetza_ladesaeulenkarte_terms_20260829.html",
+    "sha256": "ed0f8d0d976365de876a6d2e2deb16a90daa3b2a81accaff93677b83d500f399",
+    "url": "https://www.bundesnetzagentur.de/DE/Fachthemen/ElektrizitaetundGas/E-Mobilitaet/Ladesaeulenkarte/start.html"
+  },
+  "transformation": "Outcome-blind full-source projection of active, unambiguous single-house address groups with an explicit mode: ADD_AND_FILL or POSTCODE_FILL_ONLY. Both use deterministic duplicate collapse and base postcode precedence. POSTCODE_FILL_ONLY admits only exact existing base identities, preserves every base coordinate and row, and uses facility coordinates only for conservative source validation; it never writes them as address points.",
+  "warning": "The official register is not guaranteed complete; facility coordinates can denote a charging location rather than a building centroid."
+}

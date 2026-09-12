@@ -24,3 +24,39 @@ The parsing and ranking models shipped in `ml/` are trained only on synthetic
 strings generated from the permissively licensed corpora above (BAN and Overture:
 France, Netherlands, Italy, Serbia). No copyleft (ODbL/OSM) data enters the
 distributed model weights.
+
+## Germany — 15 of 16 Länder; Bavaria not covered
+
+The address base is Overture Maps Addresses **2026-08-19.0**, reached through
+OpenAddresses. The following per-Land catalog is retained in the sheet's
+`source_catalog`; attribution records were accessed 2026-08-20. Data was
+filtered to the declared coverage, normalized and indexed by GridPin. These
+licenses are per source, not a new blanket license for all German addresses.
+
+| Land | Provider / attribution | Source | License |
+|---|---|---|---|
+| Brandenburg | Landesvermessung und Geobasisinformation Brandenburg (LGB) | [Georeferenzierte Adresse](https://geobasis-bb.de/lgb/de/geodaten/liegenschaftskataster/georeferenzierte-adresse/) | [Datenlizenz Deutschland – Namensnennung – Version 2.0](https://www.govdata.de/dl-de/by-2-0) |
+| Berlin | Geoportal Berlin / Land Berlin | [Georeferenzierte Gebäudeadressen Berlin](https://gdi.berlin.de/geonetwork/srv/ger/catalog.search) | [Datenlizenz Deutschland – Zero – Version 2.0](https://www.govdata.de/dl-de/zero-2-0) |
+| Baden-Württemberg | Landesamt für Geoinformation und Landentwicklung Baden-Württemberg (LGL) | [Hauskoordinaten](https://www.lgl-bw.de/Produkte/Liegenschaftskataster/Hauskoordinaten/) | [Datenlizenz Deutschland – Namensnennung – Version 2.0](https://www.govdata.de/dl-de/by-2-0) |
+| Bremen | GeoInformation Bremen | [ALKIS Hauskoordinaten](https://www.geo.bremen.de/produkte/katasterprodukte/auszuege-aus-dem-liegenschaftskataster-12272) | [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode.en) |
+| Hessen | Hessisches Landesamt für Bodenmanagement und Geoinformation (HLBG) | [Hauskoordinaten ohne postalische Angaben](https://gds.hessen.de/INTERSHOP/web/WFS/HLBG-Geodaten-Site/de_DE/-/EUR/ViewDownloadcenter-Start?path=Liegenschaftskataster%2FHauskoordinaten+ohne+Postalische+Angaben+%28txt%29) | [Datenlizenz Deutschland – Zero – Version 2.0](https://www.govdata.de/dl-de/zero-2-0) |
+| Hamburg | Landesbetrieb Geoinformation und Vermessung Hamburg (LGV) | [ALKIS Adressen Hamburg](https://suche.transparenz.hamburg.de/dataset/alkis-adressen-hamburg6) | [Datenlizenz Deutschland – Namensnennung – Version 2.0](https://www.govdata.de/dl-de/by-2-0) |
+| Mecklenburg-Vorpommern | Landesamt für innere Verwaltung Mecklenburg-Vorpommern (LAiV) | [ALKIS Adressen](https://laiv.geodaten-mv.de/afgvk/Liegenschaftskataster/Beschreibung?produkt=ALKIS) | [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode.en) |
+| Niedersachsen | Landesamt für Geoinformation und Landesvermessung Niedersachsen (LGLN) | [Liegenschaftskataster Hauskoordinaten](https://ni-lgln-opengeodata.hub.arcgis.com/search?tags=liegenschaftskataster) | [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode.en) |
+| Nordrhein-Westfalen | Bezirksregierung Köln, Geobasis NRW | [Georeferenzierte Gebäudeadressen (gebref_txt)](https://www.opengeodata.nrw.de/produkte/geobasis/lk/akt/gebref_txt/) | [Datenlizenz Deutschland – Zero – Version 2.0](https://www.govdata.de/dl-de/zero-2-0) |
+| Rheinland-Pfalz | Landesamt für Vermessung und Geobasisinformation Rheinland-Pfalz (LVermGeo) | [Hauskoordinaten](https://lvermgeo.rlp.de/geodaten-geoshop/open-data) | [Datenlizenz Deutschland – Namensnennung – Version 2.0](https://www.govdata.de/dl-de/by-2-0) |
+| Schleswig-Holstein | Landesamt für Vermessung und Geoinformation Schleswig-Holstein (LVermGeo SH) | [Liegenschaftskataster Hauskoordinaten](https://geodaten.schleswig-holstein.de/gaialight-sh/_apps/dladownload/lizenz.html) | [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/legalcode.en) |
+| Saarland | Landesamt für Vermessung, Geoinformation und Landentwicklung Saarland (LVGL) | [Hauskoordinaten](https://geoportal.saarland.de/) | [Datenlizenz Deutschland – Namensnennung – Version 2.0](https://www.govdata.de/dl-de/by-2-0) |
+| Sachsen | Staatsbetrieb Geobasisinformation und Vermessung Sachsen (GeoSN) | [Hauskoordinaten](https://www.geodaten.sachsen.de/downloadbereich-hauskoordinaten-4172.html) | [Datenlizenz Deutschland – Namensnennung – Version 2.0](https://www.govdata.de/dl-de/by-2-0) |
+| Sachsen-Anhalt | Landesamt für Vermessung und Geoinformation Sachsen-Anhalt (LVermGeo) | [Hauskoordinaten](https://www.lvermgeo.sachsen-anhalt.de/de/gdp-open-data.html) | [Datenlizenz Deutschland – Namensnennung – Version 2.0](https://www.govdata.de/dl-de/by-2-0) |
+| Thüringen | Thüringer Landesamt für Bodenmanagement und Geoinformation (TLBG) | [Hauskoordinaten](https://geoportal.thueringen.de/gdi-th/download-offene-geodaten) | [Datenlizenz Deutschland – Namensnennung – Version 2.0](https://www.govdata.de/dl-de/by-2-0) |
+
+Additional postcode witness: **Bundesnetzagentur**, public charging-station
+register, snapshot **2026-07-28**, **CC BY 4.0**. Attribution:
+Source: [retained register](https://data.bundesnetzagentur.de/Bundesnetzagentur/DE/Fachthemen/ElektrizitaetundGas/E-Mobilitaet/Ladesaeulenregister_BNetzA_2026-07-28.csv);
+[license](https://creativecommons.org/licenses/by/4.0/deed.de).
+© Bundesnetzagentur.de. Only 14,528 previously blank postcode rows were filled
+across 13,870 existing address identities; **zero address rows were added**.
+All 19,267,049 base rows and coordinates were preserved. This is not a charging
+station POI layer. The original source metadata and indication of changes remain
+inside the release sheet.

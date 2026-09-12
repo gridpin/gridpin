@@ -1,0 +1,53 @@
+{
+  "attribution": "Ministerium für Schule und Bildung des Landes NRW; Schulgrunddaten NRW; Datenlizenz Deutschland – Namensnennung – Version 2.0 (https://www.govdata.de/dl-de/by-2-0); https://ckan.open.nrw.de/dataset/001ec65e-9b58-4809-878a-34b182d5e0e3; Daten wurden geändert.",
+  "dataset": {
+    "ckan_dataset_id": "001ec65e-9b58-4809-878a-34b182d5e0e3",
+    "dataset_identifier": "d1918da1-1f2d-52ea-8295-6069860fb0c9",
+    "distribution_id": "c88140e7-f9ac-4307-b092-632be123d532",
+    "title": "Schulgrunddaten NRW"
+  },
+  "frozen_source": {
+    "acquisition_manifest": {
+      "bytes": 1060,
+      "path": "code/eval/work/de_f5_wave_e_schulen_nrw_20260821/source_acquisition_v1.json",
+      "sha256": "e03ce24e7bed3998e5d3d44911931e9c1e4ba0e71fa6fe1234e44903c8157278"
+    },
+    "outcome_blind_audit": {
+      "bytes": 2526,
+      "path": "code/eval/work/de_f5_wave_e_schulen_nrw_20260821/source_audit_v1.json",
+      "sha256": "a534feebb72a20d82369783ebf98717400daf54a9d718cf07703efd8fec80977"
+    },
+    "response_headers": {
+      "bytes": 813,
+      "path": "code/eval/work/de_f5_wave_e_schulen_nrw_20260821/schuldaten.http_headers.txt",
+      "sha256": "390efe5c628bb6fd242ba6bde057f75b7e3ba496b499ec15dec3a4f9a539d1c3"
+    },
+    "rows": 5643,
+    "snapshot": {
+      "bytes": 1788962,
+      "path": "code/eval/work/de_f5_wave_e_schulen_nrw_20260821/schuldaten.csv",
+      "sha256": "7138a5796ca63c07bb519b4b068d49adb65885f996c50859e9916f12ee60c1de"
+    },
+    "snapshot_date": "2026-08-21"
+  },
+  "license": {
+    "changes_marked": true,
+    "identifier": "DL-DE-BY-2.0",
+    "name": "Datenlizenz Deutschland – Namensnennung – Version 2.0",
+    "url": "https://www.govdata.de/dl-de/by-2-0"
+  },
+  "license_freeze": {
+    "bytes": 5286,
+    "path": "code/eval/de_schulgrunddaten_nrw_license_freeze_v1.json",
+    "sha256": "4db5b49a9179a17fdec0bedb7d8e3549d65874b830665ffc24495a18efa0d0bc"
+  },
+  "publisher": "Ministerium für Schule und Bildung des Landes NRW",
+  "safe_field_policy": {
+    "fixed_state_code": "DE-NW",
+    "source_columns_accessed": ["PLZ", "Ort", "Strasse"],
+    "source_values_not_accessed": "school identifiers, school status/type/name, provider identifiers, contact details, web fields and coordinates"
+  },
+  "schema": "gridpin-de-schulgrunddaten-nrw-source-card-v1",
+  "transformation": "Outcome-blind postcode-only overlay. Explicitly reject Postfach; parse only a strict terminal positive single house number with an optional one-letter suffix from Strasse; require one full PLZ and normalized Ort; reject every repeated semantic source identity; match an exact existing normalized base street+locality+house+suffix identity with exactly one base locality code; fill blank postcode cells only; preserve every base row and coordinate; add no source-only point.",
+  "warning": "The source contains contact, identifier and coordinate columns. The overlay validates the pinned schema but accesses only PLZ, Ort and Strasse values and never emits source rows or source coordinates."
+}

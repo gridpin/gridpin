@@ -184,7 +184,7 @@ def attestation_problems(directory: pathlib.Path, listed: dict[str, str],
     return problems
 
 
-PUBLIC_SHEETS = ("france.bin", "italy.bin", "netherlands.bin", "serbia.bin", "fr_poi.bin")
+PUBLIC_SHEETS = ("france.bin", "italy.bin", "netherlands.bin", "serbia.bin", "germany.bin", "fr_poi.bin")
 SCHEMA = "gridpin-release-attestation"
 SCHEMA_VERSION = 3
 UNSIGNABLE = (ATTESTATION_NAME, ATTESTATION_NAME + ".sig", SUMS_NAME, SIGNERS_NAME)
@@ -339,7 +339,7 @@ def _v3_schema_problems(doc: dict) -> list[str]:
     names = [r.get("public_name") for r in sheets if isinstance(r, dict)]
     if sorted(n for n in names if n) != sorted(PUBLIC_SHEETS):
         problems.append(f"sheet records {sorted(n for n in names if n)} are not exactly "
-                        f"{sorted(PUBLIC_SHEETS)}: a sixth record would ride along unchecked")
+                        f"{sorted(PUBLIC_SHEETS)}: an extra record would ride along unchecked")
     for rec in sheets:
         problems += _record_problems(rec, SHEET_FIELDS, "sheet")
     assets = doc.get("assets")

@@ -1,5 +1,80 @@
 # Public quality benchmark
 
+## Retained Germany run
+
+**2026-09-10 · 2,000 retained German institution addresses**, 1,000 ISIL libraries
+and 1,000 BNetzA charging-station addresses, across 15 of 16 Länder; **Bavaria is
+not covered**. Sealed by row on 2026-09-09 before engine selection: no overlap
+with the development regression set or the earlier 300-row sample. The source
+families were used during development: **source-family independence is not
+claimed**. This is registry-coordinate institution data, not a sample of human
+search traffic. Charging-location coordinates need not be building centroids.
+Dirty queries use fixed mechanical perturbations, not observed user mistakes.
+
+One retained run per service and track; every rate uses all 2,000 rows, including
+empty answers. Counts below are top-1 great-circle distance to the retained truth.
+
+| Track | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| clean | gridpin | 2000 | 1958 | 42 | 1280 | 1656 | 1851 | 1891 |
+| clean | nominatim | 2000 | 1913 | 87 | 1241 | 1623 | 1853 | 1904 |
+| clean | photon | 2000 | 1975 | 25 | 1250 | 1663 | 1907 | 1965 |
+| dirty | gridpin | 2000 | 1953 | 47 | 1267 | 1642 | 1836 | 1876 |
+| dirty | nominatim | 2000 | 376 | 1624 | 256 | 317 | 366 | 374 |
+| dirty | photon | 2000 | 1266 | 734 | 710 | 937 | 1074 | 1105 |
+
+At ≤150 m, GridPin scores **82.80% clean / 82.10% dirty**, Photon **83.15% / 46.85%**,
+and Nominatim **81.15% / 15.85%**. Exact paired two-sided McNemar tests:
+
+| Track | Comparator | GridPin only | Comparator only | Both | Neither | p |
+|---|---|---:|---:|---:|---:|---:|
+| clean | Photon | 95 | 102 | 1,561 | 242 | 0.6691367 |
+| clean | Nominatim | 121 | 88 | 1,535 | 256 | 0.0266263 |
+| dirty | Photon | 767 | 62 | 875 | 296 | 1.65976e-155 |
+| dirty | Nominatim | 1,346 | 21 | 296 | 337 | 7.50908e-366 |
+
+The clean Photon difference is not significant — **not proof of parity**.
+The Nominatim clean difference is significant on this retained set only; neither
+comparison establishes performance for arbitrary German traffic. Tiny p-values
+are reported in decimal scientific notation rather than floating-point zero.
+
+| Source (1,000 rows each) | GridPin clean / dirty ≤150 m | Photon clean / dirty | Nominatim clean / dirty |
+|---|---:|---:|---:|
+| ISIL libraries | 803 / 793 | 820 / 464 | 804 / 148 |
+| BNetzA chargers | 853 / 849 | 843 / 473 | 819 / 169 |
+
+### Retained identity
+
+SHA-256, full values (corpora and raw receipts are retained evidence, not bundled
+in this public source checkout):
+
+| Artifact | SHA-256 |
+|---|---|
+| Clean 2,000-row corpus | `9dd8e146b1c2fb90b028b0632b8a02d76c9273d821763ca01fff822fbc9a4f4b` |
+| Dirty 2,000-row corpus | `0b1719b75f59553dbb8ff897e784fe93d0fdb8b172bc5c0dd4576781f22c0674` |
+| Measured GridPin binary | `27d8301a4c1620a855da82d73f46168569562b66336f6b427a452f1b05081abb` |
+| Measured sheet | `64d032374aa568e644375bca1d0cd36dff3d12b0f74842146dd503fa3feef464` |
+| Release sheet (metadata-only repack, 2026-09-10) | `c0ac3d0cbf3dbd480bff6aebd717e2df96e9f0a2eb4e83aeffde736fa42b18af` |
+| GridPin clean raw stream | `9aaf83f71bebc39f3c5513618f8f1642060e80a94e98e76f8ef7beab2aff39aa` |
+| GridPin dirty raw stream | `ba1b15812c4b34f3aed01ea5feab75142a7bd20e66565c4a76fbaa1155eccf43` |
+| Nominatim clean responses | `883998f211867a1d863dc7b730742557175f38e0cfe3fa3f948163fc9ebc0c77` |
+| Nominatim dirty responses | `bce5b9940f5dd98ed09af2b91a0651bb3b06c1555b3aefd1e6bf046e1eb8f364` |
+| Photon clean responses | `46dcc5d7bd2aba7e2754725cbe21933d2f01a18f00d79a5521a63134c611982f` |
+| Photon dirty responses | `b5d1c2050a60706c02f053324ba96c15565d886a42da2ea070867e8edd5a004a` |
+
+The measured sheet and release sheet have identical non-metadata sections;
+the release repack preserves the 5,000-query clean and dirty raw streams
+byte-for-byte. Engine selection was frozen at `0e98c8ad3f66134b10d6a8659f15fe99dfa93076`.
+Photon was local 1.2.0 with import date 2026-08-22T23:04:06Z; Nominatim was the
+public service. Each supplied 4,000 successful responses, no retries, with
+before/after status receipts. No competitor values come from the older set.
+
+**Historical development regression set, 2026-09-09:** 5,000 rows used to tune
+rules: GridPin 3,838 clean ≤150 m, 63 clean empty; 3,784 dirty ≤150 m, 78 dirty
+empty. These are development checks, not the publishable held-out quality score.
+Single-query latency and peak memory for the retained 2,000 are not measured yet;
+France throughput numbers elsewhere on this page do not describe Germany.
+
 **Implementation status (2026-08-04): a fixed schema-v4 hybrid corpus, its
 manifest and diagnostics, and one complete run measuring GridPin, Photon and
 Nominatim together are retained.** That run's `not_run` record is empty: every

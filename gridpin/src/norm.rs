@@ -109,6 +109,10 @@ pub fn normalize(s: &str) -> String {
 /// a letter gets a space inserted ("75001paris" -> "75001 paris", "9402assen" -> ...).
 /// House numbers with a letter suffix ("12a") have digit runs shorter than 4 and are
 /// left alone. A real class of human input: the postcode pasted flush against the city.
+fn is_glued_postcode_boundary(digit_run: usize, character: char, output_ends_space: bool) -> bool {
+    digit_run >= 4 && character.is_alphabetic() && !output_ends_space
+}
+
 fn split_glued_postcode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     let mut digit_run = 0usize;
@@ -116,7 +120,7 @@ fn split_glued_postcode(s: &str) -> String {
         if c.is_ascii_digit() {
             digit_run += 1;
         } else {
-            if digit_run >= 4 && c.is_alphabetic() && !out.ends_with(' ') {
+            if is_glued_postcode_boundary(digit_run, c, out.ends_with(' ')) {
                 out.push(' ');
             }
             digit_run = 0;
@@ -124,6 +128,26 @@ fn split_glued_postcode(s: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// Test-observer for the exact seam predicate used above.  The returned
+/// value is the real normalized output, not a regex approximation.
+#[cfg(test)]
+pub(crate) fn de_postcode_seam_trace(raw: &str) -> Option<String> {
+    let mut digit_run = 0usize;
+    let mut ends_space = true;
+    for character in raw.chars() {
+        if character.is_ascii_digit() {
+            digit_run += 1;
+        } else {
+            if is_glued_postcode_boundary(digit_run, character, ends_space) {
+                return Some(format!("{raw} -> {}", normalize(raw)));
+            }
+            digit_run = 0;
+        }
+        ends_space = character.is_whitespace();
+    }
+    None
 }
 
 /// Cyrillic → Gaj's Latin alphabet (the Serbian script pair, 1:1) plus an

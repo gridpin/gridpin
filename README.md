@@ -15,11 +15,11 @@ macOS Apple Silicon (`aarch64-apple-darwin`) and Windows x86_64
 (Intel macOS, Linux arm64/musl, Windows arm) build from source:
 
 ```console
-$ base=https://github.com/gridpin/gridpin/releases/download/v0.1.0
+$ base=https://github.com/gridpin/gridpin/releases/download/v0.2.0
 $ curl -fsSLO "$base/gridpin-aarch64-apple-darwin.tar.gz"
 $ curl -fsSLO "$base/gridpin-release-signers"
-$ curl -fsSLO https://dl.gridpin.dev/v0.1.0/attestation.json
-$ curl -fsSLO https://dl.gridpin.dev/v0.1.0/attestation.json.sig
+$ curl -fsSLO https://dl.gridpin.dev/v0.2.0/attestation.json
+$ curl -fsSLO https://dl.gridpin.dev/v0.2.0/attestation.json.sig
 # the trust root comes from the OTHER channel — see "Verifying a release" for why
 $ ssh-keygen -Y verify -f gridpin-release-signers -I gridpin-release \
     -n gridpin-g02 -s attestation.json.sig < attestation.json \
@@ -41,8 +41,10 @@ rests on PyPI's own integrity, not on the signature above: the attestation cover
 publish ourselves. If you need the signed chain, take the wheel from the GitHub release and verify
 it the same way as the CLI archive.
 
-**DuckDB** — once accepted into the community catalog: `INSTALL gridpin_ext FROM community;`.
-Until then, download `gridpin_ext-<platform>.zip` from the releases page. It is a loadable
+**DuckDB** — `INSTALL gridpin_ext FROM community;` then `LOAD gridpin_ext;`. The community
+catalog builds and signs the extension itself, so that trust root is DuckDB's rather than ours;
+it needs **DuckDB 1.5.5 or newer**. On an older DuckDB, or when the catalog is unreachable,
+download `gridpin_ext-<platform>.zip` from the releases page. It is a loadable
 extension, so authenticate it before you load it — same three lines as the CLI archive above,
 with `gridpin_ext-<platform>.zip` as the asset name:
 
@@ -108,9 +110,16 @@ A country in a file — most countries are a single file (a few regional dataset
 | Country     | File size | Addresses | Source              | Data license          | POI layer |
 |-------------|-----------|-----------|---------------------|-----------------------|-----------|
 | France      | 365 MB    | 26.1 M    | BAN (national registry) | Licence Ouverte   | ✓ (231 MB, optional) |
+| Germany     | 213 MB    | 19.27M    | Overture / OpenAddresses, 15 Länder; BNetzA postcode witness | dl-de/by-2-0 · dl-de/zero-2-0 · CC BY 4.0 (per source) | — |
 | Italy       | 247 MB    | 25.9 M    | Overture / ANNCSU   | CC BY 4.0             | — |
 | Netherlands | 103 MB    | 9.9 M     | Overture / NGR (BAG) | Public Domain Mark 1.0 | — |
 | Serbia      | 32 MB     | 2.6 M     | Overture / RGZ      | data.gov.rs Terms     | — |
+
+**Germany covers 15 of 16 Länder; Bavaria is not covered.** In local spot checks, Bavarian queries
+typically returned a distant same-named address with low confidence; less often, an empty answer.
+Neither outcome establishes coverage. These spot checks illustrate failure modes, not population rates.
+The release sheet contains 19,267,049 addresses,
+213,315,143 bytes, and no POI layer. Per-Land providers and licenses are in [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
 
 POI coverage is per-country (see the table; we ship a layer only where source data is rich
 enough to help). For France, pass the layer and
@@ -135,20 +144,31 @@ canonical order. They can differ only when the fields you supply reorder the wor
 order-sensitive POI *name* (splitting "54 Studio" into `street:"studio", number:"54"` re-forms it as
 "Studio 54"); pass such a query as free-form to keep the original word order.
 
-Sizes are for the current v7 builds (2026-08); the exact byte sizes are checked against a pinned source of truth in CI. A sheet is smaller than its own raw source: France's registry download is an 885 MB gzip that unpacks to 4.9 GB of CSV, while the finished sheet — the same 26.1M addresses plus every index (typo automata, spatial cells, ranking) — is 365 MB, ready to query.
+Sizes are for v7 builds (August 2026; Germany repacked 2026-09-10); the exact byte sizes are checked against a pinned source of truth in CI. A sheet is smaller than its own raw source: France's registry download is an 885 MB gzip that unpacks to 4.9 GB of CSV, while the finished sheet — the same 26.1M addresses plus every index (typo automata, spatial cells, ranking) — is 365 MB, ready to query.
 
 **Download sheets.** Free builds of all available countries are served as individual files —
 there is no directory listing, so link straight to the object you want:
-[`france.bin`](https://dl.gridpin.dev/v0.1.0/france.bin) (365 MB),
-[`italy.bin`](https://dl.gridpin.dev/v0.1.0/italy.bin) (247 MB),
-[`netherlands.bin`](https://dl.gridpin.dev/v0.1.0/netherlands.bin) (103 MB),
-[`serbia.bin`](https://dl.gridpin.dev/v0.1.0/serbia.bin) (32 MB), plus the optional France POI layer
-[`fr_poi.bin`](https://dl.gridpin.dev/v0.1.0/fr_poi.bin) (231 MB). The matching `SHA256SUMS` manifest (covering the
+[`france.bin`](https://dl.gridpin.dev/v0.2.0/france.bin) (365 MB),
+[`germany.bin`](https://dl.gridpin.dev/v0.2.0/germany.bin) (213 MB),
+[`italy.bin`](https://dl.gridpin.dev/v0.2.0/italy.bin) (247 MB),
+[`netherlands.bin`](https://dl.gridpin.dev/v0.2.0/netherlands.bin) (103 MB),
+[`serbia.bin`](https://dl.gridpin.dev/v0.2.0/serbia.bin) (32 MB), plus the optional France POI layer
+[`fr_poi.bin`](https://dl.gridpin.dev/v0.2.0/fr_poi.bin) (231 MB). The matching `SHA256SUMS` manifest (covering the
 engine binary and every sheet) is on the [GitHub release](https://github.com/gridpin/gridpin/releases).
 Subscribers fetch fresh monthly builds from a keyed URL instead — see
 [gridpin.dev/docs](https://gridpin.dev/docs.html).
 
 ## Quality
+
+**Germany — 2026-09-10, 2,000 retained institution addresses.** GridPin hits within
+150 m at rank 1 on **82.80% clean / 82.10% mechanically dirtied queries**; Photon
+83.15% / 46.85%, Nominatim 81.15% / 15.85%. The set is 1,000 ISIL libraries and
+1,000 BNetzA charging-station addresses in 15 Länder, not human query traffic.
+Rows were excluded from development sets; source-family independence is not claimed.
+Clean comparison vs Photon p=0.6691367 (not proof of parity), vs Nominatim p=0.0266263.
+See [Retained Germany run](docs-public/BENCHMARK.md#retained-germany-run) for counts,
+paired tests, hashes and limitations. Bavaria is not covered. German latency is
+not measured yet; the France speed claims below do not apply to Germany.
 
 **Where the truth is the national registry, GridPin is exact.** On France's BAN reference sets —
 the national address registry, which is also what our French sheet ships — GridPin answers **99.7%**
@@ -218,10 +238,10 @@ SHA-256 and embedded `source_release`. The clean-clone route is in
 ships: the four SHA-256 values match byte for byte, so a run against the
 released sheets reproduces these numbers exactly.
 
-The current retained result (SHA-256
+The retained France/Italy/Netherlands/Serbia result (SHA-256
 `4158865253d072f40bc1f2cacfe1c7f3380d11e84c54356b527ab12ad7851ac9`, generated
 2026-08-04) measures all three services **in a single run** on the same corpus,
-metric and sheets — and those sheets are the ones this release ships.
+metric and sheets — those are the sheets from the historical v0.1.0 release, not the German evaluation above.
 
 **Read the answer key before the score.** 1,000 of the 1,200 rows are OSM-derived,
 so on that slice the truth comes from the very dataset both competitors search,
@@ -311,18 +331,18 @@ untrusted download. Steps 3–5 below use only `ssh-keygen` and `shasum`, which 
 and only step 6 runs our code.
 
 ```bash
-mkdir gridpin-v0.1.0 && cd gridpin-v0.1.0
+mkdir gridpin-v0.2.0 && cd gridpin-v0.2.0
 mkdir trust data          # two directories on purpose: the checker never sits in what it checks
-gh_base=https://github.com/gridpin/gridpin/releases/download/v0.1.0
+gh_base=https://github.com/gridpin/gridpin/releases/download/v0.2.0
 
 # 1. TRUST ROOT — from GitHub, never from the download host
 curl -fsSL -o trust/gridpin-release-signers "$gh_base/gridpin-release-signers"
 curl -fsSL -o trust/verify_release.py       "$gh_base/verify_release.py"
 
 # 2. Data and proofs — from the download host
-for f in france.bin italy.bin netherlands.bin serbia.bin fr_poi.bin \
+for f in france.bin germany.bin italy.bin netherlands.bin serbia.bin fr_poi.bin \
          SHA256SUMS attestation.json attestation.json.sig; do
-  curl -fsSL -o "data/$f" "https://dl.gridpin.dev/v0.1.0/$f"
+  curl -fsSL -o "data/$f" "https://dl.gridpin.dev/v0.2.0/$f"
 done
 
 # 3. The key is the one published below — compare by eye, before anything else
@@ -376,7 +396,11 @@ This also matters for GDPR: the addresses you geocode are often customer data, a
 
 ## Status & roadmap
 
-**v0.1.0 is published.** Interfaces and file formats may still change before v1.0. Sheets are tied to the engine's format major version — keep the engine build that shipped alongside your sheets; before v1.0 a newer engine may require newer sheets.
+**v0.2.0 release preparation: Germany added. Client update required.** Germany covers 15 of 16 Länder; Bavaria is not covered. Use the 0.2.0 client with this release: the old 0.1.0 engine does not contain the German rules. All five country sheets and the France POI layer use the new immutable `v0.2.0/` path and a new attestation; `v0.1.0/` is unchanged. These links describe the prepared release, not proof of publication.
+
+For an existing Python installation, use `pip install --upgrade gridpin==0.2.0` after publication, not a plain install that may keep 0.1.0.
+
+Interfaces and file formats may still change before v1.0. Sheets are tied to the engine's format major version — keep the engine build that shipped alongside your sheets; before v1.0 a newer engine may require newer sheets.
 
 Planned distribution:
 

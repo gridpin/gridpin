@@ -1,0 +1,103 @@
+{
+  "schema": "gridpin-de-mastr-source-card-v1",
+  "status": "PREREGISTERED_ACQUISITION_NOT_EXECUTED",
+  "publisher": "Bundesnetzagentur",
+  "dataset": {
+    "name": "Marktstammdatenregister Gesamtdatenexport",
+    "snapshot_date": "2026-08-29",
+    "url": "https://download.marktstammdatenregister.de/Gesamtdatenexport_20260829_26.1.zip"
+  },
+  "license": {
+    "identifier": "DL-DE-BY-2.0",
+    "name": "Datenlizenz Deutschland - Namensnennung - Version 2.0",
+    "url": "https://www.govdata.de/dl-de/by-2-0",
+    "attribution_required": true,
+    "changes_marked": true,
+    "attribution": "Bundesnetzagentur, Marktstammdatenregister (MaStR)"
+  },
+  "remote_snapshot": {
+    "content_length": 3163846118,
+    "etag": "\"c9edf0d35537dd1:0\"",
+    "last_modified": "Sat, 29 Aug 2026 01:29:25 GMT",
+    "content_type": "application/x-zip-compressed",
+    "central_directory_offset": 3163800743,
+    "central_directory_bytes": 45353,
+    "central_directory_sha256": "9c39a17884521e5cad526e0501412b784badac14f04f881769bde2ea2b0dc773",
+    "eocd_offset": 3163846096,
+    "zip_entries": 434,
+    "selected_address_members": 103,
+    "selected_compressed_bytes": 1557464449,
+    "selected_uncompressed_bytes": 31460865738
+  },
+  "acquisition": {
+    "method": "exact HTTPS byte ranges from a pinned ZIP central-directory manifest; each selected XML member is streamed, verified, aggregated and released before the next member",
+    "whole_archive_stored": false,
+    "expanded_xml_stored": false,
+    "max_network_bytes": 4294967296,
+    "max_database_bytes": 2147483648,
+    "max_output_bytes": 2147483648,
+    "minimum_free_bytes": 5368709120,
+    "maximum_member_attempts": 2,
+    "retry_scope": "only the same exact member after a retryable transport failure; resource, pin, schema and content errors are terminal"
+  },
+  "selected_source_fields": [
+    "Land",
+    "Gemeinde",
+    "Gemeindeschluessel",
+    "Ort",
+    "Postleitzahl",
+    "Strasse",
+    "Hausnummer",
+    "Laengengrad",
+    "Breitengrad"
+  ],
+  "excluded_source_values": [
+    "unit identifiers",
+    "operator or owner identities",
+    "names and contacts",
+    "benchmark data",
+    "competitor data",
+    "all fields outside the strict address projection"
+  ],
+  "transformations": {
+    "shared_aggregation": "Outcome-blind Germany-only strict normalized source projection into bounded SQLite. Source semantic multiplicity, coordinate/postcode conflicts, incomplete house identities and ambiguous locality relations fail closed.",
+    "source_only": "Append only a unique strict address identity absent from the accepted base after exact product-visible locality/postcode arbitration. Source coordinates are payload only after admission and are never selectors against benchmark truth or results.",
+    "postcode_fill_only": "Fill only blank postcode metadata on exact existing base street+locality-code+house+suffix identities. Preserve every base row, order and coordinate; add no source row and never write source coordinates."
+  },
+  "implementation": {
+    "streaming_builder": {
+      "path": "code/prep/de_mastr_address_supplement.py",
+      "bytes": 93008,
+      "sha256": "7ffdd02d7ec7203b2cd2611ccf4c22c22f5a0901760302f804f42480399c1275"
+    },
+    "tests": {
+      "path": "code/tools/test_de_mastr_address_supplement.py",
+      "bytes": 45867,
+      "sha256": "154db84b280c2f8904a3614a792bf5d19a1a44eff8271e4f037f4d8307abcb89"
+    },
+    "streaming_builder_commit": "cbc2399382d4dde24cf4d9adac393d549edf96d6",
+    "postcode_fill_consumer": {
+      "path": "code/prep/de_mastr_postcode_fill_from_sqlite.py",
+      "bytes": 44753,
+      "sha256": "b99194b1dc8b76e001881ca4ce59f6a0000067a210fe58fd0bea71690288404c",
+      "tests_path": "code/tools/test_de_mastr_postcode_fill_from_sqlite.py",
+      "tests_bytes": 28854,
+      "tests_sha256": "3b75fc021a17dcfa03cd250158af3febd91aaea425c5252e88078bca9eef4957",
+      "commit": "fdb183be131aa5f4cdb10e1fdaf3c59bc060fb54"
+    }
+  },
+  "preregistration": {
+    "path": "code/eval/de_continuous_mastr_treatment_preregistration_v1.json",
+    "bytes": 12786,
+    "sha256": "9760a8e106abb85b848906f632c61e7f0db311464d8d3aa9d33c2bba4223f7f5"
+  },
+  "execution_state": {
+    "official_member_manifest_written": false,
+    "source_aggregation_written": false,
+    "source_only_builder_written": false,
+    "postcode_fill_builder_written": false,
+    "gridpin_metrics_written": false,
+    "photon_invocations": 0
+  },
+  "warning": "MaStR unit coordinates may describe an installation rather than a building centroid. The strict source-only candidate is evaluated separately with a paired harm budget; the postcode-fill candidate never consumes source coordinates."
+}

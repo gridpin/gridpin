@@ -1,0 +1,72 @@
+{
+  "schema": "gridpin-de-isil-lobid-bavaria-source-card-v1",
+  "created_at_utc": "2026-08-31T12:42:02Z",
+  "status": "OFFLINE_FEASIBILITY_ONLY_NOT_SHIPPABLE",
+  "publisher": "Hochschulbibliothekszentrum des Landes Nordrhein-Westfalen (hbz)",
+  "dataset": {
+    "service": "lobid-organisations",
+    "title": "lobid-organisations — memory institutions in German-speaking countries",
+    "bulk_endpoint": "https://lobid.org/organisations/search?q=location.address.addressCountry%3ADE%20AND%20location.address.streetAddress%3A%2A%20AND%20location.address.postalCode%3A%2A%20AND%20isil%3A%2A&format=bulk"
+  },
+  "license": {
+    "name": "CC0 1.0 Universal",
+    "identifier": "CC0-1.0",
+    "url": "https://creativecommons.org/publicdomain/zero/1.0/legalcode",
+    "attribution_required": false,
+    "recommended_attribution": "powered by lobid data"
+  },
+  "license_freeze": {
+    "path": "code/eval/de_isil_lobid_license_freeze_v1.json",
+    "bytes": 4676,
+    "sha256": "69bff549eb15102477c4dfc22931a2d1ab00976189e2b8cb95971d0c305a00f5"
+  },
+  "frozen_source": {
+    "snapshot_date": "2026-08-21",
+    "raw_response": {
+      "path": "code/eval/work/de_f5_wave_a_isil_20260821/lobid_bulk_response.body",
+      "bytes": 3578850,
+      "sha256": "9622f042ccb7762c05c47b68ce0e2e37cadcc6e48b02e973e4dd88c480d05634",
+      "compression": "gzip",
+      "records": 18414
+    },
+    "transfer_receipt": {
+      "path": "code/eval/work/de_f5_wave_a_isil_20260821/transfer.json",
+      "bytes": 1937,
+      "sha256": "2a93e852012400b592771a3d5ab1a55165e7b64b3b92c730bfcb0f3fbdae9184"
+    },
+    "network_policy": "The pinned local snapshot is the only permitted source. No network request, refresh, retry, range request, or reacquisition is authorized."
+  },
+  "field_access_contract": {
+    "location_index": 0,
+    "allowed_source_paths": [
+      "isil",
+      "rs",
+      "location[0].address.addressCountry",
+      "location[0].address.streetAddress",
+      "location[0].address.postalCode",
+      "location[0].address.addressLocality",
+      "location[0].geo.lat",
+      "location[0].geo.lon"
+    ],
+    "all_other_source_paths_forbidden": true,
+    "forbidden_examples": [
+      "organisation names, types, status and classifications",
+      "contact, telephone, email and web data",
+      "secondary locations",
+      "sameAs and other external identifiers",
+      "benchmark, competitor or engine fields"
+    ],
+    "coordinate_use": "The source coordinate may be emitted only as the coordinate of a strictly admitted Bavaria source-only address candidate. It may not select a benchmark row, validate itself, fill or replace an accepted row, or serve as evaluation truth."
+  },
+  "transformation": {
+    "scope": "Outcome-blind Bavaria-only strict source-only feasibility from the pinned local lobid snapshot.",
+    "state_rule": "Require rs to match exactly ^09[0-9]{10}$ and containment by exactly one pinned BKG Land geometry equal to DE-BY under its Polygon/MultiPolygon component rules; rs and BKG must agree. BKG containment proves Land only, not address accuracy.",
+    "address_rule": "Reject C0/C1/DEL controls. Require country DE, one nonzero five-digit postcode, normalized nonempty locality, and a non-Postfach streetAddress matching exactly ^\\s*(.+\\S)\\s+([0-9]+)\\s*([A-Za-z]?)\\s*$. Ranges, lists, fractions, unparsed tails and generic fuzzy normalization fail closed.",
+    "coordinate_rule": "Require geo.lat and geo.lon to be strict no-whitespace, no-exponent decimal JSON strings; canonicalize with Decimal fixed-point semantics; require the Germany box and exactly one DE-BY polygon using the pinned 1e-10 boundary semantics. Axis guessing and coordinate repair are forbidden.",
+    "multiplicity_rule": "Group by the exact normalized (street, locality, positive house number, lowercase optional suffix) identity with postcode as consistency metadata. Repeated ISILs and repeated semantic identities are rejected in full; exact coordinate reuse across different identities is quarantined. No first-candidate or row-order choice is allowed.",
+    "base_rule": "Compare the exact four-field semantic identity against every row in the accepted component-matched BNetzA builder using its frozen 12-column header and extraction rules. Existing identities are excluded; postcode/locality-code conflicts are quarantined; accepted base rows and coordinates remain byte-for-byte preserved.",
+    "output_rule": "The feasibility run may persist only one additive, write-once aggregate receipt and public-source dictionary commitments. Literal addresses, coordinates, source identifiers and candidate rows remain volatile. Commitments provide integrity, not confidentiality. It may not build an index, run an engine, calculate a product metric, or promote data."
+  },
+  "quality_caveat": "lobid location coordinates describe memory institutions and their coordinate-production lineage is not proven to be authoritative building-centroid geometry. Passing the offline feasibility gate is therefore only permission to design a separate one-shot development treatment; it is not evidence of positional quality or permission to ship.",
+  "relationship_to_prior_source_card": "This card is additive and narrowly authorizes coordinate access for a Bavaria-only offline feasibility experiment. It does not modify or supersede code/prep/de_isil_lobid_source_v1.json, whose postcode-overlay field restrictions remain binding for that treatment."
+}

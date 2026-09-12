@@ -53,6 +53,11 @@ pub struct Rules {
     pub place_prefix: HashSet<String>,
     pub fr_ord_cities: HashSet<String>,
     pub place_type_strip: HashSet<String>,
+    pub de_city_alias: Vec<(String, String)>,
+    pub de_abbrev2: Vec<(String, String)>,
+    pub de_street_types: Vec<String>,
+    pub de_countries: HashSet<String>,
+    pub de_admin_tail: HashSet<String>,
 }
 
 impl Rules {
@@ -110,6 +115,15 @@ impl Rules {
             }
             15 => {
                 self.place_type_strip.insert(key);
+            }
+            18 => self.de_city_alias.push((key, val)),
+            19 => self.de_abbrev2.push((key, val)),
+            20 => self.de_street_types.push(key),
+            21 => {
+                self.de_countries.insert(key);
+            }
+            22 => {
+                self.de_admin_tail.insert(key);
             }
             _ => {}
         }
@@ -396,6 +410,11 @@ fn defaults() -> Rules {
         place_prefix: HashSet::new(),
         fr_ord_cities: HashSet::new(),
         place_type_strip: HashSet::new(),
+        de_city_alias: Vec::new(),
+        de_abbrev2: Vec::new(),
+        de_street_types: Vec::new(),
+        de_countries: HashSet::new(),
+        de_admin_tail: HashSet::new(),
     };
     for (k, v) in D_COMMUNE_ALIAS {
         r.add(1, k.to_string(), v.to_string());
@@ -573,12 +592,27 @@ pub fn entries_from_tsv_dir(dir: &Path) -> std::io::Result<Vec<(u8, String, Stri
                 continue;
             }
             let cols: Vec<&str> = line.split('\t').collect();
-            let (key, val) = match (*name, cols.len()) {
-                ("abbrev2", 3..) => (format!("{} {}", cols[0], cols[1]), cols[2].to_string()),
-                (_, 2..) => (cols[0].to_string(), cols[1].to_string()),
-                _ => (cols[0].to_string(), String::new()),
+            let (actual_class, key, val) = match (*name, cols.as_slice()) {
+                // Country-scoped rows live beside their generic rule family,
+                // but are encoded into dedicated classes so they can never
+                // affect an index whose metadata is not country=de.
+                ("city_alias", ["de", key, val, ..]) => {
+                    (18, (*key).to_string(), (*val).to_string())
+                }
+                ("abbrev2", ["de", a, b, val, ..]) => (19, format!("{a} {b}"), (*val).to_string()),
+                ("street_types_latin", ["de", key, ..]) => (20, (*key).to_string(), String::new()),
+                ("countries_mid" | "countries_tail", ["de", key, ..]) => {
+                    (21, (*key).to_string(), String::new())
+                }
+                ("place_prefix" | "place_type_strip", ["de", key, ..]) => {
+                    (22, (*key).to_string(), String::new())
+                }
+                ("abbrev2", [a, b, val, ..]) => (*class, format!("{a} {b}"), (*val).to_string()),
+                (_, [key, val, ..]) => (*class, (*key).to_string(), (*val).to_string()),
+                (_, [key]) => (*class, (*key).to_string(), String::new()),
+                _ => continue,
             };
-            out.push((*class, key, val));
+            out.push((actual_class, key, val));
         }
     }
     Ok(out)
@@ -600,6 +634,11 @@ mod tests {
             (5, s("ulica"), String::new()),
             (16, s("rue"), String::new()),
             (17, s("straat"), String::new()),
+            (18, s("munich"), s("munchen")),
+            (19, s("a m"), s("am main")),
+            (20, s("straße"), String::new()),
+            (21, s("germany"), String::new()),
+            (22, s("ortsteil"), String::new()),
         ]
     }
 
@@ -635,12 +674,42 @@ mod tests {
                 base.types_latin, other.types_latin,
                 "types_latin order leaked (rotate {rotate})"
             );
+            assert_eq!(base.de_city_alias, other.de_city_alias);
+            assert_eq!(base.de_abbrev2, other.de_abbrev2);
+            assert_eq!(base.de_street_types, other.de_street_types);
         }
         let mut reversed = sample_entries();
         reversed.reverse();
         let other = rules_from_entries(reversed);
         assert_eq!(base.city_alias, other.city_alias);
         assert_eq!(base.abbrev2, other.abbrev2);
+        assert_eq!(base.de_city_alias, other.de_city_alias);
+        assert_eq!(base.de_abbrev2, other.de_abbrev2);
+    }
+
+    #[test]
+    fn country_scoped_de_rows_never_enter_generic_rule_families() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rules");
+        let entries = entries_from_tsv_dir(&dir).unwrap();
+        let rules = rules_from_entries(entries);
+
+        assert!(rules
+            .de_city_alias
+            .contains(&("munich".to_string(), "munchen".to_string())));
+        assert!(rules
+            .de_abbrev2
+            .contains(&("a m".to_string(), "am main".to_string())));
+        assert!(rules.de_street_types.iter().any(|value| value == "straße"));
+        assert!(rules.de_countries.contains("germany"));
+        assert!(rules.de_admin_tail.contains("ortsteil"));
+
+        assert!(!rules.city_alias.iter().any(|(key, _)| key == "munich"));
+        assert!(!rules.abbrev2.iter().any(|(key, _)| key == "a m"));
+        assert!(!rules.types_latin.iter().any(|value| value == "straße"));
+        assert!(!rules.countries_mid.contains("germany"));
+        assert!(!rules.countries_tail.contains("germany"));
+        assert!(!rules.place_prefix.contains("ortsteil"));
+        assert!(!rules.place_type_strip.contains("ortsteil"));
     }
 
     /// A truncated or corrupt section must never install a partial rule set.

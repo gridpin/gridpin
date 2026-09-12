@@ -1,0 +1,54 @@
+{
+  "attribution": "verwendet lobid-organisations-Daten (hbz), CC0 1.0; Quellen: Deutsches ISIL-Verzeichnis und Stammdaten der Deutschen Bibliotheksstatistik; Daten wurden durch GridPin auf vorhandene Adressidentitäten projiziert.",
+  "dataset": {
+    "bulk_endpoint": "https://lobid.org/organisations/search?q=location.address.addressCountry%3ADE%20AND%20location.address.streetAddress%3A%2A%20AND%20location.address.postalCode%3A%2A%20AND%20isil%3A%2A&format=bulk",
+    "service": "lobid-organisations",
+    "title": "lobid-organisations — memory institutions in German-speaking countries"
+  },
+  "frozen_source": {
+    "raw_response": {
+      "bytes": 3578850,
+      "compression": "gzip",
+      "path": "code/eval/work/de_f5_wave_a_isil_20260821/lobid_bulk_response.body",
+      "sha256": "9622f042ccb7762c05c47b68ce0e2e37cadcc6e48b02e973e4dd88c480d05634"
+    },
+    "records": 18414,
+    "request_preregistration": {
+      "bytes": 3292,
+      "path": "code/eval/work/de_f5_wave_a_isil_20260821/request_preregistered.json",
+      "sha256": "b78339fb868dcb95849828f8e66618b59189f6074f55fd0c35a0fddd4db0ebc4"
+    },
+    "response_headers": {
+      "bytes": 298,
+      "path": "code/eval/work/de_f5_wave_a_isil_20260821/lobid_bulk_response.headers",
+      "sha256": "f56f40f065897c648010fccf9874e804640fbe1c50d26507def2134bd0419cdb"
+    },
+    "snapshot_date": "2026-08-21",
+    "transfer_receipt": {
+      "bytes": 1937,
+      "path": "code/eval/work/de_f5_wave_a_isil_20260821/transfer.json",
+      "sha256": "2a93e852012400b592771a3d5ab1a55165e7b64b3b92c730bfcb0f3fbdae9184"
+    }
+  },
+  "license": {
+    "attribution_required": false,
+    "identifier": "CC0-1.0",
+    "name": "CC0 1.0 Universal",
+    "url": "https://creativecommons.org/publicdomain/zero/1.0/legalcode"
+  },
+  "license_freeze": {
+    "bytes": 4676,
+    "path": "code/eval/de_isil_lobid_license_freeze_v1.json",
+    "sha256": "69bff549eb15102477c4dfc22931a2d1ab00976189e2b8cb95971d0c305a00f5"
+  },
+  "publisher": "Hochschulbibliothekszentrum des Landes Nordrhein-Westfalen (hbz)",
+  "safe_field_policy": {
+    "fixed_country_code": "DE",
+    "location_index": 0,
+    "source_address_fields_accessed": ["streetAddress", "postalCode", "addressLocality"],
+    "source_values_not_accessed": "identifiers, organisation names/types/status, contact and web data, coordinates, source/lineage metadata and secondary locations"
+  },
+  "schema": "gridpin-de-isil-lobid-source-card-v1",
+  "transformation": "Outcome-blind postcode-only overlay. Read only location[0].address streetAddress/postalCode/addressLocality values; use fixed country DE; explicitly reject Postfach; parse only a strict terminal positive single house number with an optional one-letter suffix; reject every repeated semantic source identity; match an exact existing normalized base street+locality+house+suffix identity with exactly one base locality code; fill blank postcode cells only; preserve every base row and coordinate; add no source-only point.",
+  "warning": "The frozen records contain identifiers, names, contact data, source lineage, secondary locations and coordinates. The overlay validates record structure but accesses only the three allowlisted main-address values and never emits source rows or source coordinates."
+}
