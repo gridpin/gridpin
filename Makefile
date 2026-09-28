@@ -16,6 +16,23 @@ GEONAMES_RS=data/geonames_rs.txt
 
 engine:
 	cargo build --release --manifest-path gridpin/Cargo.toml
+# Target-specific SHELL is inherited by every prerequisite, including engine/bindings.
+# The immutable OS sandbox also follows recursive make and children that replace env/PATH.
+# Keep the existing build/test recipes intact; gate uses only the already built CLI.
+.PHONY: lint-fmt lint-clippy
+# Match the pinned CI lint commands for both Rust packages. The lint cache must
+# never share the measurement engine target directory. Cargo stays offline.
+RUST_LINT_TARGET_DIR ?= $(CURDIR)/gridpin/target/ci-lint
+lint-fmt:
+	cargo fmt --check --manifest-path gridpin/Cargo.toml && \
+	cargo fmt --check --manifest-path duckdb-ext/Cargo.toml
+
+lint-clippy:
+	CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$(RUST_LINT_TARGET_DIR)" \
+		cargo clippy --manifest-path gridpin/Cargo.toml --all-targets --all-features -- -D warnings && \
+	CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$(RUST_LINT_TARGET_DIR)" \
+		cargo clippy --manifest-path duckdb-ext/Cargo.toml --all-targets -- -D warnings
+
 # Everything runnable without private data: Rust unit tests, worker tests, Python
 # bindings and DuckDB extension (against the Monaco smoke sheet). The full quality
 # full quality gate needs private sheets and lives in Makefile.lab.

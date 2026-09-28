@@ -865,27 +865,59 @@ fn batch_diagnosis_observes_empty_and_nonempty_without_changing_results() {
         r#"{"q":"qzxwvutqqqq zxqwvttqqqq"}"#,
         r#"{"street":"rue a","housenumber":"1","city":"ville","postcode":"10000"}"#,
     ];
-    std::fs::write(&input, (0..32).map(|i| queries[i % 4]).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+    std::fs::write(
+        &input,
+        (0..32)
+            .map(|i| queries[i % 4])
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
     let run = |name: &str, diagnose: bool, threads: &str| {
         let output = dir.join(name);
         let mut cmd = Command::new(BIN);
-        cmd.args(["batch", sheet.to_str().unwrap(), input.to_str().unwrap(), output.to_str().unwrap(), "-k", "3"]);
-        if diagnose { cmd.arg("--diagnose"); }
+        cmd.args([
+            "batch",
+            sheet.to_str().unwrap(),
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            "-k",
+            "3",
+        ]);
+        if diagnose {
+            cmd.arg("--diagnose");
+        }
         let status = cmd.env("GRIDPIN_THREADS", threads).output().unwrap();
-        assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
+        assert!(
+            status.status.success(),
+            "{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
         std::fs::read_to_string(output).unwrap()
     };
     let plain = run("plain.jsonl", false, "1");
     let diagnostic = run("diagnostic.jsonl", true, "4");
     let single = run("single.jsonl", true, "1");
-    assert_eq!(diagnostic, single, "trace leaked between workers or requests");
+    assert_eq!(
+        diagnostic, single,
+        "trace leaked between workers or requests"
+    );
     assert_eq!(plain.lines().count(), 32);
     for (i, (before, after)) in plain.lines().zip(diagnostic.lines()).enumerate() {
         let value: serde_json::Value = serde_json::from_str(after).unwrap();
         let results = &value["results"];
-        assert_eq!(before, serde_json::json!({"results": results}).to_string(), "results bytes changed at {i}");
+        assert_eq!(
+            before,
+            serde_json::json!({"results": results}).to_string(),
+            "results bytes changed at {i}"
+        );
         let normal: serde_json::Value = serde_json::from_str(before).unwrap();
-        assert_eq!(normal.as_object().unwrap().len(), 1, "flag-off schema changed");
+        assert_eq!(
+            normal.as_object().unwrap().len(),
+            1,
+            "flag-off schema changed"
+        );
         let trace = &value["diagnosis"];
         assert!(trace.is_object());
         let stage = trace["stop_stage"].as_str().expect("missing stop_stage");
@@ -894,7 +926,12 @@ fn batch_diagnosis_observes_empty_and_nonempty_without_changing_results() {
             assert!(!results.as_array().unwrap().is_empty());
             assert_eq!(stage, "returned");
             assert!(trace["street_candidates"]["count"].as_u64().unwrap() > 0);
-            assert!(trace["house_candidates"]["resolved_count"].as_u64().unwrap() > 0);
+            assert!(
+                trace["house_candidates"]["resolved_count"]
+                    .as_u64()
+                    .unwrap()
+                    > 0
+            );
             assert!(trace["before_threshold"]["count"].as_u64().unwrap() > 0);
             assert_eq!(results[0]["precision"], "house");
             assert_eq!(results[0]["housenumber"], "1");
@@ -974,8 +1011,13 @@ fn exact_place_anchor_survives_a_distant_stronger_prefix_group() {
     let sheet = dir.join("places.bin");
     let build = Command::new(BIN)
         .args(["build", csv.to_str().unwrap(), sheet.to_str().unwrap()])
-        .output().unwrap();
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
     for (q, lat, lon) in [
         ("Unknown venue, testoria, testoria minor", 48.0, 2.0),
         // An exact, stronger umbrella still excludes the distant exact namesake.
@@ -983,35 +1025,52 @@ fn exact_place_anchor_survives_a_distant_stronger_prefix_group() {
     ] {
         let output = Command::new(BIN)
             .args(["query", sheet.to_str().unwrap(), q, "-k", "1"])
-            .output().unwrap();
+            .output()
+            .unwrap();
         assert!(output.status.success());
         let text = String::from_utf8(output.stdout).unwrap();
         let hit: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         assert_eq!(hit["precision"], "city");
-        assert!((hit["lat"].as_f64().unwrap() - lat).abs() < 1e-9
-            && (hit["lon"].as_f64().unwrap() - lon).abs() < 1e-9,
-            "wrong place anchor for {q}: {hit}");
+        assert!(
+            (hit["lat"].as_f64().unwrap() - lat).abs() < 1e-9
+                && (hit["lon"].as_f64().unwrap() - lon).abs() < 1e-9,
+            "wrong place anchor for {q}: {hit}"
+        );
     }
 }
-
 
 // Queries are existing development-corpus inputs; tiny sheets isolate the two
 // resolution branches without depending on installed country data.
 fn place_provenance_query(tag: &str, commune: &str, query: &str) -> serde_json::Value {
     let dir = tmpdir(tag);
     let csv = dir.join("places.csv");
-    std::fs::write(&csv, format!("{HDR}road,001,{commune},10000,1,,2.0,48.0,Road,{commune}\n")).unwrap();
+    std::fs::write(
+        &csv,
+        format!("{HDR}road,001,{commune},10000,1,,2.0,48.0,Road,{commune}\n"),
+    )
+    .unwrap();
     let sheet = dir.join("places.bin");
     let build = Command::new(BIN)
         .args(["build", csv.to_str().unwrap(), sheet.to_str().unwrap()])
-        .output().unwrap();
-    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
     let out = Command::new(BIN)
         .args(["query", sheet.to_str().unwrap(), query, "-k", "1"])
-        .output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8(out.stdout).unwrap();
-    let hit: serde_json::Value = serde_json::from_str(text.lines().next().expect("city hit")).unwrap();
+    let hit: serde_json::Value =
+        serde_json::from_str(text.lines().next().expect("city hit")).unwrap();
     assert_eq!(hit["precision"], "city");
     assert_eq!(hit["lat"], 48.0);
     assert_eq!(hit["lon"], 2.0);
@@ -1021,8 +1080,11 @@ fn place_provenance_query(tag: &str, commune: &str, query: &str) -> serde_json::
 #[test]
 fn place_provenance_exact_name() {
     // ES Wikidata row 1506: the fallback must carry the selected exact name.
-    let hit = place_provenance_query("place-exact-flag", "santa eulalia",
-        "Santiago Ramon y Cajal, s/n, Santa Eul\u{00e0}lia");
+    let hit = place_provenance_query(
+        "place-exact-flag",
+        "santa eulalia",
+        "Santiago Ramon y Cajal, s/n, Santa Eul\u{00e0}lia",
+    );
     assert_eq!(hit["flags"], serde_json::json!(["place_exact"]));
 }
 
@@ -1598,11 +1660,16 @@ fn guard_drop_de_subaddress_priority_sheet(name: &str, with_campus_e: bool) -> s
 fn guard_drop_de_subaddress_answer_beats_locality_only_prefix_bypass() {
     let sheet = guard_drop_de_subaddress_priority_sheet("de-subaddress-priority", true);
     let observed = guard_drop_diagnose(&sheet, "Campus E1 5, 66123 Saarbrücken, Aufgang B 3. OG");
-    let guards = observed["diagnosis"]["fallback_guards"]["examples"].as_array().unwrap();
-    assert!(guards.iter().any(|g| g["stage"] == "prefix_drop"
-        && g["evidence"]["house_exact"] == false
-        && g["evidence"]["dropped_is_commune"] == false
-        && g["evidence"]["street_after_type"] == false), "prefix bypass must actually be reached: {observed}");
+    let guards = observed["diagnosis"]["fallback_guards"]["examples"]
+        .as_array()
+        .unwrap();
+    assert!(
+        guards.iter().any(|g| g["stage"] == "prefix_drop"
+            && g["evidence"]["house_exact"] == false
+            && g["evidence"]["dropped_is_commune"] == false
+            && g["evidence"]["street_after_type"] == false),
+        "prefix bypass must actually be reached: {observed}"
+    );
     let hits = observed["results"].as_array().unwrap();
     assert_eq!(hits.len(), 1, "{hits:?}");
     assert_eq!(hits[0]["street"], "Campus E", "{hits:?}");
@@ -1883,7 +1950,10 @@ fn guard_drop_rejects_fuzzy_street_with_exact_commune_without_postcode() {
 #[test]
 fn guard_drop_rejects_fuzzy_street_with_exact_commune_and_department_postcode() {
     let sheet = guard_drop_sheet("guard-drop-commune-dept");
-    for query in ["zqx rue rivloi 1 10001 ville", "rue rivloi 1 10001 ville zqx"] {
+    for query in [
+        "zqx rue rivloi 1 10001 ville",
+        "rue rivloi 1 10001 ville zqx",
+    ] {
         let out = Command::new(BIN)
             .args(["query", sheet.to_str().unwrap(), query, "-k", "1"])
             .output()
