@@ -186,7 +186,7 @@ def attestation_problems(directory: pathlib.Path, listed: dict[str, str],
 
 CURRENT_RELEASE = "v0.3.0"
 # Changed only by the publication step, together with the site country row.
-PUBLISHED_RELEASE = "v0.2.0"
+PUBLISHED_RELEASE = "v0.3.0"
 # One catalogue for the standalone verifier and the private release tools.
 # Each entry is (public name, internal name, country, layer, input pipeline).
 _RELEASE_BASE = (
