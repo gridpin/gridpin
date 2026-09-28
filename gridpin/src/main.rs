@@ -114,6 +114,9 @@ enum Cmd {
         /// dump candidate features (rank training)
         #[arg(long, default_value_t = false)]
         dump: bool,
+        /// observe address parsing and candidate stages without changing results
+        #[arg(long, default_value_t = false, conflicts_with = "dump")]
+        diagnose: bool,
         /// optional POI layer (second .bin): cascades when the address result is weak
         #[arg(long)]
         poi: Option<PathBuf>,
@@ -337,6 +340,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             output,
             k,
             dump,
+            diagnose,
             poi,
         } => {
             use rayon::prelude::*;
@@ -473,6 +477,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                         }
                         // each per-line query is panic-guarded: a corrupt-but-openable
                         // sheet must not abort the whole batch — a panicking line yields empty.
+                        let diagnosis = diagnose.then(gridpin::diagnosis::Scope::new);
                         if dump {
                             let cands: Vec<serde_json::Value> = panic_safe(|| idx.query_feats(q, k))
                                 .into_iter()
@@ -497,10 +502,20 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                                     k,
                                 )
                             });
-                            serde_json::json!({ "results": hits }).to_string()
+                            if let Some(trace) = diagnosis {
+                                let observed = trace.finish(hits.len());
+                                serde_json::json!({ "results": hits, "diagnosis": observed }).to_string()
+                            } else {
+                                serde_json::json!({ "results": hits }).to_string()
+                            }
                         } else {
                             let hits = panic_safe(|| query::query_cascade(&idx, poi_idx.as_ref(), q, k));
-                            serde_json::json!({ "results": hits }).to_string()
+                            if let Some(trace) = diagnosis {
+                                let observed = trace.finish(hits.len());
+                                serde_json::json!({ "results": hits, "diagnosis": observed }).to_string()
+                            } else {
+                                serde_json::json!({ "results": hits }).to_string()
+                            }
                         }
                     })
                     .collect()

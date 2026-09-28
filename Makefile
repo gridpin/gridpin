@@ -1,4 +1,4 @@
-# gridpin build targets. One country per command: make fr / make nl / make it / make rs
+# gridpin build targets. One country per command: make fr / make nl / make it / make rs / make es
 # Tiny end-to-end example + public smoke test: make mc && make smoke
 BIN=gridpin/target/release/gridpin
 # Private lab targets (quality bench, training, scrapes) live in Makefile.lab,
@@ -11,7 +11,7 @@ GEONAMES_RS=data/geonames_rs.txt
 # All recipes are phony (not files). Without this, a file named like a target (e.g. `regen-manifests`)
 # in the working dir makes `make` consider the target up to date and silently skip the recipe — which
 # let the release gate skip its provenance check.
-.PHONY: engine bindings fr nl it rs de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb \
+.PHONY: engine bindings fr nl it rs es de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb \
 	provision regen-manifests public-gate http public-bench-contract public-bench
 
 engine:
@@ -70,6 +70,14 @@ it: engine
 	nice -n 19 python3 prep/export_build.py data/it_norm.parquet data/build_it.csv.gz
 	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_it.csv.gz data/it.bin $(MODELS) --meta data/it_manifest.json
 
+# Build from the accepted Spanish extract; source acquisition is a separate phase.
+es: RULES=$(if $(wildcard rules),--rules rules/es,)
+es: engine
+	test -s data/es_norm.parquet
+	$(if $(wildcard rules),python3 prep/es_rules.py,)
+	nice -n 19 python3 prep/export_build.py data/es_norm.parquet data/build_es.csv.gz
+	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_es.csv.gz data/es.bin $(MODELS) --meta data/es_manifest.json
+
 rs: engine
 	test -f $(GEONAMES_RS) || python3 prep/fetch_zip.py https://download.geonames.org/export/dump/RS.zip RS.txt $(GEONAMES_RS)
 	nice -n 19 python3 prep/overture.py RS $(GEONAMES_RS)
@@ -108,13 +116,35 @@ de-regress: engine
 	.venv-py/bin/python eval/de_5k_regress.py --track clean --gridpin-bin "$(BIN)" \
 		--index "$(DE_REGRESS_INDEX)" --baseline "$(DE_REGRESS_BASELINE)" \
 		--output-root "$(DE_REGRESS_OUTPUT_ROOT)" --timeout "$(DE_REGRESS_TIMEOUT)" \
-		$(DE_REGRESS_FORCE_ARG)
+		$(DE_REGRESS_FORCE_ARG) $(DASHBOARD_AFTER_MEASUREMENT)
 
 de-regress-dirty: engine
 	.venv-py/bin/python eval/de_5k_regress.py --track dirty --gridpin-bin "$(BIN)" \
 		--index "$(DE_REGRESS_INDEX)" --baseline "$(DE_REGRESS_BASELINE)" \
 		--output-root "$(DE_REGRESS_OUTPUT_ROOT)" --timeout "$(DE_REGRESS_TIMEOUT)" \
-		$(DE_REGRESS_FORCE_ARG)
+		$(DE_REGRESS_FORCE_ARG) $(DASHBOARD_AFTER_MEASUREMENT)
+
+# Run before engine/rule commits, using the already built candidate (no rebuild).
+WIKIDATA4_BIN ?= $(BIN)
+WIKIDATA4_BASELINE ?= eval/wikidata4_regress_baseline.json
+WIKIDATA4_CORPUS_ROOT ?= eval/wikidata4
+WIKIDATA4_INDEX_DIR ?= data
+WIKIDATA4_OUTPUT_ROOT ?= eval/work/wikidata4_regress
+WIKIDATA4_TIMEOUT ?= 3600
+WIKIDATA4_HEAD_ARG = $(if $(WIKIDATA4_EXPECTED_HEAD),--expected-head "$(WIKIDATA4_EXPECTED_HEAD)",)
+WIKIDATA4_ENGINE_ARG = $(if $(WIKIDATA4_EXPECTED_ENGINE_SHA256),--expected-engine-sha256 "$(WIKIDATA4_EXPECTED_ENGINE_SHA256)",)
+.PHONY: wikidata4-regress
+wikidata4-regress:
+	.venv-py/bin/python eval/wikidata4_regress.py --gridpin-bin "$(WIKIDATA4_BIN)" \
+		--baseline "$(WIKIDATA4_BASELINE)" --corpus-root "$(WIKIDATA4_CORPUS_ROOT)" \
+		--index-dir "$(WIKIDATA4_INDEX_DIR)" --output-root "$(WIKIDATA4_OUTPUT_ROOT)" \
+		--timeout "$(WIKIDATA4_TIMEOUT)" $(WIKIDATA4_HEAD_ARG) $(WIKIDATA4_ENGINE_ARG) $(DASHBOARD_AFTER_MEASUREMENT)
+
+# Five-country guard, sequential even under make -j; use the existing engine.
+.PHONY: cross-regress
+cross-regress:
+	$(MAKE) -o engine de-regress
+	$(MAKE) -o engine wikidata4-regress
 
 # POI layer (opt-in, a SEPARATE file — never mixed into the address index).
 # The engine cascades when you pass it: --poi <file> / Geocoder(poi=...) / gridpin_load_poi.

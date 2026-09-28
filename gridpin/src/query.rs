@@ -17,6 +17,8 @@ use unicode_normalization::UnicodeNormalization;
 use crate::index::*;
 use crate::norm::normalize;
 
+const PLACE_GROUP_RADIUS_KM: f64 = 40.0;
+
 /// Owns a file mapping so it is freed on Drop: opening a sheet no longer permanently
 /// leaks the mmap, so repeated open/close (Python/DuckDB churn) reclaims memory. The Index holds it
 /// in an `Arc`, so a test can assert the Index dropped its reference deterministically.
@@ -332,7 +334,7 @@ pub struct StreetMeta {
     pub postcode_disp_off: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct Hit {
     pub lat: f64,
     pub lon: f64,
@@ -352,6 +354,8 @@ pub struct Hit {
     pub postcode: String,
     /// match flags for output (explainability): street_exact/street_fuzzy,
     /// commune_exact/commune_prefix, house_rep, pc_exact/pc_dept, ml.
+    /// City-only provenance: place_exact (exact commune name) or
+    /// place_prefix_group (prefix commune group); exactly one per city_hit.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<&'static str>,
     /// administrative region (Who's on First, reverse point-in-polygon).
@@ -607,6 +611,8 @@ fn match_flags(f: &Feats) -> Vec<&'static str> {
 
 /// Candidate features (order is fixed: SEC_RANK weights are indexed by position).
 pub const N_FEATS: usize = 10;
+// Internal selection evidence, removed before any public result is returned.
+const DEFERRED_LOCALITY_DROP: &str = "__deferred_locality_drop";
 
 #[derive(Clone, Copy, Default)]
 pub struct Feats {
@@ -1022,6 +1028,25 @@ thread_local! {
     static DE_P4_POSTCODE_BUCKET_MATCHING_SIDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static DE_BLANK_POSTCODE_HOUSE_SCAN_ROWS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static DE_COUNTRY_VARIANT_PREPARED_SEARCH_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+type EsPreparedKey = (usize, String, usize, Option<usize>, Option<String>);
+type EsPreparedResults = Vec<(Hit, [f32; N_FEATS])>;
+thread_local! {
+    static ES_PREPARED_CACHE: std::cell::RefCell<Option<HashMap<EsPreparedKey, EsPreparedResults>>> = const { std::cell::RefCell::new(None) };
+}
+struct EsPreparedScope(Option<HashMap<EsPreparedKey, EsPreparedResults>>);
+impl EsPreparedScope {
+    fn new() -> Self {
+        Self(ES_PREPARED_CACHE.with(|cache| cache.replace(Some(HashMap::new()))))
+    }
+}
+impl Drop for EsPreparedScope {
+    fn drop(&mut self) {
+        ES_PREPARED_CACHE.with(|cache| {
+            cache.replace(self.0.take());
+        });
+    }
 }
 
 /// Hard ceiling for the one narrow, post-failure exact-key scan. Common German street names can
@@ -3003,6 +3028,7 @@ pub struct Index {
     /// the thread while a query runs, so two files built from different rule versions —
     /// a current sheet and an older one — never answer with each other's rules.
     rules: &'static crate::rules::Rules,
+    es_particle_rules_may_supply_number: std::sync::OnceLock<bool>,
     /// Centroid of the most prominent commune in the index (the de-facto capital) — a weak
     /// anchor for tie-breaking homonyms when the query names no city.
     top_anchor: Option<(f64, f64)>,
@@ -3423,6 +3449,7 @@ impl Index {
         let mut index = Index {
             _mmap: mmap,
             _rules_owned: rules_owned,
+            es_particle_rules_may_supply_number: std::sync::OnceLock::new(),
             format_version,
             communes_fst,
             streets_fst,
@@ -4067,7 +4094,8 @@ impl Index {
     /// address count (for an umbrella, the group sum): a large umbrella city scores high,
     /// a specific settlement low. This is the anchor weight for the place fallback:
     /// among resolved places the anchor is the most prominent one.
-    fn resolve_place(&self, name: &str) -> Option<(f64, f64, String, u32)> {
+    // The final flag records exact-name resolution (true), versus a prefix group.
+    fn resolve_place(&self, name: &str) -> Option<(f64, f64, String, u32, bool)> {
         if name.is_empty() {
             return None;
         }
@@ -4089,7 +4117,7 @@ impl Index {
                 for &id in &ids {
                     let (la, lo) = self.commune_coord(id);
                     if (la == 0.0 && lo == 0.0)
-                        || Self::dist_km(tla, tlo, la, lo) > 40.0
+                        || Self::dist_km(tla, tlo, la, lo) > PLACE_GROUP_RADIUS_KM
                         || self.commune_name(id) != top_name
                     {
                         continue;
@@ -4099,15 +4127,23 @@ impl Index {
                     slo += lo * w;
                     sw += w;
                 }
-                return Some((sla / sw, slo / sw, top_name.to_string(), sw as u32));
+                return Some((sla / sw, slo / sw, top_name.to_string(), sw as u32, true));
             }
         }
         // (2) prefix commune group (+SPACE so "lyon " does not match "lyonne")
         let arr = self.communes_by_prefix(&format!("{name} "));
+        // Distant names sharing a prefix are separate places, not one centroid.
+        let &anchor = arr
+            .iter()
+            .filter(|&&id| self.commune_coord(id) != (0.0, 0.0))
+            .max_by_key(|&&id| self.commune_prominence(id))?;
+        let (anchor_lat, anchor_lon) = self.commune_coord(anchor);
         let (mut sla, mut slo, mut sw) = (0.0f64, 0.0f64, 0.0f64);
         for id in &arr {
             let (la, lo) = self.commune_coord(*id);
-            if la == 0.0 && lo == 0.0 {
+            if (la == 0.0 && lo == 0.0)
+                || Self::dist_km(anchor_lat, anchor_lon, la, lo) > PLACE_GROUP_RADIUS_KM
+            {
                 continue;
             }
             let w = self.commune_prominence(*id).max(1) as f64;
@@ -4116,15 +4152,15 @@ impl Index {
             sw += w;
         }
         if sw > 0.0 {
-            return Some((sla / sw, slo / sw, name.to_string(), sw as u32));
+            return Some((sla / sw, slo / sw, name.to_string(), sw as u32, false));
         }
         None
     }
 
     /// resolve_place + transliteration both ways (mixed scripts): a Cyrillic query finds
     /// Latin data (both Serbian Gaj and English digraphs) and vice versa.
-    fn resolve_place_translit(&self, phrase: &str) -> Option<(f64, f64, String, u32)> {
-        let try_t = |f: fn(&str) -> String| -> Option<(f64, f64, String, u32)> {
+    fn resolve_place_translit(&self, phrase: &str) -> Option<(f64, f64, String, u32, bool)> {
+        let try_t = |f: fn(&str) -> String| -> Option<(f64, f64, String, u32, bool)> {
             let t = normalize(&f(phrase));
             if t != phrase {
                 self.resolve_place(&t)
@@ -4136,7 +4172,7 @@ impl Index {
             .or_else(|| try_t(crate::norm::translit_cyr_lat))
             .or_else(|| try_t(crate::norm::translit_cyr_lat_en))
             .or_else(|| try_t(crate::norm::translit_lat_cyr))
-            .filter(|&(la, lo, _, _)| la != 0.0 || lo != 0.0)
+            .filter(|&(la, lo, _, _, _)| la != 0.0 || lo != 0.0)
     }
 
     /// Distance between points in km (haversine).
@@ -4172,7 +4208,7 @@ impl Index {
         for qualifier_len in (1..=max_qualifier).rev() {
             let qualifier_start = toks.len() - qualifier_len;
             let qualifier = toks[qualifier_start..].join(" ");
-            let Some((anchor_lat, anchor_lon, _, _)) = self.resolve_place_translit(&qualifier)
+            let Some((anchor_lat, anchor_lon, _, _, _)) = self.resolve_place_translit(&qualifier)
             else {
                 continue;
             };
@@ -4278,7 +4314,7 @@ impl Index {
     }
 
     /// Wrap a city point into a single city-precision Hit.
-    fn city_hit(lat: f64, lon: f64, commune: String) -> Vec<(Hit, [f32; N_FEATS])> {
+    fn city_hit(lat: f64, lon: f64, commune: String, exact_place: bool) -> Vec<(Hit, [f32; N_FEATS])> {
         vec![(
             Hit {
                 lat,
@@ -4290,7 +4326,7 @@ impl Index {
                 housenumber: None,
                 commune,
                 postcode: String::new(),
-                flags: Vec::new(),
+                flags: vec![if exact_place { "place_exact" } else { "place_prefix_group" }],
                 region: None,
                 distance_m: None,
             },
@@ -4318,7 +4354,25 @@ impl Index {
         }
     }
 
+    // A street type alone supplies no place evidence in an Italian address.
+    // Keep complete and multiword place names, including Piazza Armerina.
+    fn it_street_type_only(&self, name: &str) -> bool {
+        let name = name.trim();
+        self.country() == Some("it")
+            && !name.contains(' ')
+            && (is_street_type_word(name) || matches!(name, "piazzale" | "borgo"))
+    }
+
     fn communes_by_name(&self, name: &str) -> Vec<u32> {
+        let ids = self.communes_by_name_untraced(name);
+        crate::diagnosis::area(name, &ids, "communes_by_name");
+        ids
+    }
+
+    fn communes_by_name_untraced(&self, name: &str) -> Vec<u32> {
+        if self.it_street_type_only(name) {
+            return Vec::new();
+        }
         let name = commune_alias(name).unwrap_or(name);
         let ids = self.communes_by_name_raw(name);
         if !ids.is_empty() {
@@ -4354,6 +4408,19 @@ impl Index {
 
     /// Communes by name prefix ("paris" -> all arrondissements) — fallback path.
     fn communes_by_prefix(&self, name: &str) -> Vec<u32> {
+        let ids = self.communes_by_prefix_untraced(name);
+        crate::diagnosis::area(name, &ids, "communes_by_prefix");
+        ids
+    }
+
+    fn communes_by_prefix_untraced(&self, name: &str) -> Vec<u32> {
+        if self.it_street_type_only(name) {
+            return Vec::new();
+        }
+        // Count the supplied fragment before aliases or articles can lengthen it.
+        if name.chars().filter(|c| c.is_alphanumeric()).take(3).count() < 3 {
+            return Vec::new();
+        }
         let name = commune_alias(name).unwrap_or(name);
         let out = self.communes_by_prefix_raw(name);
         if !out.is_empty() {
@@ -4420,6 +4487,8 @@ impl Index {
         let mut num_only: Option<(f64, f64, u32, u32)> = None;
         let mut lower: Option<(u32, u32, f64, f64, u32)> = None; // last house below requested
         let mut upper: Option<(u32, u32, f64, f64, u32)> = None; // first house above requested
+        let mut lower_same_parity = None;
+        let mut upper_same_parity = None;
         for i in 0..m.house_count {
             let d = u32::try_from(strict_varint(bounded_houses, &mut pos)?).ok()?;
             cur = if i == 0 { d } else { cur.checked_add(d)? };
@@ -4459,10 +4528,22 @@ impl Index {
                 }
             } else if cur < numero {
                 lower = Some((cur, rid, lat, lon, postcode_off));
+                if cur % 2 == numero % 2 {
+                    lower_same_parity = lower;
+                }
             } else {
-                // houses are sorted: the first exceeding one is the upper neighbor; stop
-                upper = Some((cur, rid, lat, lon, postcode_off));
-                break;
+                // Keep the nearest house for snapping, while looking for the same street side.
+                let house = Some((cur, rid, lat, lon, postcode_off));
+                if upper.is_none() {
+                    upper = house;
+                }
+                if cur % 2 == numero % 2 {
+                    upper_same_parity = house;
+                }
+                if num_only.is_some() || lower_same_parity.is_none() || upper_same_parity.is_some()
+                {
+                    break;
+                }
             }
         }
         if let Some((lat, lon, postcode_off)) = exact_rep {
@@ -4476,7 +4557,12 @@ impl Index {
         // 45 and 49 -> 0.5 of the segment), kind=3 "interp". In sparse data the bracket can
         // be wide (5 and 200) and interpolation overshoots, so a wide/distant bracket falls
         // back to the nearest neighbor (kind=0 "near"). Tightness threshold empirically tuned.
-        if let (Some((ln, lrid, la, lo, lpc)), Some((un, urid, ua, uo, upc))) = (lower, upper) {
+        // Prefer a complete same-parity bracket. Without one, retain the ordinary bracket:
+        // some streets use sequential numbering, and the index does not encode that scheme.
+        let bracket = lower_same_parity
+            .zip(upper_same_parity)
+            .or(lower.zip(upper));
+        if let Some(((ln, _, la, lo, lpc), (un, _, ua, uo, upc))) = bracket {
             let tight = un - ln <= 12 && Self::dist_km(la, lo, ua, uo) < 0.3;
             if tight && un > ln {
                 let frac = (numero - ln) as f64 / (un - ln) as f64;
@@ -4492,7 +4578,9 @@ impl Index {
                     postcode_off,
                 ));
             }
-            // wide bracket — nearest-by-number neighbor
+        }
+        if let (Some((ln, lrid, la, lo, lpc)), Some((un, urid, ua, uo, upc))) = (lower, upper) {
+            // Wide bracket: snap to the nearest actual house, regardless of parity.
             return Some(if numero - ln <= un - numero {
                 (la, lo, 0, ln, lrid, lpc)
             } else {
@@ -4518,6 +4606,7 @@ impl Index {
     }
 
     fn add_cand(cand: &mut HashMap<u32, Feats>, sid: u32, f: Feats) {
+        crate::diagnosis::street(sid, f.street_exact, f.commune_exact || f.commune_prefix);
         cand.entry(sid).or_default().merge(f);
     }
 
@@ -4537,6 +4626,9 @@ impl Index {
         de_postcode_house_seen_phrases: &mut HashSet<String>,
         de_postcode_house_exact_cache: &mut HashMap<(u32, u32, u32, u32), bool>,
     ) -> (HashMap<u32, Feats>, bool) {
+        if crate::diagnosis::enabled() {
+            crate::diagnosis::parsed(&rest.join(" "), postcode, numero, rep, None);
+        }
         let mut cand: HashMap<u32, Feats> = HashMap::new();
         let mut de_postcode_house_scan_overflowed = false;
         if rest.is_empty() {
@@ -4546,6 +4638,10 @@ impl Index {
         let max_c = rest.len().saturating_sub(1).min(9);
         for c in 0..=max_c {
             let street_phrase = rest[..rest.len() - c].join(" ");
+            if crate::diagnosis::enabled() {
+                let commune = (c > 0).then(|| rest[rest.len() - c..].join(" "));
+                crate::diagnosis::boundary(&street_phrase, commune.as_deref(), postcode, numero);
+            }
             // phrase variants: as is + expanded abbreviations + rotated type word
             let mut phrases = vec![street_phrase];
             if let Some(exp) = expand_first(&phrases[0]) {
@@ -4885,7 +4981,9 @@ impl Index {
                 if lc != w && lc.chars().count() >= 3 {
                     tried.push(lc);
                 }
-                let is_type = tried.iter().any(|t| is_street_type_word(t));
+                if tried.iter().any(|t| is_street_type_word(t)) {
+                    continue;
+                }
                 // phonetic key: cross-language spelling variants (e.g. Kadyri ~ Qodiriy)
                 // share a "~"-prefixed key in the inverted index. Extra key, after the type check.
                 let pk = crate::norm::phonetic_key(w);
@@ -4903,9 +5001,7 @@ impl Index {
                     }
                 }
                 if let Some(ids) = best {
-                    if !is_type {
-                        nontype += 1;
-                    }
+                    nontype += 1;
                     sets.push(ids);
                 }
             }
@@ -5347,6 +5443,7 @@ impl Index {
         let raw = bound_query(raw); // cap work before normalization
         let _rules = crate::rules::scope(self.rules); // this file's tables, not another file's
         let mut hits = self.query_feats_country_variants(raw, k, None);
+        Self::strip_deferred_locality_drop(&mut hits);
         Self::monotone_confidence(&mut hits);
         hits
     }
@@ -5371,6 +5468,7 @@ impl Index {
             streets: self.streets_around(lat, lon),
         };
         let mut hits = self.query_feats_country_variants(raw, k, Some(&focus));
+        Self::strip_deferred_locality_drop(&mut hits);
         Self::monotone_confidence(&mut hits);
         Ok(hits)
     }
@@ -5409,6 +5507,12 @@ impl Index {
         }
     }
 
+    fn strip_deferred_locality_drop(hits: &mut [(Hit, [f32; N_FEATS])]) {
+        for (hit, _) in hits {
+            hit.flags.retain(|flag| *flag != DEFERRED_LOCALITY_DROP);
+        }
+    }
+
     fn de_variant_quality(hits: &[(Hit, [f32; N_FEATS])]) -> Option<(i32, u8, u8, f32)> {
         let (hit, features) = hits.first()?;
         let precision = match hit.precision {
@@ -5419,7 +5523,11 @@ impl Index {
             _ => 0,
         };
         Some((
-            Feats::from_vec(features).legacy(),
+            if hit.flags.contains(&DEFERRED_LOCALITY_DROP) {
+                i32::MIN
+            } else {
+                Feats::from_vec(features).legacy()
+            },
             precision,
             u8::from(!hit.flags.contains(&"dropped_suffix")),
             hit.score,
@@ -6560,13 +6668,290 @@ impl Index {
     /// compared by the same legacy evidence (exact street/commune/postcode/house)
     /// used to choose parse hypotheses, so a fallback can replace a weak fuzzy hit
     /// but cannot dislodge an equally supported canonical spelling.
+    /// A two-letter uppercase annotation after an indexed locality is administrative
+    /// context, not a second locality. Keep unanchored tokens (including street words).
+    fn it_province_annotation(&self, raw: &str) -> Option<String> {
+        if self.country() != Some("it") {
+            return None;
+        }
+        let mut offset = 0;
+        let mut kept = 0;
+        let mut result = String::new();
+        for token in raw.split_whitespace() {
+            let start = offset + raw[offset..].find(token).unwrap();
+            offset = start + token.len();
+            let code = token.trim_matches(|c: char| !c.is_alphanumeric());
+            if code.len() != 2 || !code.bytes().all(|b| b.is_ascii_uppercase()) {
+                continue;
+            }
+            let before = normalize(&raw[..start]);
+            let words: Vec<_> = before.split_whitespace().collect();
+            let has_city = (1..=words.len().min(9)).any(|n| {
+                let city = words[words.len() - n..].join(" ");
+                !self.communes_by_name(&city).is_empty()
+            });
+            if !has_city {
+                continue;
+            }
+            result.push_str(&raw[kept..start]);
+            result.push(' ');
+            kept = offset;
+        }
+        if kept == 0 {
+            None
+        } else {
+            result.push_str(&raw[kept..]);
+            Some(result)
+        }
+    }
+
+    /// Keep the literal address first; Spanish linkers are optional only at
+    /// the seam between a street type and its name. Never strip inner words.
+    fn es_street_particle_variants(raw: &str) -> Vec<String> {
+        let (street, suffix) = match raw.split_once(',') {
+            Some((street, suffix)) => (street, Some(suffix)),
+            None => (raw, None),
+        };
+        let normalized = normalize(street);
+        let tokens: Vec<&str> = normalized.split_whitespace().collect();
+        if tokens.len() < 2 || !is_street_type_word(tokens[0]) {
+            return Vec::new();
+        }
+        let skip = match tokens[1] {
+            "de" if matches!(tokens.get(2), Some(&"la" | &"les" | &"los" | &"las" | &"l")) => 2,
+            "de" | "del" | "dels" | "d" => 1,
+            _ => 0,
+        };
+        let rest = tokens[1 + skip..].join(" ");
+        if rest.is_empty() {
+            return Vec::new();
+        }
+        [
+            "", "de", "del", "dels", "de la", "de les", "de los", "de las", "de l", "d",
+        ]
+        .iter()
+        .map(|particle| {
+            let variant = if particle.is_empty() {
+                format!("{} {rest}", tokens[0])
+            } else {
+                format!("{} {particle} {rest}", tokens[0])
+            };
+            match suffix {
+                Some(suffix) => format!("{variant},{suffix}"),
+                None => variant,
+            }
+        })
+        .filter(|variant| variant.split(',').next().unwrap_or("") != normalized)
+        .collect()
+    }
+
+    fn es_particle_street_key(raw: &str, query: bool) -> String {
+        let normalized = normalize(if query {
+            raw.split(',').next().unwrap_or(raw)
+        } else {
+            raw
+        });
+        let mut tokens: Vec<&str> = normalized.split_whitespace().collect();
+        if query {
+            if let Some(house) = tokens
+                .iter()
+                .position(|t| t.starts_with(|c: char| c.is_ascii_digit()))
+            {
+                tokens.truncate(house);
+            }
+        }
+        if tokens.first().is_some_and(|t| is_street_type_word(t)) {
+            tokens.remove(0);
+            let skip = match tokens.first().copied() {
+                Some("de")
+                    if matches!(tokens.get(1), Some(&"la" | &"les" | &"los" | &"las" | &"l")) =>
+                {
+                    2
+                }
+                Some("de" | "del" | "dels" | "d") => 1,
+                _ => 0,
+            };
+            tokens.drain(..skip);
+        }
+        tokens.join(" ")
+    }
+
+    fn es_requested_commune(raw: &str) -> String {
+        let mut segments = raw.rsplit(',').map(normalize);
+        if raw.contains(',') {
+            for segment in &mut segments {
+                if matches!(segment.split_whitespace().next(), Some("tel" | "telefono" | "telephone" | "phone" | "fax")) {
+                    continue;
+                }
+                let tokens: Vec<_> = segment
+                    .split_whitespace()
+                    .filter(|t| !is_country_word(t) && !matches!(*t, "espana" | "spain") && !t.chars().all(|c| c.is_ascii_digit()))
+                    .collect();
+                if !tokens.is_empty() {
+                    return tokens.join(" ");
+                }
+            }
+            return String::new();
+        }
+        let normalized = normalize(raw);
+        let tokens: Vec<_> = normalized.split_whitespace().collect();
+        let Some(number) = tokens
+            .iter()
+            .rposition(|t| t.starts_with(|c: char| c.is_ascii_digit()))
+        else {
+            return String::new();
+        };
+        tokens[number + 1..]
+            .iter()
+            .copied()
+            .filter(|t| !is_country_word(t) && !matches!(*t, "espana" | "spain"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn es_particle_preserves_commune(raw: &str, _original: Option<&Hit>, candidate: &Hit) -> bool {
+        let requested = Self::es_requested_commune(raw);
+        !requested.is_empty() && normalize(&candidate.commune) == requested
+    }
+
+    fn es_literal_street(raw: &str) -> String {
+        let street = normalize(raw.split(',').next().unwrap_or(raw));
+        street
+            .split_whitespace()
+            .take_while(|token| !token.starts_with(|c: char| c.is_ascii_digit()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn es_particle_original_exact(raw: &str, hit: &Hit) -> bool {
+        let requested_city = Self::es_requested_commune(raw);
+        let literal_street = Self::es_literal_street(raw);
+        !requested_city.is_empty()
+            && normalize(&hit.commune) == requested_city
+            && !literal_street.is_empty()
+            && normalize(&hit.street) == literal_street
+    }
+
+    // Skip expensive retries when their exact street name is absent. This is
+    // only a filter on optional retries; the original result stays untouched.
+    fn es_particle_variant_exists(&self, raw: &str) -> bool {
+        let normalized = normalize(raw);
+        let tokens: Vec<_> = normalized.split_whitespace().collect();
+        let end = tokens
+            .iter()
+            .position(|t| t.starts_with(|c: char| c.is_ascii_digit()));
+        let Some(end) = end else {
+            return true;
+        };
+        if end <= 1 {
+            return false;
+        }
+        let name = tokens[1..end].join(" ");
+        crate::rules::rules()
+            .types_latin
+            .iter()
+            .map(String::as_str)
+            .chain(tokens.first().copied())
+            .any(|kind| {
+                let mut lo = format!("{kind} {name}").into_bytes();
+                let mut hi = lo.clone();
+                lo.push(KEY_SEP);
+                hi.push(KEY_SEP + 1);
+                self.streets_fst
+                    .range()
+                    .ge(&lo)
+                    .lt(&hi)
+                    .into_stream()
+                    .next()
+                    .is_some()
+            })
+    }
+
+    // An accepted retry must be a house. Every house-number hypothesis needs
+    // ASCII digits; changing a linker cannot supply them. Keep retries when
+    // rule expansions or the French Roman-ordinal rewrite could add a number.
+    // Number-word expansion in street lookup changes keys, not house hypotheses.
+    fn es_particle_may_have_house(&self, raw: &str) -> bool {
+        let may_supply_number = |text: &str| {
+            let normalized = crate::norm::fold_homoglyphs(&normalize(text));
+            normalized.bytes().any(|b| b.is_ascii_digit())
+                || ["paris", "lyon", "marseille"]
+                    .iter()
+                    .any(|city| normalized.contains(city))
+        };
+        may_supply_number(raw)
+            || *self.es_particle_rules_may_supply_number.get_or_init(|| {
+                self.rules
+                    .city_alias
+                    .iter()
+                    .chain(self.rules.abbrev2.iter())
+                    .any(|(_, expanded)| may_supply_number(expanded))
+            })
+    }
+
+    // A retry on the very same house must not reduce confidence. Ties keep
+    // the original path and, at the call site, its complete result list.
+    fn es_particle_keep_original(original: Option<&Hit>, candidate: &Hit) -> bool {
+        original.is_some_and(|original| {
+            original.lat == candidate.lat
+                && original.lon == candidate.lon
+                && original.housenumber == candidate.housenumber
+                && original.confidence >= candidate.confidence
+        })
+    }
+
+    fn es_particle_retry(
+        &self,
+        raw: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        // The first search is byte-for-byte the accepted engine path. If its
+        // full street and city already match, article retries are fallback only.
+        let original = self.query_feats_d(raw, k, 0, focus, None, None, false, None);
+        if original
+            .first()
+            .is_some_and(|(hit, _)| Self::es_particle_original_exact(raw, hit))
+        {
+            return original;
+        }
+        let expected_street = Self::es_particle_street_key(raw, true);
+        if expected_street.is_empty() || !self.es_particle_may_have_house(raw) {
+            return original;
+        }
+        let _prepared_scope = (!crate::diagnosis::enabled()).then(EsPreparedScope::new);
+        for variant in Self::es_street_particle_variants(raw) {
+            if !self.es_particle_variant_exists(&variant) {
+                continue;
+            }
+            let candidate = self.query_feats_d(&variant, k, 0, focus, None, None, false, None);
+            if candidate.first().is_some_and(|(hit, _)| {
+                hit.precision == "house"
+                    && Self::es_particle_street_key(&hit.street, false) == expected_street
+                    && Self::es_particle_preserves_commune(raw, original.first().map(|v| &v.0), hit)
+            }) {
+                if Self::es_particle_keep_original(original.first().map(|v| &v.0), &candidate[0].0)
+                {
+                    return original;
+                }
+                return candidate;
+            }
+        }
+        original
+    }
+
     fn query_feats_country_variants(
         &self,
         raw: &str,
         k: usize,
         focus: Option<&QueryFocus>,
     ) -> Vec<(Hit, [f32; N_FEATS])> {
+        if self.country() == Some("es") {
+            return self.es_particle_retry(raw, k, focus);
+        }
         if self.country() != Some("de") {
+            let annotated = self.it_province_annotation(raw);
+            let raw = annotated.as_deref().unwrap_or(raw);
             return self.query_feats_d(raw, k, 0, focus, None, None, false, None);
         }
         let original_cityless_street = Self::de_cityless_street(raw);
@@ -6809,7 +7194,7 @@ impl Index {
                 Some(FrPostcodeArea::Match(place)) => {
                     return self
                         .resolve_place_translit(&place)
-                        .map(|(lat, lon, commune, _)| Self::city_hit(lat, lon, commune))
+                        .map(|(lat, lon, commune, _, exact)| Self::city_hit(lat, lon, commune, exact))
                         .unwrap_or_default();
                 }
                 Some(FrPostcodeArea::Conflict) => return Vec::new(),
@@ -6836,8 +7221,8 @@ impl Index {
             // country without lists: city, district, estate, arrondissement — each is
             // either a commune or a prefix commune group. Transliteration both ways: a
             // Cyrillic query finds Latin-script communes and vice versa.
-            if let Some((lat, lon, commune, _)) = self.resolve_place_translit(&city_phrase) {
-                return Self::city_hit(lat, lon, commune);
+            if let Some((lat, lon, commune, _, exact)) = self.resolve_place_translit(&city_phrase) {
+                return Self::city_hit(lat, lon, commune, exact);
             }
         }
         let fr_area_signal = if self.country() == Some("fr") {
@@ -7012,6 +7397,7 @@ impl Index {
         // "l" token). The pass is house-gated, so the wide window is safe: accepted only
         // if an EXACT house resolves after the drop.
         let maxd = 8.min(toks.len().saturating_sub(2));
+        let mut deferred_prefix = None;
         for drop in 1..=maxd {
             let mut h = self.query_feats_prepared(&toks[drop..].join(" "), k, focus);
             if let (Some(postcode), Some(postcode_tail)) =
@@ -7045,7 +7431,16 @@ impl Index {
                 && h.iter()
                     .any(|(hit, f)| f[0] > 0.5 && hit.precision != "city");
             let dropped_is_commune = !self.communes_by_name(&toks[..drop].join(" ")).is_empty();
-            if house_exact || dropped_is_commune || street_after_type {
+            if crate::diagnosis::enabled() {
+                crate::diagnosis::guard("prefix_drop", h.len(), house_exact || dropped_is_commune || street_after_type,
+                    serde_json::json!({"house_exact": house_exact, "dropped_is_commune": dropped_is_commune,
+                        "street_after_type": street_after_type, "top": h.first().map(|(hit, _)| hit)}));
+            }
+            if house_exact || dropped_is_commune || street_after_type
+                || h.first().is_some_and(|(hit, _)| {
+                    hit.flags.contains(&"commune_exact") && hit.flags.contains(&"pc_exact")
+                })
+            {
                 // the drop is not silent: "Jan van Harenstraat" -> "Van Harenstraat" must
                 // not come back looking perfect. Flag it and cap confidence; dropping a
                 // REAL umbrella commune is semantically clean and is not penalized.
@@ -7054,6 +7449,18 @@ impl Index {
                     for (hit, _) in h.iter_mut() {
                         hit.confidence = hit.confidence.min(0.6);
                         hit.flags.push("dropped_prefix");
+                    }
+                    // Keep the first bypass while checking longer prefix drops
+                    // and an accepted tail drop for a stronger answer.
+                    if !house_exact && !street_after_type {
+                        if deferred_prefix.is_none() {
+                            let mut h = h;
+                            for (hit, _) in &mut h {
+                                hit.flags.push(DEFERRED_LOCALITY_DROP);
+                            }
+                            deferred_prefix = Some(h);
+                        }
+                        continue;
                     }
                     return h;
                 }
@@ -7078,7 +7485,23 @@ impl Index {
                         .is_empty()
                 })
             {
-                return Vec::new();
+                // An exact trailing commune blocks street search elsewhere, but can
+                // still answer an area query. Preserve the existing house-number guard.
+                let has_house = toks.iter().any(|t| {
+                    t.len() != 5 && t.bytes().all(|b| b.is_ascii_digit())
+                });
+                if !has_house {
+                    // IT commune names have at most 6 words (2026-09-20); allow 3 spare.
+                    for tail_len in (1..=toks.len().min(9)).rev() {
+                        let place = toks[toks.len() - tail_len..].join(" ");
+                        if !self.communes_by_name(&place).is_empty() {
+                            if let Some((lat, lon, commune, _, exact)) = self.resolve_place(&place) {
+                                return Self::city_hit(lat, lon, commune, exact);
+                            }
+                        }
+                    }
+                }
+                return deferred_prefix.unwrap_or_default();
             }
             for drop in 1..=maxtd {
                 if toks[toks.len() - drop..]
@@ -7105,16 +7528,40 @@ impl Index {
                 let exact_ok = h
                     .iter()
                     .any(|(hit, f)| f[0] > 0.5 && hit.precision != "city");
-                if exact_ok {
+                if crate::diagnosis::enabled() {
+                    crate::diagnosis::guard("suffix_drop", h.len(), exact_ok,
+                        serde_json::json!({"exact_street_noncity": exact_ok, "top": h.first().map(|(hit, _)| hit)}));
+                }
+                if exact_ok
+                    || h.first().is_some_and(|(hit, _)| {
+                        hit.flags.contains(&"commune_exact") && hit.flags.contains(&"pc_exact")
+                    })
+                {
+                    // A weaker tail locality must not replace the exact locality
+                    // that justified the saved prefix bypass. Stop at this first
+                    // accepted tail, even when a later drop could also answer.
+                    if !h.first().is_some_and(|(hit, _)| {
+                        hit.flags.contains(&"commune_exact") && hit.flags.contains(&"pc_exact")
+                    }) {
+                        if let Some(prefix) = deferred_prefix.take() {
+                            return prefix;
+                        }
+                    }
                     let mut h = h;
                     for (hit, _) in h.iter_mut() {
                         hit.confidence = hit.confidence.min(0.6);
                         hit.flags.push("dropped_suffix");
+                        if !exact_ok {
+                            hit.flags.push(DEFERRED_LOCALITY_DROP);
+                        }
                     }
                     h.truncate(k);
                     return h;
                 }
             }
+        }
+        if let Some(h) = deferred_prefix {
+            return h;
         }
         // (d) LAST resort — degrade to a settlement. Everything failed but the string
         // holds a place name: a city/district trailing a listing, OR a settlement with a
@@ -7150,7 +7597,7 @@ impl Index {
             .map(|s| strip_leading_pc(s.trim()))
             .filter(|s| !s.is_empty() && !s.bytes().any(|b| b.is_ascii_digit()))
             .collect();
-        let mut places: Vec<(f64, f64, String, u32)> = Vec::new();
+        let mut places: Vec<(f64, f64, String, u32, bool)> = Vec::new();
         for seg in segs.iter().rev().take(6) {
             let segn = self
                 .expand_city_aliases(&fold_units(&crate::norm::fold_homoglyphs(&normalize(seg))));
@@ -7179,9 +7626,16 @@ impl Index {
                 }
             }
         }
-        if let Some(anchor) = places.iter().max_by_key(|p| p.3).cloned() {
+        let has_exact_place = places.iter().any(|p| p.4);
+        if let Some(anchor) = places
+            .iter()
+            .filter(|p| !has_exact_place || p.4)
+            .max_by_key(|p| p.3)
+            .cloned()
+        {
             // ANCHOR against false homonyms: among the resolved places the anchor is the
-            // most prominent one (an umbrella city). The answer is the MOST specific place
+            // most prominent exact name (an umbrella city), or a prefix group only when
+            // no exact name resolved. The answer is the MOST specific place
             // (minimal prominence) within 50 km of the anchor; a distant homonym hundreds
             // of km away is filtered out.
             let best = places
@@ -7200,7 +7654,7 @@ impl Index {
                 .split(' ')
                 .any(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) && t.len() <= 3);
             if !has_number {
-                return Self::city_hit(best.0, best.1, best.2.clone());
+                return Self::city_hit(best.0, best.1, best.2.clone(), best.4);
             }
         }
         hits
@@ -7290,6 +7744,8 @@ impl Index {
         if f.house_found {
             score += 1.0; // a house beats a same-named street in another region
         }
+        crate::diagnosis::ranked(sid, m.commune_id, m.house_count, numero, precision, score,
+            self.name(m.name_off), self.commune_name(m.commune_id));
         let name_norm = normalize(self.name(m.name_off));
         let mut name_sim = 0i32;
         for w in name_norm.split(' ').filter(|w| !w.is_empty()) {
@@ -7397,6 +7853,7 @@ impl Index {
             _ => false,
         };
         if use_fallback {
+            Self::strip_deferred_locality_drop(&mut fallback);
             Self::monotone_confidence(&mut fallback);
             fallback
         } else {
@@ -7451,6 +7908,7 @@ impl Index {
             }
             None => (None, 0),
         };
+        crate::diagnosis::parsed(&sn, pc, numero, rep, Some(&cn));
         // communes from the city field (exact -> prefix -> transliteration) — no boundary guessing
         let mut exact_commune = true;
         let mut cids = self.communes_by_name(&cn);
@@ -7672,10 +8130,31 @@ impl Index {
         retained_locality: Option<DeRetainedLocality<'_>>,
         original_cityless_street: Option<&str>,
     ) -> Vec<(Hit, [f32; N_FEATS])> {
+        let key = ES_PREPARED_CACHE.with(|cache| {
+            cache.borrow().as_ref().filter(|_| retained_locality.is_none()).map(|_| {
+                (
+                    self as *const Self as usize,
+                    q.to_owned(),
+                    k,
+                    focus.map(|f| f as *const QueryFocus as usize),
+                    original_cityless_street.map(str::to_owned),
+                )
+            })
+        });
+        if let Some(key) = &key {
+            if let Some(hits) = ES_PREPARED_CACHE.with(|cache| {
+                cache
+                    .borrow()
+                    .as_ref()
+                    .and_then(|memo| memo.get(key).cloned())
+            }) {
+                return hits;
+            }
+        }
         let mut overflowed = false;
         let mut scan_budget = 0;
         let mut seen_phrases = HashSet::new();
-        self.query_feats_prepared_internal(
+        let hits: Vec<_> = self.query_feats_prepared_internal(
             q,
             k,
             focus,
@@ -7689,7 +8168,17 @@ impl Index {
         )
         .into_iter()
         .map(|(hit, features, _, _, _, _)| (hit, features))
-        .collect()
+        .collect();
+        if let Some(key) = key {
+            ES_PREPARED_CACHE.with(|cache| {
+                if let Some(memo) = cache.borrow_mut().as_mut() {
+                    if memo.len() < 128 && hits.len() <= 64 {
+                        memo.insert(key, hits.clone());
+                    }
+                }
+            });
+        }
+        hits
     }
 
     // Frozen release: preserve the existing provenance, scan-budget and overflow call wiring.
@@ -8136,7 +8625,7 @@ impl Index {
             let mut best: Option<(f64, f64, u32)> = None;
             for len in 1..=2.min(toks.len()) {
                 let phrase = toks[toks.len() - len..].join(" ");
-                if let Some((la, lo, _, prom)) = self.resolve_place_translit(&phrase) {
+                if let Some((la, lo, _, prom, _)) = self.resolve_place_translit(&phrase) {
                     if prom >= 2000 && best.is_none_or(|(_, _, bp)| prom > bp) {
                         best = Some((la, lo, prom));
                     }
@@ -10173,6 +10662,146 @@ mod tests {
             .all(|hit| !hit.0.flags.contains(&"de_postal_tail")));
     }
 
+    #[test]
+    fn commune_prefix_short_fragment_cannot_select_foreign_house() {
+        let idx = forward_housenumber_index(
+            "short-commune-prefix",
+            "calle raval,01001,el campo remoto,01001,7,,-0.78,38.68,Calle Raval,El Campo Remoto\n",
+        );
+        for query in ["7 raval el", "7 el raval", "angels 7 el raval"] {
+            let hits = idx.query(query, 1);
+            assert!(
+                !hits.iter().any(|h| h.flags.contains(&"commune_prefix")),
+                "short place fragment admitted for {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn commune_prefix_minimum_counts_input_before_article_retry() {
+        let idx = forward_housenumber_index(
+            "commune-prefix-input-length",
+            "rue test,01001,eldorado,01001,7,,2.0,48.0,Rue Test,Eldorado\n\
+             rue test,01002,ялта,01002,7,,2.1,48.1,Rue Test,Ялта\n\
+             rue test,01003,la xy village,01003,7,,2.2,48.2,Rue Test,La Xy Village\n\
+             rue test,01004,la ile longue,01004,7,,2.3,48.3,Rue Test,La Ile Longue\n\
+             rue test,01005,e l village,01005,7,,2.4,48.4,Rue Test,E L Village\n\
+             rue test,01006,el,01006,7,,2.5,48.5,Rue Test,El\n",
+        );
+        for fragment in ["", "e", "el", "ял", "xy", "e l"] {
+            assert!(idx.communes_by_prefix(fragment).is_empty(), "{fragment:?}");
+        }
+        for fragment in ["eld", "ялт", "ile"] {
+            assert!(!idx.communes_by_prefix(fragment).is_empty(), "{fragment:?}");
+        }
+        assert!(!idx.communes_by_name("el").is_empty());
+    }
+
+    #[test]
+    fn it_street_type_cannot_confirm_commune() {
+        let idx = forward_postcode_index_for_country("it-type-place-negative",
+            "piazza cavour,3,bologna,,,1,,11.3,44.5,Piazza Cavour,Bologna\n\
+             via cavour,1,piazza armerina,,,1,,14.3,37.4,Via Cavour,Piazza Armerina\n\
+             via roma,2,viareggio,,,1,,10.2,43.9,Via Roma,Viareggio\n", "it");
+        for fragment in ["piazza", "via", "corso", "piazza "] {
+            assert!(idx.communes_by_prefix(fragment).is_empty(), "{fragment}");
+        }
+        let hits = idx.query("Piazza Cavour 1", 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].commune, "Bologna");
+        assert!(!hits[0].flags.contains(&"commune_prefix"));
+    }
+
+    #[test]
+    fn it_street_type_keeps_complete_commune() {
+        let idx = forward_postcode_index_for_country("it-type-place-positive",
+            "via roma,1,piazza armerina,,,1,,14.3,37.4,Via Roma,Piazza Armerina\n\
+             via roma,2,viareggio,,,1,,10.2,43.9,Via Roma,Viareggio\n", "it");
+        for query in ["Piazza Armerina, via Roma 1", "Via Roma 1 Piazza Armerina"] {
+            let hits = idx.query(query, 1);
+            assert_eq!(hits.len(), 1, "{query}");
+            assert_eq!(hits[0].commune, "Piazza Armerina", "{query}");
+            assert_eq!(hits[0].precision, "house");
+            assert_eq!(hits[0].housenumber.as_deref(), Some("1"));
+        }
+        assert!(!idx.communes_by_prefix("piazza ar").is_empty());
+        assert!(!idx.communes_by_name("viareggio").is_empty());
+    }
+
+    #[test]
+    fn it_missing_street_keeps_numberless_commune_fallback() {
+        let idx = forward_postcode_index_for_country("area-fallback",
+            "via assente,2,altrove,,,7,,16.0,39.0,Via Assente,Altrove\n\
+             via nota,1,valle serena,,,7,,11.0,44.0,Via Nota,Valle Serena\n", "it");
+        for query in ["Via Assente, Valle Serena (XX)", "Sentiero Assente Valle Serena"] {
+            let hits = idx.query(query, 1);
+            assert_eq!(hits.len(), 1, "{query}");
+            let hit = &hits[0];
+            assert_eq!(hit.precision, "city");
+            assert_eq!(hit.commune, "Valle Serena");
+            assert_eq!(hit.confidence, 0.05);
+            assert!(hit.street.is_empty());
+            assert!(hit.housenumber.is_none());
+        }
+        let found = idx.query("Via Nota 7, Valle Serena (XX)", 1);
+        assert_eq!(found[0].precision, "house");
+        assert_eq!(found[0].street, "Via Nota");
+        assert!(idx.query("Via Assente 7, Valle Serena (XX)", 1).is_empty());
+        assert!(idx.query("Sentiero Sconosciuto, Luogo Inesistente", 1).is_empty());
+    }
+
+    #[test]
+    fn it_missing_street_distinguishes_long_house_from_postcode() {
+        let idx = forward_postcode_index_for_country("long-house-area-fallback",
+            "via assente,2,altrove,,,7,,16.0,39.0,Via Assente,Altrove\n\
+             via nota,1,valle serena,,,7,,11.0,44.0,Via Nota,Valle Serena\n", "it");
+        assert!(idx.query("Via Assente 1234, Valle Serena", 1).is_empty());
+        assert!(idx.query("Via Assente 123456, Valle Serena", 1).is_empty());
+        let hits = idx.query("Via Assente 12345, Valle Serena", 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].precision, "city");
+        assert_eq!(hits[0].commune, "Valle Serena");
+        assert_eq!(hits[0].confidence, 0.05);
+        assert!(hits[0].street.is_empty());
+        assert!(hits[0].housenumber.is_none());
+    }
+
+    fn it_province_fixture(case: &str) -> Index {
+        forward_postcode_index_for_country(case,
+            "via luigi zamboni,1,bologna,,,27,,11.35,44.49,Via Luigi Zamboni,Bologna\n\
+             via test,3,beta,,,27,,12.4,45.5,Via Test,Beta\n\
+             via test bo,2,alfa,,,27,,11.4,44.5,Via Test BO,Alfa\n\
+             via zamboni,4,omega,,,27,,15.35,40.49,Via Zamboni,Omega\n", "it")
+    }
+
+    #[test]
+    fn it_province_parenthesized_keeps_exact_city() {
+        let idx = it_province_fixture("province-parentheses");
+        let h = idx.query("Via Zamboni 27 Bologna (BO)", 1);
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].commune, "Bologna");
+        assert!(h[0].flags.contains(&"commune_exact"));
+        assert_eq!(h[0].housenumber.as_deref(), Some("27"));
+    }
+
+    #[test]
+    fn it_province_bare_keeps_exact_city() {
+        let idx = it_province_fixture("province-bare");
+        let h = idx.query("Via Zamboni 27 Bologna BO", 1);
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].commune, "Bologna");
+        assert!(h[0].flags.contains(&"commune_exact"));
+    }
+
+    #[test]
+    fn it_province_without_adjacent_city_preserves_street_token() {
+        let idx = it_province_fixture("province-no-city");
+        let h = idx.query("Via Test 27 BO", 1);
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].street, "Via Test BO");
+        assert_eq!(h[0].commune, "Alfa");
+    }
+
     fn forward_housenumber_index(case: &str, rows: &str) -> Index {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -11992,6 +12621,95 @@ mod tests {
     }
 
     #[test]
+    fn subset_recognized_type_cannot_override_distinguishing_names() {
+        let idx = forward_housenumber_index(
+            "subset-type-seed",
+            "avenue saffron amber,001,ville,10000,1,,7.4200,43.7300,Avenue Saffron Amber,Ville\n\
+             lane rue,001,ville,10000,1,,7.4210,43.7300,Lane Rue,Ville\n\
+             place saffron violet,001,ville,10000,1,,7.4220,43.7300,Place Saffron Violet,Ville\n",
+        );
+        let _rules = crate::rules::scope(idx.rules);
+        assert!(is_street_type_word("rue"));
+        assert_eq!(idx.word_streets("rue").len(), 1);
+        assert_eq!(idx.word_streets("saffron").len(), 2);
+        for words in [
+            vec!["rue", "saffron"],
+            vec!["saffron", "rue"],
+            vec!["saffron"],
+        ] {
+            let (sets, nontype, ids) = idx.subset_intersect(&words).unwrap();
+            let names: std::collections::BTreeSet<_> = ids
+                .iter()
+                .map(|id| idx.name(idx.street_meta(*id).name_off))
+                .collect();
+            assert_eq!(
+                names,
+                ["Avenue Saffron Amber", "Place Saffron Violet"].into()
+            );
+            assert_eq!((sets, nontype), (1, 1));
+        }
+        let (_, _, ids) = idx.subset_intersect(&["rue", "saffron", "amber"]).unwrap();
+        let names: Vec<_> = ids
+            .iter()
+            .map(|id| idx.name(idx.street_meta(*id).name_off))
+            .collect();
+        assert_eq!(names, ["Avenue Saffron Amber"]);
+        assert!(idx.subset_intersect(&["rue"]).is_none());
+        assert!(idx.subset_intersect(&["rue", "zzqzzqzz"]).is_none());
+    }
+
+    #[test]
+    fn forward_interpolation_prefers_the_requested_parity() {
+        for offset in [0, 1] {
+            let mut rows = String::new();
+            for (number, lon, lat) in [
+                (10, 7.4200, 43.7300),
+                (11, 7.4205, 43.7310),
+                (13, 7.4215, 43.7310),
+                (14, 7.4220, 43.7300),
+            ] {
+                rows.push_str(&format!(
+                    "rue test,001,ville,10000,{},,{lon},{lat},Rue Test,Ville\n",
+                    number + offset
+                ));
+            }
+            let idx = forward_housenumber_index("parity", &rows);
+            let requested = (12 + offset).to_string();
+            let hit = idx
+                .query_structured("rue test", Some(&requested), "ville", Some("10000"), 1)
+                .remove(0)
+                .0;
+            assert_eq!(hit.precision, "interp");
+            assert_eq!(hit.housenumber.as_deref(), Some(requested.as_str()));
+            assert!(
+                (hit.lat - 43.7300).abs() < 1e-6,
+                "wrong street side: {}",
+                hit.lat
+            );
+            assert!((hit.lon - 7.4210).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn forward_interpolation_wide_same_parity_bracket_snaps_to_nearest_house() {
+        let idx = forward_housenumber_index(
+            "parity-wide",
+            "rue test,001,ville,10000,2,,7.4200,43.7300,Rue Test,Ville\n\
+             rue test,001,ville,10000,11,a,7.4205,43.7310,Rue Test,Ville\n\
+             rue test,001,ville,10000,13,b,7.4215,43.7310,Rue Test,Ville\n\
+             rue test,001,ville,10000,24,,7.4220,43.7300,Rue Test,Ville\n",
+        );
+        let hit = idx
+            .query_structured("rue test", Some("12"), "ville", Some("10000"), 1)
+            .remove(0)
+            .0;
+        assert_eq!(hit.precision, "near");
+        assert_eq!(hit.housenumber.as_deref(), Some("11a"));
+        assert!((hit.lat - 43.7310).abs() < 1e-6);
+        assert!((hit.lon - 7.4205).abs() < 1e-6);
+    }
+
+    #[test]
     fn forward_interpolation_forwards_the_requested_address() {
         let idx = forward_housenumber_index(
             "interp",
@@ -12260,6 +12978,67 @@ mod tests {
             flags,
             region: None,
             distance_m: None,
+        }
+    }
+
+    #[test]
+    fn locality_only_drop_is_deferred_but_exact_drop_keeps_priority() {
+        let features = [0.0; N_FEATS];
+        let ordinary = vec![(
+            hit(
+                "near",
+                0.27,
+                vec![
+                    "street_fuzzy",
+                    "commune_exact",
+                    "pc_exact",
+                    "de_subaddress_tail",
+                ],
+            ),
+            features,
+        )];
+        let ordinary_quality = Index::de_variant_quality(&ordinary).unwrap();
+        for drop_flag in ["dropped_prefix", "dropped_suffix"] {
+            let locality_only = vec![(
+                hit(
+                    "interp",
+                    0.4,
+                    vec![
+                        "street_fuzzy",
+                        "commune_exact",
+                        "pc_exact",
+                        drop_flag,
+                        "__deferred_locality_drop",
+                    ],
+                ),
+                features,
+            )];
+            let deferred_quality = Index::de_variant_quality(&locality_only).unwrap();
+            assert!(
+                Index::de_quality_is_better(ordinary_quality, deferred_quality),
+                "{drop_flag}: ordinary answer must win over locality-only bypass"
+            );
+            assert!(
+                deferred_quality.0 > i32::MIN
+                    || Index::de_quality_is_better(
+                        deferred_quality,
+                        (i32::MIN, 0, 0, f32::NEG_INFINITY)
+                    ),
+                "{drop_flag}: bypass must remain selectable when alone"
+            );
+            let exact_drop = vec![(
+                hit(
+                    "house",
+                    0.8,
+                    vec!["street_exact", "commune_exact", "pc_exact", drop_flag],
+                ),
+                features,
+            )];
+            let exact_quality = Index::de_variant_quality(&exact_drop).unwrap();
+            assert!(
+                Index::de_quality_is_better(exact_quality, ordinary_quality),
+                "{drop_flag}: exact-street drop must not be deferred"
+            );
         }
     }
 
@@ -15290,5 +16069,736 @@ mod tests {
                 "P5 source audit must observe guard {required}"
             );
         }
+    }
+    fn es_particle_fixture(country: &str, street: &str) -> Index {
+        let dir = std::env::temp_dir().join(format!(
+            "gridpin-es-particle-{}-{country}-{}",
+            std::process::id(),
+            street.replace(' ', "-")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("rows.csv");
+        let decoy = match country {
+            "fr" => "rue de la pais",
+            "it" => "via del corsa",
+            _ => "calle zzzzzzzz",
+        };
+        let mut rows = [
+            format!("{street},001,ciudad,28001,7,,-3.7,40.4,{street},Ciudad"),
+            format!("{decoy},001,ciudad,28001,7,,-4.7,41.4,{decoy},Ciudad"),
+        ];
+        rows.sort();
+        std::fs::write(&csv, format!(
+            "nom_voie_norm,code_insee,nom_commune_norm,code_postal,numero,rep,lon,lat,nom_voie,nom_commune\n{}\n", rows.join("\n")
+        )).unwrap();
+        let rules = dir.join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("street_types_latin.tsv"), "calle\nrue\nvia\n").unwrap();
+        let manifest = dir.join("manifest.json");
+        std::fs::write(&manifest, format!(r#"{{"country":"{country}","layer":"addresses","license":"test","source_release":"test"}}"#)).unwrap();
+        let bin = dir.join("test.bin");
+        crate::builder::build(&csv, &bin, None, None, Some(&rules), None, Some(&manifest)).unwrap();
+        Index::open(&bin).unwrap()
+    }
+
+    #[test]
+    fn es_particles_bidirectional_house_and_apostrophes() {
+        for particle in [
+            "de", "del", "dels", "de la", "de les", "de los", "de las", "de l'", "de l’", "d'",
+            "d’",
+        ] {
+            let idx = es_particle_fixture("es", "calle ejemplo");
+            {
+                let _scope = crate::rules::scope(idx.rules);
+                let forward = Index::es_street_particle_variants(&format!(
+                    "Calle {particle} Ejemplo, 7, Ciudad"
+                ));
+                assert!(
+                    forward.contains(&"calle ejemplo, 7, Ciudad".to_string()),
+                    "forward {particle}"
+                );
+                let reverse = Index::es_street_particle_variants("Calle Ejemplo, 7, Ciudad");
+                assert!(
+                    reverse.contains(&format!("calle {} ejemplo, 7, Ciudad", normalize(particle))),
+                    "reverse {particle}: {reverse:?}; normalized particle {:?}", normalize(particle)
+                );
+            }
+            let query = format!("calle {particle} Ejemplo, 7, Ciudad");
+            let hits = idx.query(&query, 1);
+            assert_eq!(hits.len(), 1, "{query}");
+            assert_eq!(hits[0].precision, "house", "{query}");
+            assert_eq!(hits[0].street, "calle ejemplo", "{query}");
+            let street = format!("calle {} ejemplo", normalize(particle));
+            let idx = es_particle_fixture("es", &street);
+            let hits = idx.query("calle Ejemplo, 7, Ciudad", 1);
+            assert_eq!(hits.len(), 1, "reverse {particle}");
+            assert_eq!(hits[0].precision, "house", "reverse {particle}");
+            assert_eq!(hits[0].street, street, "reverse {particle}");
+        }
+    }
+
+    #[test]
+    fn es_particles_preserve_word_boundaries_and_inner_linkers() {
+        let idx = es_particle_fixture("es", "calle sant joan de deu");
+        let _scope = crate::rules::scope(idx.rules);
+        let variants = Index::es_street_particle_variants("Calle de Sant Joan de Déu, 7, Ciudad");
+        assert!(variants.contains(&"calle sant joan de deu, 7, Ciudad".to_string()));
+        assert!(variants.iter().all(|v| v.contains("sant joan de deu")));
+        let variants = Index::es_street_particle_variants("Calle Delicias, 7, Ciudad");
+        assert!(variants.iter().all(|v| v.contains("delicias")));
+        let hits = idx.query("Calle de Sant Joan de Déu, 7, Ciudad", 1);
+        assert_eq!(hits[0].street, "calle sant joan de deu");
+        assert_eq!(hits[0].precision, "house");
+    }
+
+    #[test]
+    fn es_particles_do_not_apply_to_foreign_indexes() {
+        for (country, street) in [("fr", "rue paix"), ("it", "via corso")] {
+            let idx = es_particle_fixture(country, street);
+            let query = if country == "fr" {
+                "Rue de la Paix, 7, Ciudad"
+            } else {
+                "Via del Corso, 7, Ciudad"
+            };
+            let _scope = crate::rules::scope(idx.rules);
+            let expected = idx.query_feats_d(query, 1, 0, None, None, None, false, None);
+            let actual = idx.query_feats_country_variants(query, 1, None);
+            let forced = idx.es_particle_retry(query, 1, None);
+            assert_ne!(
+                serde_json::to_value(forced.iter().map(|v| &v.0).collect::<Vec<_>>()).unwrap(),
+                serde_json::to_value(expected.iter().map(|v| &v.0).collect::<Vec<_>>()).unwrap(),
+                "fixture must distinguish an ES-only retry on {country}"
+            );
+            assert_eq!(
+                serde_json::to_value(actual.iter().map(|v| &v.0).collect::<Vec<_>>()).unwrap(),
+                serde_json::to_value(expected.iter().map(|v| &v.0).collect::<Vec<_>>()).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn es_particles_required_address_shapes() {
+        let examples = [
+            (
+                "Carrer de Reding, 9, tarragona, España",
+                "calle reding",
+                "tarragona",
+                "9",
+            ),
+            (
+                "C. del Centre, 6, garcia, España",
+                "calle centre",
+                "garcia",
+                "6",
+            ),
+            (
+                "C. de la Presó, 13, reus, España",
+                "calle preso",
+                "reus",
+                "13",
+            ),
+            (
+                "Plaça de Catalunya, 6, tremp, España",
+                "placa catalunya",
+                "tremp",
+                "6",
+            ),
+            (
+                "C. de Sant Medir, 24, sant cugat del valles, España",
+                "calle sant medir",
+                "sant cugat del valles",
+                "24",
+            ),
+            (
+                "Calle de Alcalá, 50, Madrid, España",
+                "calle alcala",
+                "madrid",
+                "50",
+            ),
+        ];
+        let dir = std::env::temp_dir().join(format!(
+            "gridpin-es-article-examples-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("rows.csv");
+        let mut rows = Vec::new();
+        for (i, (_, street, city, house)) in examples.iter().enumerate() {
+            for name in [*street, "calle zzzzzzzz"] {
+                rows.push(format!(
+                    "{name},{i:03},{city},28001,{house},,-3.7,40.4,{name},{city}"
+                ));
+            }
+        }
+        rows.sort();
+        std::fs::write(&csv, format!(
+            "nom_voie_norm,code_insee,nom_commune_norm,code_postal,numero,rep,lon,lat,nom_voie,nom_commune\n{}\n", rows.join("\n")
+        )).unwrap();
+        let rules = dir.join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("street_types_latin.tsv"),
+            "calle\ncarrer\nc\nplaca\nplaza\n",
+        )
+        .unwrap();
+        std::fs::write(rules.join("countries_tail.tsv"), "espana\n").unwrap();
+        let manifest = dir.join("manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{"country":"es","layer":"addresses","license":"test","source_release":"test"}"#,
+        )
+        .unwrap();
+        let bin = dir.join("test.bin");
+        crate::builder::build(&csv, &bin, None, None, Some(&rules), None, Some(&manifest)).unwrap();
+        let idx = Index::open(&bin).unwrap();
+        for (query, street, city, house) in examples {
+            let hits = idx.query(query, 1);
+            assert!(!hits.is_empty(), "{query}");
+            assert_eq!(hits[0].street, street, "{query}");
+            assert_eq!(hits[0].commune, city, "{query}");
+            assert_eq!(hits[0].housenumber.as_deref(), Some(house), "{query}");
+            assert_eq!(hits[0].precision, "house", "{query}");
+        }
+    }
+    #[test]
+    fn es_particles_preserve_requested_city_at_every_precision() {
+        let idx = es_particle_fixture("es", "calle major");
+        let _scope = crate::rules::scope(idx.rules);
+        for precision in ["house", "interp", "near", "street", "city"] {
+            let mut original = hit(precision, 0.4, vec![]);
+            original.commune = "Ciudad".into();
+            let mut candidate = hit("house", 0.6, vec![]);
+            candidate.commune = "Ciudad Nueva".into();
+            assert!(
+                !Index::es_particle_preserves_commune(
+                    "Calle Major, 14, Ciudad",
+                    Some(&original),
+                    &candidate
+                ),
+                "{precision}"
+            );
+            candidate.commune = "Ciudad".into();
+            assert!(
+                Index::es_particle_preserves_commune(
+                    "Calle Major, 14, Ciudad",
+                    Some(&original),
+                    &candidate
+                ),
+                "same city {precision}"
+            );
+            original.commune = "Ciudad Nueva".into();
+            assert!(
+                Index::es_particle_preserves_commune(
+                    "Calle Major, 14, Ciudad",
+                    Some(&original),
+                    &candidate
+                ),
+                "wrong original city {precision}"
+            );
+        }
+    }
+
+    #[test]
+    fn es_particles_exact_original_is_a_fallback_boundary() {
+        let idx = es_particle_fixture("es", "calle ejemplo");
+        let _rules = crate::rules::scope(idx.rules);
+        let mut original = hit("house", 0.9, vec![]);
+        original.commune = "Madrid".into();
+        original.street = "Plaza San Juan De La Cruz".into();
+        let noisy = "Plaza San Juan De La Cruz 1, Madrid, Tel. +34 600 131 200";
+        assert_eq!(Index::es_requested_commune(noisy), "madrid");
+        assert_eq!(Index::es_requested_commune("Carrer de Reding, 9, tarragona, España"), "tarragona");
+        assert!(Index::es_particle_original_exact(noisy, &original));
+        original.street = "Plaza San Juan De La Cruz Nueva".into();
+        assert!(!Index::es_particle_original_exact(noisy, &original));
+        original.street = "Plaza San Juan De La Cruz".into();
+        original.commune = "Madrid Norte".into();
+        assert!(!Index::es_particle_original_exact(noisy, &original));
+        original.commune = "Madri".into();
+        assert!(!Index::es_particle_original_exact(noisy, &original));
+        original.commune = "Madrid".into();
+        original.flags = vec!["street_fuzzy".into()];
+        assert!(Index::es_particle_original_exact(noisy, &original));
+    }
+
+    #[test]
+    fn es_particles_prepared_cache_keeps_query_and_index_identity() {
+        let a = es_particle_fixture("es", "calle ejemplo");
+        let b = es_particle_fixture("es", "calle distinto");
+        let _rules = crate::rules::scope(a.rules);
+        let _scope = EsPreparedScope::new();
+        let q = "calle ejemplo 7 ciudad";
+        let first = a.query_feats_prepared_cityless(q, 1, None, None);
+        assert!(!first.is_empty());
+        let repeated = a.query_feats_prepared_cityless(q, 1, None, None);
+        assert_eq!(
+            serde_json::to_value(first.iter().map(|x| &x.0).collect::<Vec<_>>()).unwrap(),
+            serde_json::to_value(repeated.iter().map(|x| &x.0).collect::<Vec<_>>()).unwrap()
+        );
+        let other = b.query_feats_prepared_cityless("calle distinto 7 ciudad", 1, None, None);
+        assert_eq!(other[0].0.street, "calle distinto");
+        assert!(ES_PREPARED_CACHE.with(|cache| cache.borrow().as_ref().unwrap().len()) >= 2);
+        let absent = b.query_feats_prepared_cityless(q, 1, None, None);
+        assert!(absent.iter().all(|x| x.0.street != "calle ejemplo"));
+    }
+
+
+    fn es_observer_fixture(label: &str, rows: &[(&str, &str, &str, &str)], abbrev: &str) -> Index {
+        let dir = std::env::temp_dir().join(format!(
+            "gridpin-es-observer-{}-{label}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut csv_rows: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (street, city, id, number))| {
+                format!(
+                    "{street},{id},{city},28001,{number},,{},40.4,{street},{city}",
+                    -3.7 - i as f64 * 0.001
+                )
+            })
+            .collect();
+        csv_rows.sort_by_key(|row| {
+            let c: Vec<_> = row.split(',').collect();
+            (
+                c[0].to_string(),
+                c[1].to_string(),
+                c[4].parse::<u32>().unwrap_or(0),
+            )
+        });
+        let csv = dir.join("rows.csv");
+        std::fs::write(&csv, format!("nom_voie_norm,code_insee,nom_commune_norm,code_postal,numero,rep,lon,lat,nom_voie,nom_commune\n{}\n",csv_rows.join("\n"))).unwrap();
+        let rules = dir.join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("street_types_latin.tsv"), "calle\nrue\nvia\n").unwrap();
+        std::fs::write(rules.join("abbrev2.tsv"), abbrev).unwrap();
+        let manifest = dir.join("manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{"country":"es","layer":"addresses","license":"test","source_release":"test"}"#,
+        )
+        .unwrap();
+        let bin = dir.join("test.bin");
+        crate::builder::build(&csv, &bin, None, None, Some(&rules), None, Some(&manifest)).unwrap();
+        Index::open(&bin).unwrap()
+    }
+
+    fn es_observer_hits(hits: &[(Hit, [f32; N_FEATS])]) -> serde_json::Value {
+        serde_json::to_value(hits.iter().map(|x| &x.0).collect::<Vec<_>>()).unwrap()
+    }
+
+    #[test]
+    fn es_observer_accepts_same_street_house_with_number() {
+        let idx = es_observer_fixture(
+            "accept",
+            &[
+                ("calle de sant joan", "ciudad", "001", "7"),
+                ("calle sant joan de deu", "ciudad", "001", "8"),
+            ],
+            "",
+        );
+        let _rules = crate::rules::scope(idx.rules);
+        let raw = "Calle Sant Joan, 7, Ciudad";
+        let original = idx.query_feats_d(raw, 1, 0, None, None, None, false, None);
+        assert_eq!(original[0].0.precision, "near");
+        assert_eq!(original[0].0.street, "calle sant joan de deu");
+        let actual = idx.query_feats_country_variants(raw, 1, None);
+        assert_eq!(actual[0].0.precision, "house");
+        assert_eq!(actual[0].0.street, "calle de sant joan");
+        assert_eq!(actual[0].0.commune, "ciudad");
+        assert_eq!(actual[0].0.housenumber.as_deref(), Some("7"));
+        let variant = idx.query_feats_d(
+            "Calle de Sant Joan, 7, Ciudad",
+            1,
+            0,
+            None,
+            None,
+            None,
+            false,
+            None,
+        );
+        assert_eq!(es_observer_hits(&actual), es_observer_hits(&variant));
+        assert_eq!(
+            serde_json::to_value(idx.query(raw, 1)).unwrap(),
+            es_observer_hits(&actual)
+        );
+    }
+
+    #[test]
+    fn es_observer_number_prefilter_and_abbreviation_expansion() {
+        let rows = [("calle de sant joan", "ciudad", "001", "7")];
+        let plain = es_observer_fixture("number-plain", &rows, "");
+        assert!(plain.es_particle_may_have_house("Calle Sant Joan, 7, Ciudad"));
+        assert!(!plain.es_particle_may_have_house("Calle Sant Joan, Ciudad"));
+        let expanded = es_observer_fixture("number-expanded", &rows, "numero\tsiete\t7\n");
+        assert!(expanded.es_particle_may_have_house("Calle Sant Joan, numero siete, Ciudad"));
+        let _rules = crate::rules::scope(plain.rules);
+        let raw = "Calle Sant Joan, Ciudad";
+        let original = plain.query_feats_d(raw, 1, 0, None, None, None, false, None);
+        assert_eq!(
+            es_observer_hits(&plain.query_feats_country_variants(raw, 1, None)),
+            es_observer_hits(&original)
+        );
+    }
+
+    #[test]
+    fn es_observer_rule_number_cache_belongs_to_each_index() {
+        let rows = [("calle ejemplo", "ciudad", "001", "7")];
+        let plain = es_observer_fixture("cache-plain", &rows, "");
+        let numbered = es_observer_fixture("cache-numbered", &rows, "numero\tsiete\t7\n");
+        let raw = "Calle Ejemplo, Ciudad";
+        for _ in 0..3 {
+            assert!(!plain.es_particle_may_have_house(raw));
+            assert!(numbered.es_particle_may_have_house(raw));
+        }
+        assert_eq!(
+            plain.es_particle_rules_may_supply_number.get(),
+            Some(&false)
+        );
+        assert_eq!(
+            numbered.es_particle_rules_may_supply_number.get(),
+            Some(&true)
+        );
+    }
+
+    fn es_observer_reject_precision(precision: &str, numbers: &[&str]) {
+        let mut rows: Vec<_> = numbers
+            .iter()
+            .map(|number| ("calle de sant joan", "ciudad", "001", *number))
+            .collect();
+        rows.push(("calle sant joan de deu", "ciudad", "001", "7"));
+        let idx = es_observer_fixture(precision, &rows, "");
+        let _rules = crate::rules::scope(idx.rules);
+        let raw = "Calle Sant Joan, 7, Ciudad";
+        let original = idx.query_feats_d(raw, 1, 0, None, None, None, false, None);
+        let variant = idx.query_feats_d(
+            "Calle de Sant Joan, 7, Ciudad",
+            1,
+            0,
+            None,
+            None,
+            None,
+            false,
+            None,
+        );
+        assert_eq!(variant[0].0.precision, precision);
+        assert_eq!(variant[0].0.street, "calle de sant joan");
+        assert_eq!(variant[0].0.commune, "ciudad");
+        assert_ne!(es_observer_hits(&original), es_observer_hits(&variant));
+        assert_eq!(
+            es_observer_hits(&idx.query_feats_country_variants(raw, 1, None)),
+            es_observer_hits(&original)
+        );
+    }
+
+    #[test]
+    fn es_observer_rejects_near_on_same_street() {
+        es_observer_reject_precision("near", &["8"]);
+    }
+
+    #[test]
+    fn es_observer_rejects_interpolation_on_same_street() {
+        es_observer_reject_precision("interp", &["5", "9"]);
+    }
+
+    #[test]
+    fn es_observer_rejects_street_precision_with_rule_prefilter_open() {
+        let idx = es_observer_fixture(
+            "street",
+            &[
+                ("calle de sant joan", "ciudad", "001", "7"),
+                ("calle sant joan de deu", "ciudad", "001", "8"),
+            ],
+            "numero\tsiete\t7\n",
+        );
+        let _rules = crate::rules::scope(idx.rules);
+        let raw = "Calle Sant Joan, Ciudad";
+        assert!(idx.es_particle_may_have_house(raw));
+        let original = idx.query_feats_d(raw, 1, 0, None, None, None, false, None);
+        let candidate = idx.query_feats_d(
+            "Calle de Sant Joan, Ciudad",
+            1,
+            0,
+            None,
+            None,
+            None,
+            false,
+            None,
+        );
+        assert_eq!(candidate[0].0.precision, "street");
+        assert_eq!(candidate[0].0.street, "calle de sant joan");
+        assert_eq!(candidate[0].0.commune, "ciudad");
+        assert_ne!(es_observer_hits(&original), es_observer_hits(&candidate));
+        assert_eq!(
+            es_observer_hits(&idx.query_feats_country_variants(raw, 1, None)),
+            es_observer_hits(&original)
+        );
+    }
+
+    #[test]
+    fn es_observer_rejects_house_in_commune_with_shared_prefix() {
+        let idx = es_observer_fixture(
+            "commune-prefix",
+            &[
+                ("calle de sant joan", "ciudad nueva", "002", "7"),
+                ("calle sant joan de deu", "ciudad nueva", "002", "8"),
+            ],
+            "",
+        );
+        let _rules = crate::rules::scope(idx.rules);
+        let raw = "Calle Sant Joan, 7, Ciudad";
+        let original = idx.query_feats_d(raw, 1, 0, None, None, None, false, None);
+        let candidate = idx.query_feats_d(
+            "Calle de Sant Joan, 7, Ciudad",
+            1,
+            0,
+            None,
+            None,
+            None,
+            false,
+            None,
+        );
+        assert_eq!(candidate[0].0.precision, "house");
+        assert_eq!(candidate[0].0.street, "calle de sant joan");
+        assert_eq!(candidate[0].0.commune, "ciudad nueva");
+        assert_ne!(es_observer_hits(&original), es_observer_hits(&candidate));
+        assert_eq!(
+            es_observer_hits(&idx.query_feats_country_variants(raw, 1, None)),
+            es_observer_hits(&original)
+        );
+    }
+
+    #[test]
+    fn es_observer_exact_original_blocks_better_particle_house() {
+        let idx = es_observer_fixture(
+            "exact-original",
+            &[
+                ("calle de sant joan", "ciudad", "001", "7"),
+                ("calle sant joan", "ciudad", "001", "8"),
+            ],
+            "",
+        );
+        let _rules = crate::rules::scope(idx.rules);
+        let raw = "Calle Sant Joan, 7, Ciudad";
+        let original = idx.query_feats_d(raw, 1, 0, None, None, None, false, None);
+        assert_eq!(original[0].0.precision, "near");
+        assert_eq!(original[0].0.street, "calle sant joan");
+        assert_eq!(original[0].0.commune, "ciudad");
+        let candidate = idx.query_feats_d(
+            "Calle de Sant Joan, 7, Ciudad",
+            1,
+            0,
+            None,
+            None,
+            None,
+            false,
+            None,
+        );
+        assert_eq!(candidate[0].0.precision, "house");
+        assert_ne!(es_observer_hits(&original), es_observer_hits(&candidate));
+        assert_eq!(
+            es_observer_hits(&idx.query_feats_country_variants(raw, 1, None)),
+            es_observer_hits(&original)
+        );
+    }
+
+    #[test]
+    fn es_observer_rejects_house_on_other_street() {
+        // The exact variant exists in another commune, so the index-wide
+        // prefilter admits it. Local fuzzy search finds a different street.
+        let idx = es_observer_fixture(
+            "other-street",
+            &[
+                ("calle de sant joan", "otra ciudad", "002", "7"),
+                ("calle de sant joan de deu", "ciudad", "001", "7"),
+                ("calle sant joan de mar", "ciudad", "001", "8"),
+            ],
+            "",
+        );
+        let _rules = crate::rules::scope(idx.rules);
+        let raw = "Calle Sant Joan, 7, Ciudad";
+        let original = idx.query_feats_d(raw, 1, 0, None, None, None, false, None);
+        let candidate = idx.query_feats_d(
+            "Calle de Sant Joan, 7, Ciudad",
+            1,
+            0,
+            None,
+            None,
+            None,
+            false,
+            None,
+        );
+        assert_eq!(candidate[0].0.precision, "house");
+        assert_eq!(candidate[0].0.street, "calle de sant joan de deu");
+        assert_eq!(candidate[0].0.commune, "ciudad");
+        assert_ne!(es_observer_hits(&original), es_observer_hits(&candidate));
+        assert_eq!(
+            es_observer_hits(&idx.query_feats_country_variants(raw, 1, None)),
+            es_observer_hits(&original)
+        );
+    }
+
+    fn es_same_point_fixture(
+        label: &str,
+        rows: &[(&str, &str, &str, &str)],
+        abbrev: &str,
+    ) -> Index {
+        let dir = std::env::temp_dir().join(format!(
+            "gridpin-es-same-point-{}-{label}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut csv_rows: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (street, city, id, number))| {
+                format!(
+                    "{street},{id},{city},28001,{number},,{},40.4,{street},{city}",
+                    -3.7 - i as f64 * 0.001
+                )
+            })
+            .collect();
+        csv_rows.sort_by_key(|row| {
+            let c: Vec<_> = row.split(',').collect();
+            (
+                c[0].to_string(),
+                c[1].to_string(),
+                c[4].parse::<u32>().unwrap_or(0),
+            )
+        });
+        let csv = dir.join("rows.csv");
+        std::fs::write(&csv, format!("nom_voie_norm,code_insee,nom_commune_norm,code_postal,numero,rep,lon,lat,nom_voie,nom_commune\n{}\n",csv_rows.join("\n"))).unwrap();
+        let rules = dir.join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("street_types_latin.tsv"),
+            "calle\nrue\nvia\nc\nav\navenida\n",
+        )
+        .unwrap();
+        std::fs::write(rules.join("abbrev2.tsv"), abbrev).unwrap();
+        let manifest = dir.join("manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{"country":"es","layer":"addresses","license":"test","source_release":"test"}"#,
+        )
+        .unwrap();
+        let bin = dir.join("test.bin");
+        crate::builder::build(&csv, &bin, None, None, Some(&rules), None, Some(&manifest)).unwrap();
+        Index::open(&bin).unwrap()
+    }
+
+    #[test]
+    fn es_same_point_higher_original_keeps_entire_list() {
+        let idx = es_same_point_fixture(
+            "higher-original",
+            &[
+                ("calle ejemplo", "ciudad", "001", "7"),
+                ("calle ejemplo", "ciudad", "002", "7"),
+                ("calle de ejemplo", "otro", "003", "7"),
+            ],
+            "c\tejemplo\tcalle ejemplo\n",
+        );
+        let _rules = crate::rules::scope(idx.rules);
+        let raw = "C Ejemplo, 7, Ciudad";
+        let original = idx.query_feats_d(raw, 3, 0, None, None, None, false, None);
+        assert!(original.len() >= 2);
+        assert!(!Index::es_particle_original_exact(raw, &original[0].0));
+        let variant = Index::es_street_particle_variants(raw)
+            .into_iter()
+            .find(|v| idx.es_particle_variant_exists(v))
+            .unwrap();
+        let candidate = idx.query_feats_d(&variant, 3, 0, None, None, None, false, None);
+        let first = &candidate[0].0;
+        assert_eq!(first.precision, "house");
+        assert_eq!(
+            Index::es_particle_street_key(&first.street, false),
+            Index::es_particle_street_key(raw, true)
+        );
+        assert!(Index::es_particle_preserves_commune(
+            raw,
+            Some(&original[0].0),
+            first
+        ));
+        assert_eq!(
+            (original[0].0.lat, original[0].0.lon),
+            (first.lat, first.lon)
+        );
+        assert_eq!(original[0].0.housenumber, first.housenumber);
+        assert!(original[0].0.confidence > first.confidence);
+        let actual = idx.query_feats_country_variants(raw, 3, None);
+        assert_eq!(es_observer_hits(&actual), es_observer_hits(&original));
+        assert_eq!(
+            actual.iter().map(|v| v.1).collect::<Vec<_>>(),
+            original.iter().map(|v| v.1).collect::<Vec<_>>()
+        );
+    }
+
+    fn es_same_point_hit(confidence: f32, score: f32) -> Hit {
+        let mut result = hit("house", confidence, vec![]);
+        result.lat = 40.4;
+        result.lon = -3.7;
+        result.housenumber = Some("1".into());
+        result.score = score;
+        result
+    }
+
+    #[test]
+    fn es_same_point_higher_candidate_wins_despite_lower_score() {
+        let original = es_same_point_hit(0.6, 10.0);
+        let candidate = es_same_point_hit(0.94, 5.0);
+        assert!(!Index::es_particle_keep_original(
+            Some(&original),
+            &candidate
+        ));
+    }
+
+    #[test]
+    fn es_same_point_equal_confidence_keeps_original_despite_lower_score() {
+        let original = es_same_point_hit(0.94, 5.0);
+        let candidate = es_same_point_hit(0.94, 10.0);
+        assert!(Index::es_particle_keep_original(
+            Some(&original),
+            &candidate
+        ));
+    }
+
+    #[test]
+    fn es_same_point_different_house_uses_candidate() {
+        let original = es_same_point_hit(0.94, 10.0);
+        let mut candidate = es_same_point_hit(0.6, 5.0);
+        candidate.housenumber = Some("1A".into());
+        assert!(!Index::es_particle_keep_original(
+            Some(&original),
+            &candidate
+        ));
+    }
+
+    #[test]
+    fn es_same_point_lat_five_metres_uses_candidate() {
+        let original = es_same_point_hit(0.94, 10.0);
+        let mut candidate = es_same_point_hit(0.6, 5.0);
+        candidate.lat += 0.000045;
+        assert!(!Index::es_particle_keep_original(
+            Some(&original),
+            &candidate
+        ));
+    }
+
+    #[test]
+    fn es_same_point_lon_five_metres_uses_candidate() {
+        let original = es_same_point_hit(0.94, 10.0);
+        let mut candidate = es_same_point_hit(0.6, 5.0);
+        candidate.lon += 0.000059;
+        assert!(!Index::es_particle_keep_original(
+            Some(&original),
+            &candidate
+        ));
+    }
+
+    #[test]
+    fn es_same_point_empty_original_uses_candidate() {
+        let candidate = es_same_point_hit(0.6, 5.0);
+        assert!(!Index::es_particle_keep_original(None, &candidate));
     }
 }

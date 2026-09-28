@@ -50,6 +50,9 @@ ADDRESS_LICENSE = {
     # FR is built by prep/normalize.py; MC (smoke) is OSM/ODbL and set in prep/osm.py
     "fr": {"provider": "Base Adresse Nationale (BAN), adresse.data.gouv.fr",
            "license": "Licence Ouverte / Open Licence 2.0 (Etalab 2.0)"},
+    # IGN licence §4 and the CNIG CartoCiudad product catalogue, verified 2026-09-12.
+    "es": {"provider": "CartoCiudad (scne.es)",
+           "license": "CC BY 4.0"},
 }
 S3 = f"s3://overturemaps-us-west-2/release/{RELEASE}/theme=addresses/type=*/*.parquet"
 
@@ -59,7 +62,22 @@ NORM = ("trim(regexp_replace(regexp_replace(replace(strip_accents(lower({col})),
 
 def release_for_country(cc: str) -> str:
     """Keep the DE evidence pin independent of the older country sheets."""
+    if cc.lower() == "es":
+        return "2026-08-19.0"
     return DE_RELEASE if cc.lower() == "de" else RELEASE
+
+
+def connect_for_country(cc: str, offline_extensions: bool = False):
+    """Bound ES working storage explicitly, without changing established country runs."""
+    if cc.upper() != "ES":
+        return connect_tuned(disable_extension_autoload=offline_extensions)
+    con = connect_tuned(
+        temp_directory=CODE / "data" / "es_build" / "tmp_duck",
+        max_temp_directory_size_bytes=8 * 1024**3,
+        disable_extension_autoload=offline_extensions,
+    )
+    con.execute("SET memory_limit='3GiB'")
+    return con
 
 
 def s3_for_release(release: str, cc: str | None = None) -> str:
@@ -96,7 +114,7 @@ def address_manifest(cc: str, geonames: bool = False, release: str | None = None
     if geonames:  # settlement aliases (Serbia)
         sources_str += "; settlement names: GeoNames (CC BY 4.0)"
         attribution += "; settlement names © GeoNames (CC BY 4.0)"
-    return {
+    result = {
         "country": country,
         "layer": "addresses",
         "license": lic["license"],
@@ -104,6 +122,13 @@ def address_manifest(cc: str, geonames: bool = False, release: str | None = None
         "source_release": selected_release,
         "attribution": attribution,
     }
+    if country == "es":
+        result["attribution"] = (
+            "Obra derivada de CartoCiudad CC-BY 4.0 scne.es; "
+            f"via Overture Maps / OpenAddresses, release {selected_release}; "
+            "address normalization applied"
+        )
+    return result
 
 
 def assert_no_copyleft(cc, sources):
@@ -372,7 +397,7 @@ def main(argv: list[str] | None = None) -> None:
     out_parquet = CODE / "data" / f"{cc.lower()}_norm.parquet"
 
     t0 = time.time()
-    con = connect_tuned(disable_extension_autoload=args.offline_extensions)
+    con = connect_for_country(cc, args.offline_extensions)
     load_extensions(con, args.offline_extensions)
     con.execute("SET s3_region='us-west-2';")
     con.execute("SET http_timeout=120000;")   # the network can be flaky

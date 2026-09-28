@@ -1,6 +1,8 @@
 //! CLI integration tests: drive the built `gridpin` binary end to end. These cover
 //! the batch paths (windowed streaming, malformed exit code) that unit tests cannot
 //! reach — the coverage-gap map flagged them as never exercised.
+use gridpin::builder;
+use gridpin::query::Index;
 use std::io::Write;
 use std::process::Command;
 
@@ -849,4 +851,1770 @@ fn huge_reverse_k_is_capped_on_every_interface() {
         "reverse must cap k at MAX_K=100, got {rows} rows"
     );
     assert!(rows > 0, "the cap must not silence real results");
+}
+
+#[test]
+fn batch_diagnosis_observes_empty_and_nonempty_without_changing_results() {
+    let dir = tmpdir("diagnosis-observer");
+    let sheet = build_sheet(&dir);
+    let input = dir.join("queries.jsonl");
+    // Repeat alternating requests to exercise per-line isolation on Rayon workers.
+    let queries = [
+        r#"{"q":"1 rue a ville 10000"}"#,
+        r#"{"q":"qzxwvutqqqq ville"}"#,
+        r#"{"q":"qzxwvutqqqq zxqwvttqqqq"}"#,
+        r#"{"street":"rue a","housenumber":"1","city":"ville","postcode":"10000"}"#,
+    ];
+    std::fs::write(&input, (0..32).map(|i| queries[i % 4]).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+    let run = |name: &str, diagnose: bool, threads: &str| {
+        let output = dir.join(name);
+        let mut cmd = Command::new(BIN);
+        cmd.args(["batch", sheet.to_str().unwrap(), input.to_str().unwrap(), output.to_str().unwrap(), "-k", "3"]);
+        if diagnose { cmd.arg("--diagnose"); }
+        let status = cmd.env("GRIDPIN_THREADS", threads).output().unwrap();
+        assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
+        std::fs::read_to_string(output).unwrap()
+    };
+    let plain = run("plain.jsonl", false, "1");
+    let diagnostic = run("diagnostic.jsonl", true, "4");
+    let single = run("single.jsonl", true, "1");
+    assert_eq!(diagnostic, single, "trace leaked between workers or requests");
+    assert_eq!(plain.lines().count(), 32);
+    for (i, (before, after)) in plain.lines().zip(diagnostic.lines()).enumerate() {
+        let value: serde_json::Value = serde_json::from_str(after).unwrap();
+        let results = &value["results"];
+        assert_eq!(before, serde_json::json!({"results": results}).to_string(), "results bytes changed at {i}");
+        let normal: serde_json::Value = serde_json::from_str(before).unwrap();
+        assert_eq!(normal.as_object().unwrap().len(), 1, "flag-off schema changed");
+        let trace = &value["diagnosis"];
+        assert!(trace.is_object());
+        let stage = trace["stop_stage"].as_str().expect("missing stop_stage");
+        assert!(!stage.is_empty());
+        if i % 4 == 0 || i % 4 == 3 {
+            assert!(!results.as_array().unwrap().is_empty());
+            assert_eq!(stage, "returned");
+            assert!(trace["street_candidates"]["count"].as_u64().unwrap() > 0);
+            assert!(trace["house_candidates"]["resolved_count"].as_u64().unwrap() > 0);
+            assert!(trace["before_threshold"]["count"].as_u64().unwrap() > 0);
+            assert_eq!(results[0]["precision"], "house");
+            assert_eq!(results[0]["housenumber"], "1");
+        } else {
+            assert!(results.as_array().unwrap().is_empty());
+            assert_ne!(stage, "returned");
+            assert_eq!(trace["street_candidates"]["count"], 0);
+            assert_eq!(trace["before_threshold"]["count"], 0);
+        }
+    }
+}
+
+#[test]
+fn prefix_place_centroid_excludes_distant_places_from_strongest_anchor() {
+    let dir = tmpdir("prefix-place-centroid");
+    let csv = dir.join("places.csv");
+    let mut rows = String::from(HDR);
+    // The strongest entry is neither first nor last in name order.
+    for (code, place, count, lat, lon) in [
+        ("001", "testoria alpha", 1, 43.0, 7.0),
+        ("002", "testoria middle", 5, 48.0, 2.0),
+        ("003", "testoria omega", 2, 45.0, 10.0),
+    ] {
+        for number in 1..=count {
+            rows.push_str(&format!(
+                "road,{code},{place},10000,{number},,{lon},{lat},Road,{place}\n"
+            ));
+        }
+    }
+    std::fs::write(&csv, rows).unwrap();
+    let sheet = dir.join("places.bin");
+    let build = Command::new(BIN)
+        .args(["build", csv.to_str().unwrap(), sheet.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let query = Command::new(BIN)
+        .args(["query", sheet.to_str().unwrap(), "testoria", "-k", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        query.status.success(),
+        "{}",
+        String::from_utf8_lossy(&query.stderr)
+    );
+    let text = String::from_utf8(query.stdout).unwrap();
+    let hit: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(hit["precision"], "city");
+    assert!(
+        (hit["lat"].as_f64().unwrap() - 48.0).abs() < 1e-9
+            && (hit["lon"].as_f64().unwrap() - 2.0).abs() < 1e-9,
+        "prefix centroid must equal the strongest anchor, not the mean of distant places: {hit}"
+    );
+}
+
+#[test]
+fn exact_place_anchor_survives_a_distant_stronger_prefix_group() {
+    let dir = tmpdir("exact-place-anchor");
+    let csv = dir.join("places.csv");
+    let mut rows = String::from(HDR);
+    for (code, place, count, lat, lon) in [
+        ("001", "testoria minor", 2, 48.0, 2.0),
+        ("002", "testoria major", 5, 43.0, 7.0),
+        ("003", "umbrella", 10, 43.01, 7.01),
+    ] {
+        for number in 1..=count {
+            rows.push_str(&format!(
+                "road,{code},{place},10000,{number},,{lon},{lat},Road,{place}\n"
+            ));
+        }
+    }
+    std::fs::write(&csv, rows).unwrap();
+    let sheet = dir.join("places.bin");
+    let build = Command::new(BIN)
+        .args(["build", csv.to_str().unwrap(), sheet.to_str().unwrap()])
+        .output().unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    for (q, lat, lon) in [
+        ("Unknown venue, testoria, testoria minor", 48.0, 2.0),
+        // An exact, stronger umbrella still excludes the distant exact namesake.
+        ("Unknown venue, testoria minor, umbrella", 43.01, 7.01),
+    ] {
+        let output = Command::new(BIN)
+            .args(["query", sheet.to_str().unwrap(), q, "-k", "1"])
+            .output().unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        let hit: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(hit["precision"], "city");
+        assert!((hit["lat"].as_f64().unwrap() - lat).abs() < 1e-9
+            && (hit["lon"].as_f64().unwrap() - lon).abs() < 1e-9,
+            "wrong place anchor for {q}: {hit}");
+    }
+}
+
+
+// Queries are existing development-corpus inputs; tiny sheets isolate the two
+// resolution branches without depending on installed country data.
+fn place_provenance_query(tag: &str, commune: &str, query: &str) -> serde_json::Value {
+    let dir = tmpdir(tag);
+    let csv = dir.join("places.csv");
+    std::fs::write(&csv, format!("{HDR}road,001,{commune},10000,1,,2.0,48.0,Road,{commune}\n")).unwrap();
+    let sheet = dir.join("places.bin");
+    let build = Command::new(BIN)
+        .args(["build", csv.to_str().unwrap(), sheet.to_str().unwrap()])
+        .output().unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let out = Command::new(BIN)
+        .args(["query", sheet.to_str().unwrap(), query, "-k", "1"])
+        .output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let hit: serde_json::Value = serde_json::from_str(text.lines().next().expect("city hit")).unwrap();
+    assert_eq!(hit["precision"], "city");
+    assert_eq!(hit["lat"], 48.0);
+    assert_eq!(hit["lon"], 2.0);
+    hit
+}
+
+#[test]
+fn place_provenance_exact_name() {
+    // ES Wikidata row 1506: the fallback must carry the selected exact name.
+    let hit = place_provenance_query("place-exact-flag", "santa eulalia",
+        "Santiago Ramon y Cajal, s/n, Santa Eul\u{00e0}lia");
+    assert_eq!(hit["flags"], serde_json::json!(["place_exact"]));
+}
+
+#[test]
+fn place_provenance_prefix_group() {
+    // FR Wikidata row 1496: the query names only the commune prefix.
+    let hit = place_provenance_query("place-prefix-flag", "entremont le vieux", "Entremont");
+    assert_eq!(hit["flags"], serde_json::json!(["place_prefix_group"]));
+}
+
+fn guard_drop_sheet(name: &str) -> std::path::PathBuf {
+    let dir = tmpdir(name);
+    let csv = dir.join("in.csv");
+    std::fs::write(
+        &csv,
+        format!("{HDR}rue rivoli,001,ville,10000,1,,2.35,48.86,Rue Rivoli,Ville\n"),
+    )
+    .unwrap();
+    let meta = dir.join("meta.json");
+    std::fs::write(
+        &meta,
+        r#"{"country":"fr","layer":"addresses","license":"test","source_release":"test"}"#,
+    )
+    .unwrap();
+    let sheet = dir.join("sheet.bin");
+    let built = Command::new(BIN)
+        .args([
+            "build",
+            csv.to_str().unwrap(),
+            sheet.to_str().unwrap(),
+            "--meta",
+            meta.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    sheet
+}
+
+// The foreign Zqx street prevents the full query from bypassing the drop guards.
+// After one drop Cannes yields a fuzzy local street; after two, Alpha Beta is exact.
+fn guard_drop_longer_prefix_sheet(name: &str, houses: &[u32]) -> std::path::PathBuf {
+    let dir = tmpdir(name);
+    let csv = dir.join("in.csv");
+    let mut rows = HDR.to_string();
+    for (i, number) in houses.iter().enumerate() {
+        rows.push_str(&format!(
+            "alpha beta,06029,cannes,06400,{number},,{},{},Alpha Beta,Cannes\n",
+            7.017 + i as f64 * 0.0001,
+            43.553 + i as f64 * 0.0001,
+        ));
+    }
+    rows.push_str(
+        "rue de cannes,06029,cannes,06400,2,,6.971133,43.553354,Rue de Cannes,Cannes\n\
+         zqx,75056,paris,75000,2,,2.35,48.86,Zqx,Paris\n",
+    );
+    std::fs::write(&csv, rows).unwrap();
+    let meta = dir.join("meta.json");
+    std::fs::write(
+        &meta,
+        r#"{"country":"fr","layer":"addresses","license":"test","source_release":"test"}"#,
+    )
+    .unwrap();
+    let sheet = dir.join("sheet.bin");
+    let built = Command::new(BIN)
+        .args([
+            "build",
+            csv.to_str().unwrap(),
+            sheet.to_str().unwrap(),
+            "--meta",
+            meta.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    sheet
+}
+
+fn guard_drop_assert_local_prefix_premise(
+    hit: &serde_json::Value,
+    street: &str,
+    precision: &str,
+    exact: bool,
+) {
+    assert_eq!(hit["street"], street, "{hit}");
+    assert_eq!(hit["precision"], precision, "{hit}");
+    let flags = hit["flags"].as_array().unwrap();
+    for flag in [
+        "commune_exact",
+        "pc_exact",
+        if exact {
+            "street_exact"
+        } else {
+            "street_fuzzy"
+        },
+    ] {
+        assert!(flags.iter().any(|f| f == flag), "missing {flag}: {hit}");
+    }
+    assert!(
+        !flags
+            .iter()
+            .any(|f| f == "dropped_prefix" || f == "dropped_suffix"),
+        "{hit}"
+    );
+}
+
+fn guard_drop_longer_prefix_pair(
+    name: &str,
+    houses: &[u32],
+    number: u32,
+    street_query: &str,
+    precision: &str,
+    exact: bool,
+    longer_wins: bool,
+) {
+    let sheet = guard_drop_longer_prefix_sheet(name, houses);
+    let remainder = format!("{number} {street_query} 06400 Cannes");
+    let first = guard_drop_query(&sheet, &format!("Cannes {remainder}"));
+    let longer = guard_drop_query(&sheet, &remainder);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!(longer.len(), 1, "{longer:?}");
+    guard_drop_assert_local_prefix_premise(
+        &first[0],
+        "Rue de Cannes",
+        if number == 2 { "house" } else { "near" },
+        false,
+    );
+    guard_drop_assert_local_prefix_premise(&longer[0], "Alpha Beta", precision, exact);
+    let hits = guard_drop_query(&sheet, &format!("zqx Cannes {remainder}"));
+    let mut expected = if longer_wins {
+        longer[0].clone()
+    } else {
+        first[0].clone()
+    };
+    let confidence = expected["confidence"].as_f64().unwrap().min(0.6);
+    expected["confidence"] = serde_json::json!(confidence);
+    expected["flags"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("dropped_prefix"));
+    assert_eq!(
+        hits,
+        vec![expected],
+        "the first bypass must survive unless the longer drop passes the ordinary guard"
+    );
+}
+
+#[test]
+fn guard_drop_longer_prefix_exact_house_overrides_first_bypass() {
+    guard_drop_longer_prefix_pair(
+        "guard-drop-longer-house",
+        &[2],
+        2,
+        "Alpha Beta",
+        "house",
+        true,
+        true,
+    );
+}
+
+#[test]
+fn guard_drop_longer_prefix_fuzzy_house_keeps_first_bypass() {
+    guard_drop_longer_prefix_pair(
+        "guard-drop-longer-fuzzy",
+        &[2],
+        2,
+        "Alpha Btea",
+        "house",
+        false,
+        false,
+    );
+}
+
+#[test]
+fn guard_drop_longer_prefix_interpolation_keeps_first_bypass() {
+    guard_drop_longer_prefix_pair(
+        "guard-drop-longer-interp",
+        &[1, 3],
+        2,
+        "Alpha Beta",
+        "interp",
+        true,
+        false,
+    );
+}
+
+#[test]
+fn guard_drop_longer_prefix_nearest_house_keeps_first_bypass() {
+    guard_drop_longer_prefix_pair(
+        "guard-drop-longer-near",
+        &[1, 99],
+        50,
+        "Alpha Beta",
+        "near",
+        true,
+        false,
+    );
+}
+
+// The first remainder finds Rue de Cannes through the locality bypass. Zqx in
+// Paris blocks a direct answer to the full query, keeping the prefix loop live.
+fn guard_drop_deferred_branch_sheet(
+    name: &str,
+    street_type: bool,
+    umbrella: Option<&str>,
+) -> std::path::PathBuf {
+    let dir = tmpdir(name);
+    let target = if street_type {
+        "rue alpha beta"
+    } else {
+        "alpha beta"
+    };
+    let display = if street_type {
+        "Rue Alpha Beta"
+    } else {
+        "Alpha Beta"
+    };
+    let mut rows = vec![
+        format!("{target},06029,cannes,06400,2,,7.017,43.553,{display},Cannes"),
+        "rue de cannes,06029,cannes,06400,2,,6.971133,43.553354,Rue de Cannes,Cannes".into(),
+        "zqx,75056,paris,75000,2,,2.35,48.86,Zqx,Paris".into(),
+    ];
+    if let Some(commune) = umbrella {
+        rows.push(format!(
+            "omega,99001,{commune},99900,1,,2.4,48.9,Omega,{commune}"
+        ));
+    }
+    rows.sort();
+    let csv = dir.join("in.csv");
+    std::fs::write(&csv, format!("{HDR}{}\n", rows.join("\n"))).unwrap();
+    let meta = dir.join("meta.json");
+    std::fs::write(
+        &meta,
+        r#"{"country":"fr","layer":"addresses","license":"test","source_release":"test"}"#,
+    )
+    .unwrap();
+    let sheet = dir.join("sheet.bin");
+    let built = Command::new(BIN)
+        .args([
+            "build",
+            csv.to_str().unwrap(),
+            sheet.to_str().unwrap(),
+            "--meta",
+            meta.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    sheet
+}
+
+fn guard_drop_deferred_branch_pair(
+    name: &str,
+    street_type: bool,
+    umbrella: Option<&str>,
+    exact: bool,
+    longer_wins: bool,
+    penalized: bool,
+) {
+    let sheet = guard_drop_deferred_branch_sheet(name, street_type, umbrella);
+    let target = if street_type {
+        "Rue Alpha Beta"
+    } else {
+        "Alpha Beta"
+    };
+    let query_street = if exact {
+        target.to_string()
+    } else {
+        target.replace("Beta", "Btea")
+    };
+    let remainder = format!("{query_street} 06400 Cannes");
+    let first = guard_drop_query(&sheet, &format!("Cannes {remainder}"));
+    let longer = guard_drop_query(&sheet, &remainder);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!(longer.len(), 1, "{longer:?}");
+    guard_drop_assert_local_prefix_premise(&first[0], "Rue de Cannes", "street", false);
+    guard_drop_assert_local_prefix_premise(&longer[0], target, "street", exact);
+    // Distinct public outcomes prevent a vacuous priority check; neither is a house.
+    assert!(first[0]["housenumber"].is_null(), "{first:?}");
+    assert!(longer[0]["housenumber"].is_null(), "{longer:?}");
+    assert_eq!(first[0]["lat"], serde_json::json!(43.553354));
+    assert_eq!(first[0]["lon"], serde_json::json!(6.971133));
+    assert_eq!(longer[0]["lat"], serde_json::json!(43.553));
+    assert_eq!(longer[0]["lon"], serde_json::json!(7.017));
+    let hits = guard_drop_query(&sheet, &format!("zqx Cannes {remainder}"));
+    let mut expected = if longer_wins {
+        longer[0].clone()
+    } else {
+        first[0].clone()
+    };
+    if penalized {
+        expected["confidence"] =
+            serde_json::json!(expected["confidence"].as_f64().unwrap().min(0.6));
+        expected["flags"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("dropped_prefix"));
+    } else {
+        // An exact umbrella must retain the direct answer's uncapped confidence.
+        assert!(expected["confidence"].as_f64().unwrap() > 0.6, "{expected}");
+    }
+    assert_eq!(hits, vec![expected], "deferred prefix branch: {name}");
+}
+
+#[test]
+fn guard_drop_deferred_exact_street_after_type_overrides_first_bypass() {
+    guard_drop_deferred_branch_pair("guard-drop-deferred-type", true, None, true, true, true);
+}
+
+#[test]
+fn guard_drop_deferred_fuzzy_street_after_type_keeps_first_bypass() {
+    guard_drop_deferred_branch_pair(
+        "guard-drop-deferred-type-fuzzy",
+        true,
+        None,
+        false,
+        false,
+        true,
+    );
+}
+
+#[test]
+fn guard_drop_deferred_exact_commune_overrides_without_penalty() {
+    guard_drop_deferred_branch_pair(
+        "guard-drop-deferred-commune",
+        false,
+        Some("zqx cannes"),
+        true,
+        true,
+        false,
+    );
+}
+
+#[test]
+fn guard_drop_deferred_prefix_only_commune_keeps_first_bypass() {
+    guard_drop_deferred_branch_pair(
+        "guard-drop-deferred-commune-prefix",
+        false,
+        Some("zqx cannes nord"),
+        true,
+        false,
+        true,
+    );
+}
+
+#[test]
+fn guard_drop_deferred_second_locality_bypass_keeps_first() {
+    guard_drop_deferred_branch_pair("guard-drop-deferred-second", false, None, true, false, true);
+}
+
+fn guard_drop_tail_priority_sheet(name: &str, with_house: bool) -> std::path::PathBuf {
+    guard_drop_tail_locality_sheet(
+        name,
+        with_house.then_some(("37261", "tours", "37000", "Tours")),
+    )
+}
+
+fn guard_drop_tail_locality_sheet(
+    name: &str,
+    house_locality: Option<(&str, &str, &str, &str)>,
+) -> std::path::PathBuf {
+    let dir = tmpdir(name);
+    let csv = dir.join("in.csv");
+    // N3 uses a prefix-only earlier locality (Tour), while the final Tours
+    // still gives the prefix bypass an exact locality. Its fallback street
+    // contains Tour, so the prefix bypass is reached before the tail pass.
+    let prefix_only = house_locality.is_some_and(|(_, key, _, _)| key == "tours nord");
+    let fallback = if prefix_only { "tour" } else { "tours" };
+    let fallback_display = if prefix_only { "Tour" } else { "Tours" };
+    let mut rows = format!(
+        "{HDR}place gregoire de {fallback},37261,tours,37000,1,,0.695386,47.3957945,Place Gregoire de {fallback_display},Tours\n"
+    );
+    // The foreign street contains every word of the repeated-tail parse, so its
+    // subset intersection fails the Tours locality filter. Neither variant may
+    // answer before the drop guards; the shortened exact street remains local.
+    if let Some((code, key, postcode, display)) = house_locality {
+        rows.push_str(&format!(
+            "rue victor hugo,{code},{key},{postcode},10,,0.688152,47.389005,Rue Victor Hugo,{display}\n",
+        ));
+    }
+    rows.push_str(
+        "rue victor hugo tour tours,75056,paris,75000,10,,2.35,48.86,Rue Victor Hugo Tour Tours,Paris\n",
+    );
+    rows.push_str(
+        "rue victor hugo tours,75056,paris,75000,10,,2.35,48.86,Rue Victor Hugo Tours,Paris\n",
+    );
+    std::fs::write(&csv, rows).unwrap();
+    let meta = dir.join("meta.json");
+    std::fs::write(
+        &meta,
+        r#"{"country":"fr","layer":"addresses","license":"test","source_release":"test"}"#,
+    )
+    .unwrap();
+    let sheet = dir.join("sheet.bin");
+    let built = Command::new(BIN)
+        .args([
+            "build",
+            csv.to_str().unwrap(),
+            sheet.to_str().unwrap(),
+            "--meta",
+            meta.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    sheet
+}
+
+#[test]
+fn guard_drop_defers_locality_bypass_to_exact_tail_house() {
+    let sheet = guard_drop_tail_priority_sheet("guard-drop-tail-house", true);
+    let hits = guard_drop_query(
+        &sheet,
+        "10 rue Victor Hugo, 37000 Tours, France, Tours, France",
+    );
+    assert_eq!(hits.len(), 1);
+    let hit = &hits[0];
+    assert_eq!(hit["precision"], "house", "{hit}");
+    assert_eq!(hit["street"], "Rue Victor Hugo", "{hit}");
+    assert_eq!(hit["housenumber"], "10", "{hit}");
+    let flags = hit["flags"].as_array().unwrap();
+    for flag in [
+        "street_exact",
+        "commune_exact",
+        "pc_exact",
+        "dropped_suffix",
+    ] {
+        assert!(flags.iter().any(|f| f == flag), "missing {flag}: {hit}");
+    }
+    assert!(!flags.iter().any(|f| f == "dropped_prefix"), "{hit}");
+}
+
+#[test]
+fn guard_drop_keeps_locality_bypass_when_tail_has_no_house() {
+    let sheet = guard_drop_tail_priority_sheet("guard-drop-tail-no-house", false);
+    let hits = guard_drop_query(
+        &sheet,
+        "10 rue Victor Hugo, 37000 Tours, France, Tours, France",
+    );
+    assert_eq!(hits.len(), 1);
+    let hit = &hits[0];
+    assert_eq!(hit["precision"], "street", "{hit}");
+    assert_eq!(hit["street"], "Place Gregoire de Tours", "{hit}");
+    let flags = hit["flags"].as_array().unwrap();
+    for flag in [
+        "street_fuzzy",
+        "commune_exact",
+        "pc_exact",
+        "dropped_prefix",
+    ] {
+        assert!(flags.iter().any(|f| f == flag), "missing {flag}: {hit}");
+    }
+    assert!(!flags.iter().any(|f| f == "dropped_suffix"), "{hit}");
+}
+
+fn guard_drop_assert_weak_tail_keeps_prefix(name: &str, locality: (&str, &str, &str, &str)) {
+    let sheet = guard_drop_tail_locality_sheet(name, Some(locality));
+    let query = if locality.1 == "tours nord" {
+        "10 rue Victor Hugo, 37000 Tour, France, Tours, France"
+    } else {
+        "10 rue Victor Hugo, 37000 Tours, France, Tours, France"
+    };
+    let hits = guard_drop_query(&sheet, query);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    let hit = &hits[0];
+    let fallback_street = if locality.1 == "tours nord" {
+        "Place Gregoire de Tour"
+    } else {
+        "Place Gregoire de Tours"
+    };
+    assert_eq!(hit["street"], fallback_street, "{hit}");
+    assert_eq!(hit["commune"], "Tours", "{hit}");
+    assert_eq!(hit["postcode"], "37000", "{hit}");
+    let flags = hit["flags"].as_array().unwrap();
+    for flag in ["commune_exact", "pc_exact", "dropped_prefix"] {
+        assert!(flags.iter().any(|f| f == flag), "missing {flag}: {hit}");
+    }
+    assert!(!flags.iter().any(|f| f == "dropped_suffix"), "{hit}");
+}
+
+#[test]
+fn guard_drop_tail_exact_commune_department_postcode_keeps_prefix() {
+    guard_drop_assert_weak_tail_keeps_prefix(
+        "guard-drop-tail-commune-exact-pc-dept",
+        ("37261", "tours", "37100", "Tours"),
+    );
+}
+
+#[test]
+fn guard_drop_tail_exact_commune_without_postcode_keeps_prefix() {
+    guard_drop_assert_weak_tail_keeps_prefix(
+        "guard-drop-tail-commune-exact-no-pc",
+        ("37261", "tours", "0", "Tours"),
+    );
+}
+
+#[test]
+fn guard_drop_tail_prefix_commune_exact_postcode_keeps_prefix() {
+    guard_drop_assert_weak_tail_keeps_prefix(
+        "guard-drop-tail-commune-prefix-pc-exact",
+        ("37262", "tours nord", "37000", "Tours Nord"),
+    );
+}
+
+#[test]
+fn guard_drop_tail_no_commune_department_postcode_keeps_prefix() {
+    guard_drop_assert_weak_tail_keeps_prefix(
+        "guard-drop-tail-no-commune-pc-dept",
+        ("37263", "courtry", "37100", "Courtry"),
+    );
+}
+
+fn guard_drop_de_subaddress_priority_sheet(name: &str, with_campus_e: bool) -> std::path::PathBuf {
+    let dir = tmpdir(name);
+    let csv = dir.join("in.csv");
+    let mut rows = vec![
+        "campus a,10041,saarbrucken,66123,11,,7.037,49.252,Campus A,Saarbrücken",
+        "campus aufgang b,10041,saarbrucken,66123,3,,7.036,49.251,Campus Aufgang B,Saarbrücken",
+        "campus b,10041,saarbrucken,66123,1,,7.037,49.252,Campus B,Saarbrücken",
+        "campus b,10041,saarbrucken,66123,9,,7.039,49.253,Campus B,Saarbrücken",
+        "campus c,10041,saarbrucken,66123,11,,7.041,49.254,Campus C,Saarbrücken",
+        "campus d,10041,saarbrucken,66123,11,,7.043,49.255,Campus D,Saarbrücken",
+    ];
+    if with_campus_e {
+        rows.push("campus e,10041,saarbrucken,66123,11,,7.045,49.256,Campus E,Saarbrücken");
+    }
+    std::fs::write(&csv, format!("{HDR}{}\n", rows.join("\n"))).unwrap();
+    let meta = dir.join("meta.json");
+    std::fs::write(
+        &meta,
+        r#"{"country":"de","layer":"addresses","license":"test","source_release":"test"}"#,
+    )
+    .unwrap();
+    let sheet = dir.join("sheet.bin");
+    let rank = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ml/rank_v0.bin");
+    let built = Command::new(BIN)
+        .args([
+            "build",
+            csv.to_str().unwrap(),
+            sheet.to_str().unwrap(),
+            "--meta",
+            meta.to_str().unwrap(),
+            "--rank",
+            rank.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    sheet
+}
+
+#[test]
+fn guard_drop_de_subaddress_answer_beats_locality_only_prefix_bypass() {
+    let sheet = guard_drop_de_subaddress_priority_sheet("de-subaddress-priority", true);
+    let observed = guard_drop_diagnose(&sheet, "Campus E1 5, 66123 Saarbrücken, Aufgang B 3. OG");
+    let guards = observed["diagnosis"]["fallback_guards"]["examples"].as_array().unwrap();
+    assert!(guards.iter().any(|g| g["stage"] == "prefix_drop"
+        && g["evidence"]["house_exact"] == false
+        && g["evidence"]["dropped_is_commune"] == false
+        && g["evidence"]["street_after_type"] == false), "prefix bypass must actually be reached: {observed}");
+    let hits = observed["results"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0]["street"], "Campus E", "{hits:?}");
+    assert_eq!(hits[0]["housenumber"], "11", "{hits:?}");
+    assert!(
+        hits[0]["flags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "de_subaddress_tail"),
+        "{hits:?}"
+    );
+    assert!(
+        !hits[0]["flags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "dropped_prefix"),
+        "{hits:?}"
+    );
+}
+
+// The parser model is material here: without it this fixture takes a prefix
+// path and cannot observe the suffix guard's locality-only bypass.
+fn guard_drop_de_modeled_sheet(name: &str, rows: &[&str]) -> std::path::PathBuf {
+    let dir = tmpdir(name);
+    let csv = dir.join("in.csv");
+    let mut rows = rows.to_vec();
+    rows.sort_unstable();
+    std::fs::write(&csv, format!("{HDR}{}\n", rows.join("\n"))).unwrap();
+    let meta = dir.join("meta.json");
+    std::fs::write(
+        &meta,
+        r#"{"country":"de","layer":"addresses","license":"test","source_release":"test"}"#,
+    )
+    .unwrap();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let model = root.join("../ml/parser_v0.bin");
+    let rank = root.join("../ml/rank_v0.bin");
+    let sheet = dir.join("sheet.bin");
+    let built = Command::new(BIN)
+        .args([
+            "build",
+            csv.to_str().unwrap(),
+            sheet.to_str().unwrap(),
+            "--meta",
+            meta.to_str().unwrap(),
+            "--model",
+            model.to_str().unwrap(),
+            "--rank",
+            rank.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    sheet
+}
+
+fn guard_drop_diagnose(sheet: &std::path::Path, query: &str) -> serde_json::Value {
+    let dir = sheet.parent().unwrap();
+    let input = dir.join("diagnose-input.jsonl");
+    let output = dir.join("diagnose-output.jsonl");
+    std::fs::write(&input, format!("{}\n", serde_json::json!({"q": query}))).unwrap();
+    let run = Command::new(BIN)
+        .args([
+            "batch",
+            sheet.to_str().unwrap(),
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            "-k",
+            "5",
+            "--diagnose",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    serde_json::from_str(&std::fs::read_to_string(output).unwrap()).unwrap()
+}
+
+#[test]
+fn guard_drop_de_subaddress_beats_locality_only_suffix_at_guard_site() {
+    let sheet = guard_drop_de_modeled_sheet(
+        "guard-drop-de-suffix-site",
+        &[
+            "campus a,10041,saarbrucken,66123,11,,7.037,49.252,Campus A,Saarbrücken",
+            "campus b,10041,saarbrucken,66123,1,,7.037,49.252,Campus B,Saarbrücken",
+            "campus b,10041,saarbrucken,66123,9,,7.039,49.253,Campus B,Saarbrücken",
+            "campus c,10041,saarbrucken,66123,11,,7.041,49.254,Campus C,Saarbrücken",
+            "campus d,10041,saarbrucken,66123,11,,7.043,49.255,Campus D,Saarbrücken",
+            "campus e,10041,saarbrucken,66123,11,,7.045,49.256,Campus E,Saarbrücken",
+        ],
+    );
+    let observed = guard_drop_diagnose(&sheet, "Campus E1 5, 66123 Saarbrücken, Aufgang B 3. OG");
+    let guards = observed["diagnosis"]["fallback_guards"]["examples"]
+        .as_array()
+        .unwrap();
+    assert!(
+        guards.iter().any(|g| {
+            let evidence = &g["evidence"];
+            let flags = evidence["top"]["flags"].as_array();
+            g["stage"] == "suffix_drop"
+                && evidence["exact_street_noncity"] == false
+                && evidence["top"]["street"] == "Campus B"
+                && flags.is_some_and(|fs| {
+                    ["street_fuzzy", "commune_exact", "pc_exact"]
+                        .iter()
+                        .all(|f| fs.iter().any(|v| v == f))
+                })
+        }),
+        "suffix bypass must actually be reached: {observed}"
+    );
+    let hits = observed["results"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{observed}");
+    assert_eq!(hits[0]["street"], "Campus E", "{observed}");
+    assert_eq!(hits[0]["housenumber"], "11", "{observed}");
+    assert!(
+        hits[0]["flags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "de_subaddress_tail"),
+        "{observed}"
+    );
+}
+
+#[test]
+fn guard_drop_de_exact_suffix_keeps_priority_at_guard_site() {
+    let sheet = guard_drop_de_modeled_sheet(
+        "guard-drop-de-exact-suffix-site",
+        &[
+            "an der havel,12063,ketzin,14669,7,,12.9,52.5,An der Havel,Ketzin",
+            "rathausstrasse,12063,ketzin,14669,7,,12.8,52.4,Rathausstraße,Ketzin",
+        ],
+    );
+    let observed = guard_drop_diagnose(&sheet, "Rathausstraße 7, 14669 Ketzin/Havel");
+    let guards = observed["diagnosis"]["fallback_guards"]["examples"]
+        .as_array()
+        .unwrap();
+    assert!(
+        guards.iter().any(|g| g["stage"] == "suffix_drop"
+            && g["evidence"]["exact_street_noncity"] == true
+            && g["evidence"]["top"]["street"] == "Rathausstraße"),
+        "exact suffix must actually be reached: {observed}"
+    );
+    let hit = &observed["results"][0];
+    assert_eq!(hit["street"], "Rathausstraße", "{observed}");
+    assert_eq!(hit["housenumber"], "7", "{observed}");
+    assert_eq!(hit["precision"], "house", "{observed}");
+    for flag in [
+        "street_exact",
+        "commune_exact",
+        "pc_exact",
+        "dropped_suffix",
+    ] {
+        assert!(
+            hit["flags"].as_array().unwrap().iter().any(|f| f == flag),
+            "exact suffix must retain {flag}: {observed}"
+        );
+    }
+}
+
+#[test]
+fn guard_drop_de_exact_prefix_keeps_priority_at_guard_site() {
+    let sheet = guard_drop_de_modeled_sheet(
+        "guard-drop-de-exact-prefix-site",
+        &[
+            "dorfstrasse,10553,gransee,16775,29,,10.0553,50.0553,Dorfstraße,Gransee",
+            "unter den linden,10813,frankfurt am main,0,13,,10.0813,50.0813,Unter den Linden,Frankfurt am Main",
+        ],
+    );
+    let observed = guard_drop_diagnose(
+        &sheet,
+        "für den Empfang, Meseberger Dorfstraße 29, 16775 Gransee",
+    );
+    let guards = observed["diagnosis"]["fallback_guards"]["examples"]
+        .as_array()
+        .unwrap();
+    assert!(
+        guards.iter().any(|g| g["stage"] == "prefix_drop"
+            && g["evidence"]["house_exact"] == true
+            && g["evidence"]["dropped_is_commune"] == false
+            && g["evidence"]["top"]["street"] == "Dorfstraße"),
+        "exact prefix must actually be reached: {observed}"
+    );
+    let hit = &observed["results"][0];
+    assert_eq!(hit["street"], "Dorfstraße", "{observed}");
+    assert_eq!(hit["housenumber"], "29", "{observed}");
+    assert_eq!(hit["precision"], "house", "{observed}");
+    for flag in [
+        "street_exact",
+        "commune_exact",
+        "pc_exact",
+        "dropped_prefix",
+    ] {
+        assert!(
+            hit["flags"].as_array().unwrap().iter().any(|f| f == flag),
+            "exact prefix must retain {flag}: {observed}"
+        );
+    }
+}
+
+#[test]
+fn guard_drop_accepts_fuzzy_street_with_exact_commune_and_postcode() {
+    let sheet = guard_drop_sheet("guard-drop-both-exact");
+    for (query, dropped) in [
+        ("zqx rue rivloi 1 10000 ville", "dropped_prefix"),
+        ("rue rivloi 1 10000 ville zqx", "dropped_suffix"),
+    ] {
+        let out = Command::new(BIN)
+            .args(["query", sheet.to_str().unwrap(), query, "-k", "1"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8(out.stdout).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "{query}: exact locality must allow the fuzzy candidate"
+        );
+        let hit: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(hit["street"], "Rue Rivoli", "{query}");
+        assert_eq!(hit["commune"], "Ville", "{query}");
+        assert_eq!(hit["postcode"], "10000", "{query}");
+        assert_eq!(hit["precision"], "house", "{query}");
+        assert_eq!(hit["housenumber"], "1", "{query}");
+        let flags = hit["flags"].as_array().unwrap();
+        for flag in ["street_fuzzy", "commune_exact", "pc_exact", dropped] {
+            assert!(
+                flags.iter().any(|f| f == flag),
+                "{query}: missing {flag}: {hit}"
+            );
+        }
+        assert!(
+            !flags.iter().any(|f| f == "street_exact"),
+            "{query}: fixture must stay fuzzy"
+        );
+        assert!(
+            hit["confidence"].as_f64().unwrap() <= 0.6,
+            "{query}: drop must remain capped"
+        );
+    }
+}
+
+#[test]
+fn guard_drop_rejects_fuzzy_street_with_exact_commune_without_postcode() {
+    let sheet = guard_drop_sheet("guard-drop-commune-only");
+    for query in ["zqx rue rivloi 1 ville", "rue rivloi 1 ville zqx"] {
+        let out = Command::new(BIN)
+            .args(["query", sheet.to_str().unwrap(), query, "-k", "1"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.stdout.is_empty(),
+            "{query}: a commune alone must not bypass the guard: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+}
+
+#[test]
+fn guard_drop_rejects_fuzzy_street_with_exact_commune_and_department_postcode() {
+    let sheet = guard_drop_sheet("guard-drop-commune-dept");
+    for query in ["zqx rue rivloi 1 10001 ville", "rue rivloi 1 10001 ville zqx"] {
+        let out = Command::new(BIN)
+            .args(["query", sheet.to_str().unwrap(), query, "-k", "1"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.stdout.is_empty(),
+            "{query}: a department-only postcode must not bypass the guard: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+}
+
+fn guard_drop_typefree_sheet(name: &str) -> std::path::PathBuf {
+    let dir = tmpdir(name);
+    let csv = dir.join("in.csv");
+    std::fs::write(
+        &csv,
+        format!(
+            "{HDR}alpha beta,001,ville,10000,1,,2.35,48.86,Alpha Beta,Ville\n\
+             road,002,umbrella,20000,1,,4.35,45.86,Road,Umbrella\n"
+        ),
+    )
+    .unwrap();
+    let meta = dir.join("meta.json");
+    std::fs::write(
+        &meta,
+        r#"{"country":"fr","layer":"addresses","license":"test","source_release":"test"}"#,
+    )
+    .unwrap();
+    let sheet = dir.join("sheet.bin");
+    let built = Command::new(BIN)
+        .args([
+            "build",
+            csv.to_str().unwrap(),
+            sheet.to_str().unwrap(),
+            "--meta",
+            meta.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    sheet
+}
+
+fn guard_drop_query(sheet: &std::path::Path, query: &str) -> Vec<serde_json::Value> {
+    let out = Command::new(BIN)
+        .args(["query", sheet.to_str().unwrap(), query, "-k", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn guard_drop_rejects_exact_street_level_without_house_or_type() {
+    let sheet = guard_drop_typefree_sheet("guard-drop-typefree-street");
+    let direct = guard_drop_query(&sheet, "alpha beta");
+    assert_eq!(direct.len(), 1);
+    assert_eq!(direct[0]["precision"], "street");
+    assert_eq!(direct[0]["street"], "Alpha Beta");
+    assert!(direct[0]["flags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f == "street_exact"));
+    // The street is exact, but has neither a requested house nor a street-type word.
+    for query in ["zqx alpha beta", "zqx qzx alpha beta"] {
+        let hits = guard_drop_query(&sheet, query);
+        assert!(
+            hits.is_empty(),
+            "{query}: an untyped street cannot justify dropping a prefix: {hits:?}"
+        );
+    }
+}
+
+#[test]
+fn guard_drop_rejects_exact_postcode_with_near_commune() {
+    let sheet = guard_drop_sheet("guard-drop-postcode-near-commune");
+    let direct = guard_drop_query(&sheet, "rue rivloi 1 10000");
+    assert_eq!(direct.len(), 1);
+    let flags = direct[0]["flags"].as_array().unwrap();
+    assert!(flags.iter().any(|f| f == "street_fuzzy"));
+    assert!(flags.iter().any(|f| f == "pc_exact"));
+    assert!(!flags.iter().any(|f| f == "commune_exact"));
+    // Villo is a near miss of Ville, not an omitted locality or an exact commune.
+    for query in ["villo rue rivloi 1 10000", "rue rivloi 1 10000 villo"] {
+        let hits = guard_drop_query(&sheet, query);
+        assert!(
+            hits.is_empty(),
+            "{query}: an exact postcode alone cannot bypass the guard: {hits:?}"
+        );
+    }
+}
+
+#[test]
+fn guard_drop_never_discards_numeric_suffix() {
+    let sheet = guard_drop_typefree_sheet("guard-drop-numeric-tail");
+    let word_tail = guard_drop_query(&sheet, "alpha beta zqx");
+    assert_eq!(word_tail.len(), 1);
+    assert_eq!(word_tail[0]["precision"], "street");
+    let flags = word_tail[0]["flags"].as_array().unwrap();
+    assert!(flags.iter().any(|f| f == "street_exact"));
+    assert!(flags.iter().any(|f| f == "dropped_suffix"));
+    // A numeric postcode is address evidence, unlike the disposable word above.
+    for query in ["alpha beta 99999", "alpha beta ville 99999"] {
+        let hits = guard_drop_query(&sheet, query);
+        assert!(
+            hits.is_empty(),
+            "{query}: a numeric suffix must not be dropped: {hits:?}"
+        );
+    }
+}
+
+#[test]
+fn guard_drop_accepts_real_umbrella_commune_without_noise_penalty() {
+    let sheet = guard_drop_typefree_sheet("guard-drop-real-umbrella");
+    let dir = sheet.parent().unwrap();
+    let input = dir.join("queries.jsonl");
+    let output = dir.join("answers.jsonl");
+    std::fs::write(&input, "{\"q\":\"umbrella alpha beta\"}\n").unwrap();
+    let run = Command::new(BIN)
+        .args([
+            "batch",
+            sheet.to_str().unwrap(),
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            "-k",
+            "1",
+            "--diagnose",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let text = std::fs::read_to_string(output).unwrap();
+    let answer: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+    let hits = answer["results"].as_array().unwrap();
+    assert_eq!(
+        hits.len(),
+        1,
+        "a real umbrella commune must preserve the street: {answer}"
+    );
+    assert_eq!(hits[0]["street"], "Alpha Beta");
+    assert_eq!(hits[0]["commune"], "Ville");
+    assert_eq!(hits[0]["precision"], "street");
+    let flags = hits[0]["flags"].as_array().unwrap();
+    assert!(flags.iter().any(|f| f == "street_exact"));
+    assert!(!flags
+        .iter()
+        .any(|f| f == "dropped_prefix" || f == "dropped_suffix"));
+    let guards = answer["diagnosis"]["fallback_guards"]["examples"]
+        .as_array()
+        .unwrap();
+    assert!(
+        guards.iter().any(|g| {
+            g["stage"] == "prefix_drop"
+                && g["accepted"] == true
+                && g["evidence"]["dropped_is_commune"] == true
+                && g["evidence"]["house_exact"] == false
+                && g["evidence"]["street_after_type"] == false
+        }),
+        "the real-commune branch, not another attempt, must accept: {answer}"
+    );
+    let ordinary_output = dir.join("ordinary-answers.jsonl");
+    let ordinary_run = Command::new(BIN)
+        .args([
+            "batch",
+            sheet.to_str().unwrap(),
+            input.to_str().unwrap(),
+            ordinary_output.to_str().unwrap(),
+            "-k",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        ordinary_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ordinary_run.stderr)
+    );
+    let ordinary_text = std::fs::read_to_string(ordinary_output).unwrap();
+    let ordinary: serde_json::Value = serde_json::from_str(ordinary_text.trim()).unwrap();
+    assert_eq!(
+        ordinary["results"], answer["results"],
+        "diagnosis must not change the returned hits"
+    );
+}
+
+// The drop guard must use the first locality candidate even when a valid rank
+// section puts an exact house on a fuzzy, differently localized street first.
+fn guard_drop_ordered_sheet(name: &str) -> std::path::PathBuf {
+    let dir = tmpdir(name);
+    let csv = dir.join("in.csv");
+    std::fs::write(
+        &csv,
+        format!(
+            "{HDR}rue rivoli,001,ville,10000,2,,2.3502,48.8602,Rue Rivoli,Ville\n\
+             rue rivoli ville,002,autre,10001,1,,2.35,48.86,Rue Rivoli Ville,Autre\n"
+        ),
+    )
+    .unwrap();
+    let meta = dir.join("meta.json");
+    std::fs::write(
+        &meta,
+        r#"{"country":"fr","layer":"addresses","license":"test","source_release":"test"}"#,
+    )
+    .unwrap();
+    // Public --rank input, not a patched implementation. At house 1 the exact
+    // house scores 9 and the localized near-snap 7. At house 2 their order flips.
+    // Feature order: street exact/fuzzy, commune exact/prefix, postcode exact/dept,
+    // parser, house found/exact suffix, number present.
+    let weights = [3.0f32, 2.0, 3.0, 2.0, 2.0, 0.0, 0.0, 0.0, 6.0, 0.0];
+    let mut rank = b"GPRK".to_vec();
+    rank.push(weights.len() as u8);
+    rank.extend_from_slice(&0.0f32.to_le_bytes());
+    for weight in weights {
+        rank.extend_from_slice(&weight.to_le_bytes());
+    }
+    let rank_path = dir.join("rank.bin");
+    std::fs::write(&rank_path, rank).unwrap();
+    let sheet = dir.join("sheet.bin");
+    let built = Command::new(BIN)
+        .args([
+            "build",
+            csv.to_str().unwrap(),
+            sheet.to_str().unwrap(),
+            "--meta",
+            meta.to_str().unwrap(),
+            "--rank",
+            rank_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    sheet
+}
+
+fn guard_drop_query_k2(sheet: &std::path::Path, query: &str) -> Vec<serde_json::Value> {
+    // k=1 cannot distinguish first() from any(): both must see two candidates.
+    let out = Command::new(BIN)
+        .args(["query", sheet.to_str().unwrap(), query, "-k", "2"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn guard_drop_first_locality_pair_k2(name: &str, prefix: bool) {
+    let sheet = guard_drop_ordered_sheet(name);
+    let has_flag = |hit: &serde_json::Value, flag: &str| {
+        hit["flags"].as_array().unwrap().iter().any(|f| f == flag)
+    };
+    let direct = guard_drop_query_k2(&sheet, "rue rivloi 1 10000 ville");
+    assert_eq!(direct.len(), 2, "the near miss needs the second candidate");
+    assert_eq!(direct[0]["street"], "Rue Rivoli Ville");
+    assert_eq!(direct[0]["commune"], "Autre");
+    assert_eq!(direct[0]["precision"], "house");
+    assert_eq!(direct[1]["street"], "Rue Rivoli");
+    assert_eq!(direct[1]["commune"], "Ville");
+    assert_eq!(direct[1]["precision"], "near");
+    assert!(direct[0]["score"].as_f64().unwrap() > direct[1]["score"].as_f64().unwrap());
+    for hit in &direct {
+        assert!(has_flag(hit, "street_fuzzy"));
+        assert!(!has_flag(hit, "street_exact"));
+    }
+    for flag in ["commune_exact", "pc_exact"] {
+        assert!(
+            !has_flag(&direct[0], flag),
+            "first candidate has {flag}: {direct:?}"
+        );
+        assert!(
+            has_flag(&direct[1], flag),
+            "second candidate lacks {flag}: {direct:?}"
+        );
+    }
+    let (yes, no, dropped) = if prefix {
+        (
+            "zqx rue rivloi 2 10000 ville",
+            "zqx rue rivloi 1 10000 ville",
+            "dropped_prefix",
+        )
+    } else {
+        (
+            "rue rivloi 2 10000 ville zqx",
+            "rue rivloi 1 10000 ville zqx",
+            "dropped_suffix",
+        )
+    };
+    let accepted = guard_drop_query_k2(&sheet, yes);
+    assert_eq!(accepted.len(), 2, "{yes}: {accepted:?}");
+    assert_eq!(accepted[0]["commune"], "Ville");
+    assert_eq!(accepted[0]["housenumber"], "2");
+    for flag in ["street_fuzzy", "commune_exact", "pc_exact", dropped] {
+        assert!(
+            has_flag(&accepted[0], flag),
+            "{yes}: missing {flag}: {accepted:?}"
+        );
+    }
+    assert!(accepted.iter().all(|hit| !has_flag(hit, "street_exact")));
+    let rejected = guard_drop_query_k2(&sheet, no);
+    assert!(
+        rejected.is_empty(),
+        "{no}: a later locality match must not authorize the first: {rejected:?}"
+    );
+}
+
+#[test]
+fn guard_drop_prefix_uses_only_first_locality_candidate_k2() {
+    guard_drop_first_locality_pair_k2("guard-drop-prefix-first-k2", true);
+}
+
+#[test]
+fn guard_drop_suffix_uses_only_first_locality_candidate_k2() {
+    guard_drop_first_locality_pair_k2("guard-drop-suffix-first-k2", false);
+}
+
+#[test]
+fn guard_drop_rejects_interpolation_on_exact_untyped_street() {
+    let dir = tmpdir("guard-drop-exact-interpolation");
+    let csv = dir.join("in.csv");
+    std::fs::write(
+        &csv,
+        format!(
+            "{HDR}alpha beta,001,ville,10000,1,,2.35,48.86,Alpha Beta,Ville\n\
+             alpha beta,001,ville,10000,3,,2.3502,48.8602,Alpha Beta,Ville\n"
+        ),
+    )
+    .unwrap();
+    let meta = dir.join("meta.json");
+    std::fs::write(
+        &meta,
+        r#"{"country":"fr","layer":"addresses","license":"test","source_release":"test"}"#,
+    )
+    .unwrap();
+    let sheet = dir.join("sheet.bin");
+    let built = Command::new(BIN)
+        .args([
+            "build",
+            csv.to_str().unwrap(),
+            sheet.to_str().unwrap(),
+            "--meta",
+            meta.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    // The same k=1 and street are used throughout. The missing number is bracketed
+    // by nearby houses, so this tests interpolation, not a missing street or house.
+    let direct = guard_drop_query(&sheet, "alpha beta 2");
+    assert_eq!(direct.len(), 1);
+    assert_eq!(direct[0]["precision"], "interp");
+    assert_eq!(direct[0]["housenumber"], "2");
+    assert_eq!(direct[0]["flags"], serde_json::json!(["street_exact"]));
+    let accepted = guard_drop_query(&sheet, "zqx alpha beta 1");
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(accepted[0]["precision"], "house");
+    assert_eq!(accepted[0]["street"], "Alpha Beta");
+    assert_eq!(accepted[0]["housenumber"], "1");
+    assert_eq!(
+        accepted[0]["flags"],
+        serde_json::json!(["street_exact", "house_rep", "dropped_prefix"])
+    );
+    let rejected = guard_drop_query(&sheet, "zqx alpha beta 2");
+    assert!(
+        rejected.is_empty(),
+        "interpolation must not justify dropping noise: {rejected:?}"
+    );
+}
+
+#[test]
+fn guard_drop_rejects_nearest_house_snap_on_exact_untyped_street() {
+    let dir = tmpdir("guard-drop-exact-nearest-house");
+    let csv = dir.join("in.csv");
+    std::fs::write(
+        &csv,
+        format!(
+            "{HDR}alpha beta,001,ville,10000,1,,2.35,48.86,Alpha Beta,Ville\n\
+             alpha beta,001,ville,10000,99,,2.36,48.87,Alpha Beta,Ville\n"
+        ),
+    )
+    .unwrap();
+    let meta = dir.join("meta.json");
+    std::fs::write(
+        &meta,
+        r#"{"country":"fr","layer":"addresses","license":"test","source_release":"test"}"#,
+    )
+    .unwrap();
+    let sheet = dir.join("sheet.bin");
+    let built = Command::new(BIN)
+        .args([
+            "build",
+            csv.to_str().unwrap(),
+            sheet.to_str().unwrap(),
+            "--meta",
+            meta.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    // The number gap prevents interpolation. The direct query fixes the near-snap
+    // precondition, so a changed interpolation rule cannot make this vacuous.
+    let direct = guard_drop_query(&sheet, "alpha beta 50");
+    assert_eq!(direct.len(), 1);
+    assert_eq!(direct[0]["precision"], "near");
+    assert_eq!(direct[0]["housenumber"], "1");
+    assert_eq!(direct[0]["flags"], serde_json::json!(["street_exact"]));
+    assert_eq!(direct[0]["street"], "Alpha Beta");
+    assert_eq!(direct[0]["score"], 3.0);
+    let accepted = guard_drop_query(&sheet, "zqx alpha beta 1");
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(accepted[0]["precision"], "house");
+    assert_eq!(accepted[0]["street"], "Alpha Beta");
+    assert_eq!(accepted[0]["housenumber"], "1");
+    assert_eq!(
+        accepted[0]["flags"],
+        serde_json::json!(["street_exact", "house_rep", "dropped_prefix"])
+    );
+    let rejected = guard_drop_query(&sheet, "zqx alpha beta 50");
+    assert!(
+        rejected.is_empty(),
+        "a nearest-house snap must not justify dropping noise: {rejected:?}"
+    );
+}
+
+fn guard_drop_commune_prefix_pair(name: &str, prefix: bool) {
+    let dir = tmpdir(name);
+    let csv = dir.join("in.csv");
+    std::fs::write(
+        &csv,
+        format!(
+            "{HDR}rue rivoli,001,villeneuve,10000,1,,2.35,48.86,Rue Rivoli,Villeneuve\n\
+             rue rivoli,001,villeneuve,10000,2,,2.3502,48.8602,Rue Rivoli,Villeneuve\n"
+        ),
+    )
+    .unwrap();
+    let meta = dir.join("meta.json");
+    std::fs::write(
+        &meta,
+        r#"{"country":"fr","layer":"addresses","license":"test","source_release":"test"}"#,
+    )
+    .unwrap();
+    let sheet = dir.join("sheet.bin");
+    let built = Command::new(BIN)
+        .args([
+            "build",
+            csv.to_str().unwrap(),
+            sheet.to_str().unwrap(),
+            "--meta",
+            meta.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let has_flag = |hit: &serde_json::Value, flag: &str| {
+        hit["flags"].as_array().unwrap().iter().any(|f| f == flag)
+    };
+    // Keep the near miss reachable: a fuzzy street, prefix-only commune and
+    // exact postcode. Neither an exact street nor a missing commune can stand in.
+    let direct = guard_drop_query(&sheet, "rue rivloi 1 10000 ville");
+    assert_eq!(direct.len(), 1);
+    assert_eq!(direct[0]["precision"], "house");
+    assert_eq!(direct[0]["street"], "Rue Rivoli");
+    assert_eq!(direct[0]["commune"], "Villeneuve");
+    assert_eq!(direct[0]["postcode"], "10000");
+    assert_eq!(direct[0]["housenumber"], "1");
+    for flag in ["street_fuzzy", "commune_prefix", "pc_exact"] {
+        assert!(has_flag(&direct[0], flag), "missing {flag}: {direct:?}");
+    }
+    assert!(!has_flag(&direct[0], "street_exact"));
+    assert!(!has_flag(&direct[0], "commune_exact"));
+    let (positive, negative, dropped) = if prefix {
+        (
+            "zqx rue rivloi 1 10000 villeneuve",
+            "zqx rue rivloi 1 10000 ville",
+            "dropped_prefix",
+        )
+    } else {
+        (
+            "rue rivloi 1 10000 villeneuve zqx",
+            "rue rivloi 1 10000 ville zqx",
+            "dropped_suffix",
+        )
+    };
+    let accepted = guard_drop_query(&sheet, positive);
+    assert_eq!(accepted.len(), 1, "{positive}: {accepted:?}");
+    assert_eq!(accepted[0]["precision"], "house");
+    assert_eq!(accepted[0]["commune"], "Villeneuve");
+    assert_eq!(accepted[0]["housenumber"], "1");
+    for flag in ["street_fuzzy", "commune_exact", "pc_exact", dropped] {
+        assert!(has_flag(&accepted[0], flag), "missing {flag}: {accepted:?}");
+    }
+    assert!(!has_flag(&accepted[0], "street_exact"));
+    assert!(!has_flag(&accepted[0], "commune_prefix"));
+    let rejected = guard_drop_query(&sheet, negative);
+    assert!(
+        rejected.is_empty(),
+        "{negative}: a prefix-only commune must not justify dropping noise: {rejected:?}"
+    );
+}
+
+#[test]
+fn guard_drop_prefix_rejects_prefix_only_commune_with_exact_postcode() {
+    guard_drop_commune_prefix_pair("guard-drop-prefix-commune-prefix", true);
+}
+
+#[test]
+fn guard_drop_suffix_rejects_prefix_only_commune_with_exact_postcode() {
+    guard_drop_commune_prefix_pair("guard-drop-suffix-commune-prefix", false);
+}
+
+// Public CSV and rank inputs keep the weaker, exact-house tail first. The
+// foreign longest street blocks the full-query subset path before the guards.
+fn guard_drop_tail_choice_sheet(name: &str, later_exact_tail: bool) -> std::path::PathBuf {
+    let dir = tmpdir(name);
+    let (number, weak_tail, foreign_tail) = if later_exact_tail {
+        (10, "Tours Tours", "Tours Tours Tours")
+    } else {
+        (11, "Tours", "Tours Tours")
+    };
+    let csv = dir.join("in.csv");
+    std::fs::write(
+        &csv,
+        format!(
+            "{HDR}place gregoire de tours,37261,tours,37000,1,,0.695386,47.3957945,Place Gregoire de Tours,Tours\n\
+             rue victor hugo,37261,tours,37000,{number},,0.688252,47.389105,Rue Victor Hugo,Tours\n\
+             rue victor hugo {weak_key},37263,courtry,37100,10,,0.688152,47.389005,Rue Victor Hugo {weak_tail},Courtry\n\
+             rue victor hugo {foreign_key},75056,paris,75000,10,,2.35,48.86,Rue Victor Hugo {foreign_tail},Paris\n",
+            weak_key = weak_tail.to_lowercase(),
+            foreign_key = foreign_tail.to_lowercase(),
+        ),
+    )
+    .unwrap();
+    let meta = dir.join("meta.json");
+    std::fs::write(
+        &meta,
+        r#"{"country":"fr","layer":"addresses","license":"test","source_release":"test"}"#,
+    )
+    .unwrap();
+    let weights = [3.0f32, 2.0, 3.0, 2.0, 2.0, 0.0, 0.0, 0.0, 6.0, 0.0];
+    let mut rank = b"GPRK".to_vec();
+    rank.push(weights.len() as u8);
+    rank.extend_from_slice(&0.0f32.to_le_bytes());
+    for weight in weights {
+        rank.extend_from_slice(&weight.to_le_bytes());
+    }
+    let rank_path = dir.join("rank.bin");
+    std::fs::write(&rank_path, rank).unwrap();
+    let sheet = dir.join("sheet.bin");
+    let built = Command::new(BIN)
+        .args([
+            "build",
+            csv.to_str().unwrap(),
+            sheet.to_str().unwrap(),
+            "--meta",
+            meta.to_str().unwrap(),
+            "--rank",
+            rank_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    sheet
+}
+
+fn guard_drop_assert_saved_tail_prefix(hits: &[serde_json::Value]) {
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    let hit = &hits[0];
+    assert_eq!(hit["street"], "Place Gregoire de Tours", "{hit}");
+    assert_eq!(hit["precision"], "street", "{hit}");
+    assert_eq!(hit["commune"], "Tours", "{hit}");
+    assert_eq!(hit["postcode"], "37000", "{hit}");
+    let flags = hit["flags"].as_array().unwrap();
+    for flag in [
+        "street_fuzzy",
+        "commune_exact",
+        "pc_exact",
+        "dropped_prefix",
+    ] {
+        assert!(flags.iter().any(|f| f == flag), "missing {flag}: {hit}");
+    }
+    assert!(!flags.iter().any(|f| f == "dropped_suffix"), "{hit}");
+}
+
+#[test]
+fn guard_drop_tail_uses_first_locality_candidate_k2() {
+    let sheet = guard_drop_tail_choice_sheet("guard-drop-tail-first-locality-k2", false);
+    // This is the first shortened query. The exact house outranks the nearby
+    // house with exact locality; any() must not borrow the runner-up's flags.
+    let direct = guard_drop_query_k2(&sheet, "10 rue Victor Hugo 37000 Tours");
+    assert_eq!(direct.len(), 2, "the near miss needs the second candidate");
+    assert_eq!(direct[0]["street"], "Rue Victor Hugo Tours");
+    assert_eq!(direct[0]["commune"], "Courtry");
+    assert_eq!(direct[0]["precision"], "house");
+    assert_eq!(direct[0]["housenumber"], "10");
+    assert_eq!(direct[1]["street"], "Rue Victor Hugo");
+    assert_eq!(direct[1]["commune"], "Tours");
+    assert_eq!(direct[1]["precision"], "near");
+    assert_eq!(direct[1]["housenumber"], "11");
+    assert!(direct[0]["score"].as_f64().unwrap() > direct[1]["score"].as_f64().unwrap());
+    let has = |i: usize, flag: &str| {
+        direct[i]["flags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == flag)
+    };
+    assert!(has(0, "street_exact") && has(0, "pc_dept"), "{direct:?}");
+    for flag in ["commune_exact", "pc_exact"] {
+        assert!(!has(0, flag), "first candidate has {flag}: {direct:?}");
+        assert!(has(1, flag), "second candidate lacks {flag}: {direct:?}");
+    }
+    for i in 0..2 {
+        assert!(
+            !has(i, "dropped_prefix") && !has(i, "dropped_suffix"),
+            "{direct:?}"
+        );
+    }
+    let hits = guard_drop_query_k2(
+        &sheet,
+        "10 rue Victor Hugo, 37000 Tours, France, Tours, France",
+    );
+    guard_drop_assert_saved_tail_prefix(&hits);
+}
+
+#[test]
+fn guard_drop_tail_stops_at_first_accepted_tail() {
+    let sheet = guard_drop_tail_choice_sheet("guard-drop-tail-first-accepted", true);
+    // Removing one token accepts a foreign house; removing two would recover
+    // an exact local house. The saved prefix must win at the first acceptance.
+    let first = guard_drop_query_k2(&sheet, "10 rue Victor Hugo 37000 Tours Tours");
+    let later = guard_drop_query_k2(&sheet, "10 rue Victor Hugo 37000 Tours");
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!(later.len(), 1, "{later:?}");
+    assert_eq!(first[0]["street"], "Rue Victor Hugo Tours Tours");
+    assert_eq!(first[0]["commune"], "Courtry");
+    assert_eq!(later[0]["street"], "Rue Victor Hugo");
+    assert_eq!(later[0]["commune"], "Tours");
+    let weak = first[0]["flags"].as_array().unwrap();
+    let exact = later[0]["flags"].as_array().unwrap();
+    assert!(weak.iter().any(|f| f == "pc_dept"), "{first:?}");
+    for flag in ["commune_exact", "pc_exact"] {
+        assert!(!weak.iter().any(|f| f == flag), "{first:?}");
+        assert!(exact.iter().any(|f| f == flag), "{later:?}");
+    }
+    for hit in [&first[0], &later[0]] {
+        assert_eq!(hit["precision"], "house", "{hit}");
+        assert_eq!(hit["housenumber"], "10", "{hit}");
+        let flags = hit["flags"].as_array().unwrap();
+        assert!(flags.iter().any(|f| f == "street_exact"), "{hit}");
+        assert!(
+            !flags
+                .iter()
+                .any(|f| f == "dropped_prefix" || f == "dropped_suffix"),
+            "{hit}"
+        );
+    }
+    let hits = guard_drop_query_k2(&sheet, "10 rue Victor Hugo 37000 Tours Tours Tours");
+    guard_drop_assert_saved_tail_prefix(&hits);
+}
+
+#[test]
+fn exact_original_blocks_competing_article_house() {
+    let dir =
+        std::env::temp_dir().join(format!("gridpin-es-article-compete-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let csv = dir.join("rows.csv");
+    std::fs::write(&csv, "nom_voie_norm,code_insee,nom_commune_norm,code_postal,numero,rep,lon,lat,nom_voie,nom_commune\ncalle de ejemplo,001,ciudad,28001,7,,-4.7,41.4,calle de ejemplo,Ciudad\ncalle ejemplo,001,ciudad,28001,7,,-3.7,40.4,calle ejemplo,Ciudad\n").unwrap();
+    let rules = dir.join("rules");
+    std::fs::create_dir_all(&rules).unwrap();
+    std::fs::write(rules.join("street_types_latin.tsv"), "calle\n").unwrap();
+    let manifest = dir.join("manifest.json");
+    std::fs::write(
+        &manifest,
+        r#"{"country":"es","layer":"addresses","license":"test","source_release":"test"}"#,
+    )
+    .unwrap();
+    let bin = dir.join("test.bin");
+    builder::build(&csv, &bin, None, None, Some(&rules), None, Some(&manifest)).unwrap();
+    let idx = Index::open(&bin).unwrap();
+    let literal = idx.query("Calle Ejemplo, 7, Ciudad", 1);
+    let article = idx.query("Calle de Ejemplo, 7, Ciudad", 1);
+    assert_eq!(literal[0].street, "calle ejemplo");
+    assert_eq!(article[0].street, "calle de ejemplo");
+    assert_ne!(literal[0].lat, article[0].lat);
+    assert_ne!(literal[0].lon, article[0].lon);
 }

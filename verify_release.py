@@ -184,7 +184,60 @@ def attestation_problems(directory: pathlib.Path, listed: dict[str, str],
     return problems
 
 
-PUBLIC_SHEETS = ("france.bin", "italy.bin", "netherlands.bin", "serbia.bin", "germany.bin", "fr_poi.bin")
+CURRENT_RELEASE = "v0.3.0"
+# Changed only by the publication step, together with the site country row.
+PUBLISHED_RELEASE = "v0.2.0"
+# One catalogue for the standalone verifier and the private release tools.
+# Each entry is (public name, internal name, country, layer, input pipeline).
+_RELEASE_BASE = (
+    ("france.bin", "france.bin", "fr", "addresses", "fr"),
+    ("italy.bin", "it.bin", "it", "addresses", "it"),
+    ("netherlands.bin", "nl.bin", "nl", "addresses", "nl"),
+    ("serbia.bin", "rs.bin", "rs", "addresses", "rs"),
+    ("fr_poi.bin", "fr_poi.bin", "fr", "poi", "fr-poi"),
+)
+RELEASE_COMPOSITIONS = {
+    "v0.1.0": _RELEASE_BASE,
+    "v0.2.0": _RELEASE_BASE[:-1] + (("germany.bin", "de.bin", "de", "addresses", "de"),) + _RELEASE_BASE[-1:],
+}
+RELEASE_COMPOSITIONS["v0.3.0"] = RELEASE_COMPOSITIONS["v0.2.0"] + (
+    ("spain.bin", "es.bin", "es", "addresses", "es"),
+)
+LEGACY_RELEASE_BINDINGS = {
+    "inputs-2026-08-15.manifest.json": "v0.1.0",
+    "inputs-2026-08-18.manifest.json": "v0.1.0",
+    "inputs-2026-09-11.manifest.json": "v0.2.0",
+    "release-2026.08": "v0.1.0",
+    "release-2026.09-v0.2.0": "v0.2.0",
+}
+
+
+def release_version(doc: dict, identity: str | None = None) -> str:
+    """Resolve explicit signed metadata or an enumerated legacy identity, never a date."""
+    explicit = doc.get("release_version")
+    identities = [identity, doc.get("g02_manifest")]
+    known = {LEGACY_RELEASE_BINDINGS[x] for x in identities
+             if isinstance(x, str) and x in LEGACY_RELEASE_BINDINGS}
+    if "release_version" in doc:
+        if not isinstance(explicit, str) or explicit not in RELEASE_COMPOSITIONS:
+            raise ValueError(f"unknown release version: {explicit!r}")
+        if known and known != {explicit}:
+            raise ValueError("release version conflicts with legacy identity")
+        return explicit
+    if len(known) != 1:
+        raise ValueError("unknown release version: explicit binding required")
+    return next(iter(known))
+
+
+def release_sheets(doc: dict, identity: str | None = None) -> tuple[str, ...]:
+    return tuple(row[0] for row in RELEASE_COMPOSITIONS[release_version(doc, identity)])
+
+
+def release_countries(doc: dict, identity: str | None = None) -> tuple[str, ...]:
+    return tuple(row[4] for row in RELEASE_COMPOSITIONS[release_version(doc, identity)])
+
+
+PUBLIC_SHEETS = release_sheets({"release_version": CURRENT_RELEASE})
 SCHEMA = "gridpin-release-attestation"
 SCHEMA_VERSION = 3
 UNSIGNABLE = (ATTESTATION_NAME, ATTESTATION_NAME + ".sig", SUMS_NAME, SIGNERS_NAME)
@@ -218,10 +271,14 @@ def shape_problems(doc: dict, expected_public_sha: str) -> list[str]:
     elif sha != want:
         problems.append(f"the attestation was issued for {sha[:12]}... but this release is "
                         f"{want[:12]}...: stale or foreign document")
+    try:
+        expected_sheets = release_sheets(doc)
+    except ValueError as e:
+        return problems + [str(e)]
     names = [str(r.get("public_name")) for r in doc.get("sheets", []) if isinstance(r, dict)]
     if len(names) != len(set(names)):
         problems.append("duplicate sheet records: the document does not say which one is real")
-    missing = [n for n in PUBLIC_SHEETS if n not in names]
+    missing = [n for n in expected_sheets if n not in names]
     if missing:
         problems.append(f"the attestation does not cover {missing}: a truncated attestation would "
                         f"leave those sheets unchecked")
@@ -322,8 +379,12 @@ def _v3_schema_problems(doc: dict) -> list[str]:
     string `size`, a string instead of `rules` and a malformed G-02 hash used to pass (
     2026-08-12).
     """
-    problems = [f"attestation carries unexpected top-level field(s) {sorted(set(doc) - TOP_FIELDS)}"] \
-        if set(doc) - TOP_FIELDS else []
+    extra = set(doc) - TOP_FIELDS - {"release_version"}
+    problems = [f"attestation carries unexpected top-level field(s) {sorted(extra)}"] if extra else []
+    try:
+        expected_sheets = release_sheets(doc)
+    except ValueError as e:
+        return problems + [str(e)]
     problems += [f"attestation has no {f!r}" for f in sorted(TOP_FIELDS - set(doc))]
     if not _is_hex(doc.get("g02_manifest_sha256"), 64):
         problems.append("g02_manifest_sha256 is not 64-hex")
@@ -337,9 +398,9 @@ def _v3_schema_problems(doc: dict) -> list[str]:
     if not isinstance(sheets, list) or not sheets:
         return problems + ["attestation has no sheet records"]
     names = [r.get("public_name") for r in sheets if isinstance(r, dict)]
-    if sorted(n for n in names if n) != sorted(PUBLIC_SHEETS):
+    if sorted(n for n in names if n) != sorted(expected_sheets):
         problems.append(f"sheet records {sorted(n for n in names if n)} are not exactly "
-                        f"{sorted(PUBLIC_SHEETS)}: an extra record would ride along unchecked")
+                        f"{sorted(expected_sheets)}: an extra record would ride along unchecked")
     for rec in sheets:
         problems += _record_problems(rec, SHEET_FIELDS, "sheet")
     assets = doc.get("assets")
@@ -353,7 +414,7 @@ def _v3_schema_problems(doc: dict) -> list[str]:
     # Symmetry with the lab schema: every sheet must appear in the signed asset
     # graph, and an asset name must be non-empty. The public side accepted both forms.
     problems += [f"{n}: sheet is not covered by the signed asset graph"
-                 for n in PUBLIC_SHEETS if n not in names]
+                 for n in expected_sheets if n not in names]
     problems += [f"asset record with an empty name: {a!r}" for a in assets
                  if isinstance(a, dict) and not str(a.get("name", ""))]
     want = sorted({str(r.get("builder_git")) for r in sheets if isinstance(r, dict)})

@@ -1910,36 +1910,15 @@ def _stop_child(process: Any) -> None:
     """Stop the detached stage's entire process group before evidence sealing."""
     pid = getattr(process, "pid", None)
     if isinstance(pid, int) and pid > 0:
-        if getattr(process, "_gridpin_parent_death_guard", False):
-            # The cooperative wrapper owns the separately detached real-stage
-            # group.  Address the unreaped wrapper PID, never probe/signal its
-            # process-group id after poll()/wait() made that id reusable.
-            if getattr(process, "returncode", None) is not None:
-                return
-            process.terminate()
-            process.wait()
+        if not getattr(process, "_gridpin_parent_death_guard", False):
+            raise StageFailed("unguarded stage process has no anchored group owner")
+        # The cooperative wrapper owns the separately detached real-stage
+        # group.  Address the unreaped wrapper PID, never probe/signal its
+        # process-group id after poll()/wait() made that id reusable.
+        if getattr(process, "returncode", None) is not None:
             return
-        # start_new_session=True makes the stage leader its process-group id.
-        _signal_process_group(pid, signal.SIGTERM)
-        direct_reaped = False
-        try:
-            process.wait(timeout=10)
-            direct_reaped = True
-        except BaseException:
-            pass
-        # The leader may exit on TERM while a descendant ignores it and keeps
-        # inherited evidence fds open.  Probe and kill the whole remaining group.
-        if _process_group_exists(pid):
-            _signal_process_group(pid, signal.SIGKILL)
-        if not direct_reaped:
-            # Do not release the shared flock until the direct child is reaped.
-            process.wait()
-        # A reaped leader does not imply that descendants closed inherited
-        # evidence fds.  Fail-stop under the flock until the entire group is
-        # gone; repeated SIGKILL also closes a narrow post-probe fork race.
-        while _process_group_exists(pid):
-            _signal_process_group(pid, signal.SIGKILL)
-            time.sleep(0.01)
+        process.terminate()
+        process.wait()
         return
 
     # Injectable unit-test processes have no OS pid; retain the same verified
@@ -1973,6 +1952,9 @@ def _run_child(
     *,
     poll_interval: float,
 ) -> None:
+    guarded_popen = getattr(services, "popen_guarded", None)
+    if not callable(guarded_popen):
+        raise StageFailed(f"{stage}: requires guarded stage launch")
     stdout_path = paths.evidence / f"{stage}.stdout.log"
     stderr_path = paths.evidence / f"{stage}.stderr.log"
     env = os.environ.copy()
@@ -1983,26 +1965,11 @@ def _run_child(
         guard_write_fd: int | None = None
         process: Any | None = None
         try:
-            guarded_popen = getattr(services, "popen_guarded", None)
-            if callable(guarded_popen):
-                guard_read_fd, guard_write_fd = os.pipe()
-                try:
-                    process = guarded_popen(
-                        list(argv),
-                        guard_read_fd=guard_read_fd,
-                        cwd=str(paths.code),
-                        env=env,
-                        stdout=stdout,
-                        stderr=stderr,
-                        shell=False,
-                        start_new_session=True,
-                    )
-                finally:
-                    os.close(guard_read_fd)
-            else:
-                # Injectable tests retain a direct fake process boundary.
-                process = services.popen(
+            guard_read_fd, guard_write_fd = os.pipe()
+            try:
+                process = guarded_popen(
                     list(argv),
+                    guard_read_fd=guard_read_fd,
                     cwd=str(paths.code),
                     env=env,
                     stdout=stdout,
@@ -2010,6 +1977,8 @@ def _run_child(
                     shell=False,
                     start_new_session=True,
                 )
+            finally:
+                os.close(guard_read_fd)
             while True:
                 if _free_bytes(services, paths.data) < FLOOR_BYTES:
                     _terminate_for_low_disk(process, stage)
@@ -2017,17 +1986,6 @@ def _run_child(
                 if rc is not None:
                     break
                 services.sleep(poll_interval)
-            pid = getattr(process, "pid", None)
-            guarded = getattr(process, "_gridpin_parent_death_guard", False)
-            if (
-                not guarded
-                and isinstance(pid, int)
-                and pid > 0
-                and _process_group_exists(pid)
-            ):
-                # A terminal leader with a live group means an illegal
-                # background descendant.  Stop it on both rc=0 and rc!=0.
-                _stop_child(process)
             os.fsync(stdout.fileno())
             os.fsync(stderr.fileno())
         except LowDisk:
