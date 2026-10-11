@@ -8,17 +8,17 @@ stays on your machine. After you install the package and download a sheet,
 GridPin makes no network requests.
 
 ```bash
-pip install --upgrade gridpin==0.3.0
+pip install --upgrade gridpin==0.4.0
 ```
 
 The wheel contains the engine, not the data: **download a country sheet
-separately**. Free static sheets for France, Germany, Italy, the Netherlands, Serbia and Spain
+separately**. Free static sheets for France, Germany, Italy, the Netherlands, Serbia, Spain and Brazil
 are listed at <https://gridpin.dev/docs.html#delivery> — no account, no key, no
 sign-up.
 
 Germany covers **15 of 16 Länder; Bavaria is not covered**. Spain covers all
-52 postal provinces. Client update required: use 0.3.0, because older engines
-have no Spanish rules.
+52 postal provinces; Brazil is one nationwide sheet. Client update required:
+use 0.4.0, because older engines have no Brazilian rules.
 
 ```python
 import gridpin

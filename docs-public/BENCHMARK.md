@@ -186,6 +186,7 @@ truth, computed with `wikidata4_regress.py`.
 |---|---|
 | Measured GridPin binary | `84bd75bc3264e71df57d3a76c9d69575ccaa24bcc4cd56975eb353830740cf4f` |
 | Measured sheet `br.bin` | `2d415c3a2abfd2df749b6a1d58625c12f8df1328a56248c9bc5eb5628cbc3ac7` |
+| Release sheet `brazil.bin` (v0.4.0; metadata-only repack of the measured sheet, 2026-10-10) | `016e102debb05aafad0ae409c3a2acec478b60bb48b74d03210b80dc52d42a6d` |
 | clean queries | `9809af6379a64e512768fbabb803fa877e8bf5ecb1ee8d917bba87ac849c7620` |
 | clean truth | `1e56d8f5ad0b373846fdda874a9c3ddce42d11f38b4b0d9486b32fe8cfd7b79d` |
 | clean gridpin raw | `15514dfa7e48dd18aafeaf8ab7b02626ab71090894c7c57873c247f70e8a36e2` |

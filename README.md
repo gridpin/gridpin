@@ -15,11 +15,11 @@ macOS Apple Silicon (`aarch64-apple-darwin`) and Windows x86_64
 (Intel macOS, Linux arm64/musl, Windows arm) build from source:
 
 ```console
-$ base=https://github.com/gridpin/gridpin/releases/download/v0.3.0
+$ base=https://github.com/gridpin/gridpin/releases/download/v0.4.0
 $ curl -fsSLO "$base/gridpin-aarch64-apple-darwin.tar.gz"
 $ curl -fsSLO "$base/gridpin-release-signers"
-$ curl -fsSLO https://dl.gridpin.dev/v0.3.0/attestation.json
-$ curl -fsSLO https://dl.gridpin.dev/v0.3.0/attestation.json.sig
+$ curl -fsSLO https://dl.gridpin.dev/v0.4.0/attestation.json
+$ curl -fsSLO https://dl.gridpin.dev/v0.4.0/attestation.json.sig
 # the trust root comes from the OTHER channel — see "Verifying a release" for why
 $ ssh-keygen -Y verify -f gridpin-release-signers -I gridpin-release \
     -n gridpin-g02 -s attestation.json.sig < attestation.json \
@@ -146,17 +146,18 @@ canonical order. They can differ only when the fields you supply reorder the wor
 order-sensitive POI *name* (splitting "54 Studio" into `street:"studio", number:"54"` re-forms it as
 "Studio 54"); pass such a query as free-form to keep the original word order.
 
-Sizes are for v7 builds (August 2026; Germany repacked 2026-09-10; Spain added 2026-09-28); the exact byte sizes are checked against a pinned source of truth in CI. A sheet is smaller than its own raw source: France's registry download is an 885 MB gzip that unpacks to 4.9 GB of CSV, while the finished sheet — the same 26.1M addresses plus every index (typo automata, spatial cells, ranking) — is 365 MB, ready to query.
+Sizes are for v7 builds (August 2026; Germany repacked 2026-09-10; Spain added 2026-09-28; Brazil added 2026-10-11); the exact byte sizes are checked against a pinned source of truth in CI. A sheet is smaller than its own raw source: France's registry download is an 885 MB gzip that unpacks to 4.9 GB of CSV, while the finished sheet — the same 26.1M addresses plus every index (typo automata, spatial cells, ranking) — is 365 MB, ready to query.
 
 **Download sheets.** Free builds of all available countries are served as individual files —
 there is no directory listing, so link straight to the object you want:
-[`france.bin`](https://dl.gridpin.dev/v0.3.0/france.bin) (365 MB),
-[`germany.bin`](https://dl.gridpin.dev/v0.3.0/germany.bin) (213 MB),
-[`italy.bin`](https://dl.gridpin.dev/v0.3.0/italy.bin) (247 MB),
-[`netherlands.bin`](https://dl.gridpin.dev/v0.3.0/netherlands.bin) (103 MB),
-[`serbia.bin`](https://dl.gridpin.dev/v0.3.0/serbia.bin) (32 MB),
-[`spain.bin`](https://dl.gridpin.dev/v0.3.0/spain.bin) (185 MB), plus the optional France POI layer
-[`fr_poi.bin`](https://dl.gridpin.dev/v0.3.0/fr_poi.bin) (231 MB). The matching `SHA256SUMS` manifest (covering the
+[`france.bin`](https://dl.gridpin.dev/v0.4.0/france.bin) (365 MB),
+[`germany.bin`](https://dl.gridpin.dev/v0.4.0/germany.bin) (213 MB),
+[`italy.bin`](https://dl.gridpin.dev/v0.4.0/italy.bin) (247 MB),
+[`netherlands.bin`](https://dl.gridpin.dev/v0.4.0/netherlands.bin) (103 MB),
+[`serbia.bin`](https://dl.gridpin.dev/v0.4.0/serbia.bin) (32 MB),
+[`spain.bin`](https://dl.gridpin.dev/v0.4.0/spain.bin) (185 MB),
+[`brazil.bin`](https://dl.gridpin.dev/v0.4.0/brazil.bin) (677 MB), plus the optional France POI layer
+[`fr_poi.bin`](https://dl.gridpin.dev/v0.4.0/fr_poi.bin) (231 MB). The matching `SHA256SUMS` manifest (covering the
 engine binary and every sheet) is on the [GitHub release](https://github.com/gridpin/gridpin/releases).
 Subscribers fetch fresh monthly builds from a keyed URL instead — see
 [gridpin.dev/docs](https://gridpin.dev/docs.html).
@@ -222,18 +223,18 @@ untrusted download. Steps 3–5 below use only `ssh-keygen` and `shasum`, which 
 and only step 6 runs our code.
 
 ```bash
-mkdir gridpin-v0.3.0 && cd gridpin-v0.3.0
+mkdir gridpin-v0.4.0 && cd gridpin-v0.4.0
 mkdir trust data          # two directories on purpose: the checker never sits in what it checks
-gh_base=https://github.com/gridpin/gridpin/releases/download/v0.3.0
+gh_base=https://github.com/gridpin/gridpin/releases/download/v0.4.0
 
 # 1. TRUST ROOT — from GitHub, never from the download host
 curl -fsSL -o trust/gridpin-release-signers "$gh_base/gridpin-release-signers"
 curl -fsSL -o trust/verify_release.py       "$gh_base/verify_release.py"
 
 # 2. Data and proofs — from the download host
-for f in france.bin germany.bin italy.bin netherlands.bin serbia.bin fr_poi.bin spain.bin \
+for f in france.bin germany.bin italy.bin netherlands.bin serbia.bin fr_poi.bin spain.bin brazil.bin \
          SHA256SUMS attestation.json attestation.json.sig; do
-  curl -fsSL -o "data/$f" "https://dl.gridpin.dev/v0.3.0/$f"
+  curl -fsSL -o "data/$f" "https://dl.gridpin.dev/v0.4.0/$f"
 done
 
 # 3. The key is the one published below — compare by eye, before anything else
@@ -287,9 +288,9 @@ This also matters for GDPR: the addresses you geocode are often customer data, a
 
 ## Status & roadmap
 
-**v0.3.0: Spain added. Client update required.** Spain covers all 52 postal provinces (incl. Ceuta and Melilla); the source counts describe source presence, not address completeness. Germany covers 15 of 16 Länder; Bavaria is not covered. Use the 0.3.0 client with this release: older engines do not contain the Spanish rules. All six country sheets and the France POI layer use the new immutable `v0.3.0/` path and a new attestation; `v0.1.0/` and `v0.2.0/` are unchanged.
+**v0.4.0: Brazil added. Client update required.** Brazil is one nationwide sheet covering 26 states and the Federal District; the source counts describe source presence, not address completeness. Spain covers all 52 postal provinces (incl. Ceuta and Melilla). Germany covers 15 of 16 Länder; Bavaria is not covered. Use the 0.4.0 client with this release: older engines do not contain the Brazilian rules. All seven country sheets and the France POI layer use the new immutable `v0.4.0/` path and a new attestation; `v0.1.0/`, `v0.2.0/` and `v0.3.0/` are unchanged.
 
-For an existing Python installation, use `pip install --upgrade gridpin==0.3.0`, not a plain install that may keep an older version.
+For an existing Python installation, use `pip install --upgrade gridpin==0.4.0`, not a plain install that may keep an older version.
 
 Interfaces and file formats may still change before v1.0. Sheets are tied to the engine's format major version — keep the engine build that shipped alongside your sheets; before v1.0 a newer engine may require newer sheets.
 
