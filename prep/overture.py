@@ -53,6 +53,12 @@ ADDRESS_LICENSE = {
     # IGN licence §4 and the CNIG CartoCiudad product catalogue, verified 2026-09-12.
     "es": {"provider": "CartoCiudad (scne.es)",
            "license": "CC BY 4.0"},
+    # Overture attribution page: "IBGE ... Available under CC0. Distributed by AddressForAll"
+    # (accessed 2026-09-28). IBGE itself calls the CNEFE files public without a licence text;
+    # AddressForAll records the pack as an implied licence of the CC0 family. Receipts:
+    # chat/br_source_audit_20260928_2332/; owner decision ANSWERS §41 (public track).
+    "br": {"provider": "IBGE (Instituto Brasileiro de Geografia e Estatistica), CNEFE 2022",
+           "license": "CC0 1.0"},
 }
 S3 = f"s3://overturemaps-us-west-2/release/{RELEASE}/theme=addresses/type=*/*.parquet"
 
@@ -62,21 +68,31 @@ NORM = ("trim(regexp_replace(regexp_replace(replace(strip_accents(lower({col})),
 
 def release_for_country(cc: str) -> str:
     """Keep the DE evidence pin independent of the older country sheets."""
-    if cc.lower() == "es":
+    if cc.lower() in ("es", "br"):  # BR: ANSWERS §41, same pin as ES
         return "2026-08-19.0"
     return DE_RELEASE if cc.lower() == "de" else RELEASE
 
 
+# Countries whose working storage is bounded explicitly: (build dir, temp GiB, memory).
+BOUNDED_STORAGE = {
+    "ES": ("es_build", 8, "3GiB"),
+    # BR is ~4.7x ES; the streamed two-pass extraction keeps temp small, the cap is a guard.
+    "BR": ("br_build", 12, "6GiB"),
+}
+
+
 def connect_for_country(cc: str, offline_extensions: bool = False):
-    """Bound ES working storage explicitly, without changing established country runs."""
-    if cc.upper() != "ES":
+    """Bound ES/BR working storage explicitly, without changing established country runs."""
+    bounds = BOUNDED_STORAGE.get(cc.upper())
+    if bounds is None:
         return connect_tuned(disable_extension_autoload=offline_extensions)
+    build_dir, temp_gib, memory = bounds
     con = connect_tuned(
-        temp_directory=CODE / "data" / "es_build" / "tmp_duck",
-        max_temp_directory_size_bytes=8 * 1024**3,
+        temp_directory=CODE / "data" / build_dir / "tmp_duck",
+        max_temp_directory_size_bytes=temp_gib * 1024**3,
         disable_extension_autoload=offline_extensions,
     )
-    con.execute("SET memory_limit='3GiB'")
+    con.execute(f"SET memory_limit='{memory}'")
     return con
 
 
@@ -125,6 +141,13 @@ def address_manifest(cc: str, geonames: bool = False, release: str | None = None
     if country == "es":
         result["attribution"] = (
             "Obra derivada de CartoCiudad CC-BY 4.0 scne.es; "
+            f"via Overture Maps / OpenAddresses, release {selected_release}; "
+            "address normalization applied"
+        )
+    if country == "br":
+        result["attribution"] = (
+            "IBGE - Instituto Brasileiro de Geografia e Estatistica, CNEFE 2022 (public data; "
+            "implied licence recorded by AddressForAll as CC0 family; labelled CC0 by Overture); "
             f"via Overture Maps / OpenAddresses, release {selected_release}; "
             "address normalization applied"
         )
@@ -216,8 +239,23 @@ def load_extensions(con, offline_extensions: bool) -> None:
         con.execute("INSTALL httpfs; LOAD httpfs; INSTALL spatial; LOAD spatial;")
 
 
+# Brazilian CEP: 7.5 % of the Overture rows carry 7 bare digits ("6950000") -- a São Paulo
+# code that lost its leading zero somewhere upstream. Restore it and the hyphen, so the index
+# and the query (norm.rs keeps "06950" of "06950-000") share one 5-digit prefix.
+BR_POSTCODE_SQL = (
+    "CASE WHEN regexp_full_match(postcode, '[0-9]{7,8}') "
+    "THEN substr(lpad(postcode, 8, '0'), 1, 5) || '-' || substr(lpad(postcode, 8, '0'), 6, 3) "
+    "ELSE coalesce(postcode, '') END"
+)
+
+
 def create_src_sql(cc: str, s3: str) -> str:
     """One remote scan; DE retains lineage/state only in the temporary src table."""
+    return "\n        CREATE TABLE src AS" + select_src_sql(cc, s3)
+
+
+def select_src_sql(cc: str, s3: str) -> str:
+    """The source projection shared by the in-memory table and the BR streamed passes."""
     if cc == "DE":
         city = "coalesce(address_levels[2].value, '')"
         province = "coalesce(address_levels[1].value, '')"
@@ -237,12 +275,12 @@ def create_src_sql(cc: str, s3: str) -> str:
         )
         evidence_columns = ""
         where_clause = f"country = '{cc}' AND street IS NOT NULL AND number IS NOT NULL"
+    postcode = BR_POSTCODE_SQL if cc == "BR" else "coalesce(postcode, '')"
     return f"""
-        CREATE TABLE src AS
         SELECT id,
                street                                   AS nom_voie,
                number                                   AS number_raw,
-               coalesce(postcode, '')                   AS postcode_raw,
+               {postcode:<40} AS postcode_raw,
                {city}                                    AS nom_commune,
                {province}                                AS provincia,
                st_x(geometry)                           AS lon,
@@ -387,12 +425,98 @@ def _de_failed_stats(release: str, manifest: dict, stage: str, error: object) ->
     return stats
 
 
+# title-case ALL-CAPS names (Italy, Brazil): Via Giuseppe Mazzini, Rua Das Flores
+TITLE = ("CASE WHEN {col} = upper({col}) AND len({col}) > 3 THEN "
+         "array_to_string(list_transform(string_split(lower({col}), ' '), "
+         "x -> upper(x[1]) || x[2:]), ' ') ELSE {col} END")
+
+
+def base_sql(source: str = "src") -> str:
+    norm_voie = NORM.format(col="nom_voie")
+    norm_commune = NORM.format(col="nom_commune")
+    return f"""
+            SELECT id, {TITLE.format(col='nom_voie')} AS nom_voie,
+                   {norm_voie}  AS nom_voie_norm,
+                   TRY_CAST(regexp_extract(number_raw, '^[0-9]+') AS INTEGER) AS numero,
+                   nullif(lower(trim(regexp_replace(
+                       regexp_extract(number_raw, '^[0-9]+(.*)$', 1),
+                       '^[\\s/\\-]+', ''))), '')        AS rep,
+                   regexp_extract(postcode_raw, '[0-9]+') AS code_postal,
+                   postcode_raw,
+                   {TITLE.format(col='nom_commune')} AS nom_commune,
+                   {norm_commune} AS nom_commune_norm,
+                   provincia,
+                   lon, lat
+            FROM {source}
+            WHERE nom_commune <> '' AND lon IS NOT NULL AND lat IS NOT NULL"""
+
+
+def keys_sql(insee_order: str, source: str = "src") -> str:
+    """Locality codes over DISTINCT keys: identical to dense_rank over all rows by the same
+    key, without sorting every address. Only valid for a key made of the two columns."""
+    if insee_order != "nom_commune_norm, provincia":
+        raise ValueError("key-table codes need the plain (commune, province) key")
+    return f"""
+        SELECT nom_commune_norm, provincia, n,
+               'L' || lpad(CAST(dense_rank() OVER (ORDER BY {insee_order}) AS VARCHAR), 6, '0') AS code_insee
+        FROM (SELECT nom_commune_norm, provincia, count(*) AS n
+              FROM ({base_sql(source)})
+              WHERE numero IS NOT NULL AND nom_voie_norm <> ''
+              GROUP BY nom_commune_norm, provincia)"""
+
+
+def canon_sql(insee_order: str, prov_alias: str, keys_table: str | None = None,
+              source: str = "src") -> str:
+    if keys_table is None:
+        # the locality key includes the province: same-named communes do not merge
+        loc = f"""
+            SELECT *, 'L' || lpad(CAST(dense_rank() OVER (ORDER BY {insee_order}) AS VARCHAR), 6, '0') AS code_insee
+            FROM base
+            WHERE numero IS NOT NULL AND nom_voie_norm <> ''"""
+    else:
+        loc = f"""
+            SELECT b.*, k.code_insee
+            FROM base b JOIN {keys_table} k
+              ON b.nom_commune_norm = k.nom_commune_norm AND b.provincia = k.provincia
+            WHERE b.numero IS NOT NULL AND b.nom_voie_norm <> ''"""
+    return f"""
+        WITH base AS ({base_sql(source)}
+        ),
+        loc AS ({loc}
+        )
+        SELECT id, numero, rep, nom_voie, nom_voie_norm,
+               coalesce(code_postal, '0') AS code_postal,
+               postcode_raw AS code_postal_display,
+               code_insee, nom_commune, nom_commune_norm,
+               {prov_alias} AS provincia_norm,
+               nom_voie_norm || '|' || code_insee AS street_key,
+               lon, lat
+        FROM loc"""
+
+
+def stream_br_canon(con, insee_order: str, prov_alias: str, out_parquet: pathlib.Path) -> int:
+    """Copy the BR second pass and verify its count against the locality-key pass."""
+    con.execute("CREATE TABLE keys AS " + keys_sql(insee_order))
+    expected = con.execute("SELECT sum(n) FROM keys").fetchone()[0] or 0
+    con.execute(f"COPY ({canon_sql(insee_order, prov_alias, keys_table='keys')}) "
+                f"TO '{out_parquet}' (FORMAT parquet, COMPRESSION zstd)")
+    con.execute(f"CREATE VIEW canon AS SELECT * FROM read_parquet('{out_parquet}')")
+    kept = con.execute("SELECT count(*) FROM canon").fetchone()[0]
+    if kept != expected:
+        raise SystemExit(f"STOP: BR canon wrote {kept} rows, key pass counted {expected}")
+    return kept
+
+
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     cc = args.country.upper()
     geonames_file = args.geonames
     # License/catalog/release validation is deliberately before connect_tuned(), extension
     # loading and construction/execution of the remote S3 query.
+    if cc == "BR" and geonames_file:
+        # Every BR row already carries state + municipality, so the umbrella would never
+        # fire; it would only turn the state into a search alias (the "Roma" risk below).
+        raise SystemExit("STOP: BR is built without a GeoNames umbrella (streamed source)")
     release, manifest, _sources = preflight(cc, geonames_file, args.release)
     out_parquet = CODE / "data" / f"{cc.lower()}_norm.parquet"
 
@@ -406,7 +530,11 @@ def main(argv: list[str] | None = None) -> None:
     # network stage: fetch only the target country (pruned via row-group statistics)
     s3 = s3_for_release(release, cc)
     try:
-        con.execute(create_src_sql(cc, s3))
+        if cc == "BR":
+            # A view, not a table: both BR passes stream from S3 instead of holding 74M rows.
+            con.execute("CREATE VIEW src AS" + select_src_sql(cc, s3))
+        else:
+            con.execute(create_src_sql(cc, s3))
     except Exception as exc:
         if cc == "DE":
             _write_stats(cc, _de_failed_stats(release, manifest, "create_src", exc))
@@ -488,8 +616,6 @@ def main(argv: list[str] | None = None) -> None:
         con.execute("DROP TABLE src; ALTER TABLE src2 RENAME TO src;")
         con.execute("DROP TABLE addr; DROP TABLE u1; DROP TABLE u2;")
 
-    norm_voie = NORM.format(col="nom_voie")
-    norm_commune = NORM.format(col="nom_commune")
     # The commune ALIAS comes ONLY from the GeoNames umbrella (city level). The Overture
     # province (address_levels[-2]) is too broad as an alias — the "Roma" province spans
     # hundreds of communes, so province-as-alias misroutes city-name queries. The
@@ -518,46 +644,14 @@ def main(argv: list[str] | None = None) -> None:
     insee_order = "nom_commune_norm, provincia"
     if cc == "IT":
         insee_order = "nom_commune_norm, provincia, floor(lat*2), floor(lon*2)"
-    # title-case ALL-CAPS names (Italy): Via Giuseppe Mazzini
-    title = ("CASE WHEN {col} = upper({col}) AND len({col}) > 3 THEN "
-             "array_to_string(list_transform(string_split(lower({col}), ' '), "
-             "x -> upper(x[1]) || x[2:]), ' ') ELSE {col} END")
-    con.execute(f"""
-        CREATE TABLE canon AS
-        WITH base AS (
-            SELECT id, {title.format(col='nom_voie')} AS nom_voie,
-                   {norm_voie}  AS nom_voie_norm,
-                   TRY_CAST(regexp_extract(number_raw, '^[0-9]+') AS INTEGER) AS numero,
-                   nullif(lower(trim(regexp_replace(
-                       regexp_extract(number_raw, '^[0-9]+(.*)$', 1),
-                       '^[\\s/\\-]+', ''))), '')        AS rep,
-                   regexp_extract(postcode_raw, '[0-9]+') AS code_postal,
-                   postcode_raw,
-                   {title.format(col='nom_commune')} AS nom_commune,
-                   {norm_commune} AS nom_commune_norm,
-                   provincia,
-                   lon, lat
-            FROM src
-            WHERE nom_commune <> '' AND lon IS NOT NULL AND lat IS NOT NULL
-        ),
-        loc AS (
-            -- the locality key includes the province: same-named communes
-            -- do not merge
-            SELECT *, 'L' || lpad(CAST(dense_rank() OVER (ORDER BY {insee_order}) AS VARCHAR), 6, '0') AS code_insee
-            FROM base
-            WHERE numero IS NOT NULL AND nom_voie_norm <> ''
-        )
-        SELECT id, numero, rep, nom_voie, nom_voie_norm,
-               coalesce(code_postal, '0') AS code_postal,
-               postcode_raw AS code_postal_display,
-               code_insee, nom_commune, nom_commune_norm,
-               {prov_alias} AS provincia_norm,
-               nom_voie_norm || '|' || code_insee AS street_key,
-               lon, lat
-        FROM loc
-    """)
-    kept = con.execute("SELECT count(*) FROM canon").fetchone()[0]
-    con.execute(f"COPY canon TO '{out_parquet}' (FORMAT parquet, COMPRESSION zstd)")
+    if cc == "BR":
+        # Streamed: pass 1 builds the small locality-key table, pass 2 copies the canon rows
+        # straight to Parquet. Same codes as the window form (tools/test_br_overture.py).
+        kept = stream_br_canon(con, insee_order, prov_alias, out_parquet)
+    else:
+        con.execute("CREATE TABLE canon AS " + canon_sql(insee_order, prov_alias))
+        kept = con.execute("SELECT count(*) FROM canon").fetchone()[0]
+        con.execute(f"COPY canon TO '{out_parquet}' (FORMAT parquet, COMPRESSION zstd)")
 
     metrics = {
         "country": cc,

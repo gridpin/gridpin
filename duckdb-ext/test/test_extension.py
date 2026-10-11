@@ -16,11 +16,68 @@ CODE = pathlib.Path(__file__).resolve().parents[2]
 EXT = pathlib.Path(os.environ.get("GRIDPIN_EXT", CODE / "duckdb-ext" / "gridpin_ext.duckdb_extension"))
 SHEET = pathlib.Path(os.environ.get("GRIDPIN_TEST_SHEET", CODE / "data" / "mc.bin"))
 
+FUNCTION_PARAMETERS = {
+    "gridpin_load": ["path"],
+    "gridpin_load_poi": ["path"],
+    "gridpin_reset": [],
+    "gridpin_geocode": ["query"],
+    "gridpin_reverse": ["lat", "lon"],
+}
+
+
+@pytest.mark.parametrize("name,parameters", FUNCTION_PARAMETERS.items())
+def test_function_description_names_description_example_and_category(con, name, parameters):
+    rows = con.execute(
+        "SELECT parameters, description, examples, categories FROM duckdb_functions() "
+        "WHERE function_name = ?", [name]
+    ).fetchall()
+    assert len(rows) == 1, f"exactly one overload of {name}"
+    actual_parameters, description, examples, categories = rows[0]
+    assert actual_parameters == parameters, f"{name}: real parameter names"
+    assert description and description.strip(), f"{name}: description required"
+    assert description.strip().endswith("."), f"{name}: description is a sentence"
+    assert examples and all(example.strip() for example in examples), f"{name}: examples required"
+    assert categories == ["geocoding"], f"{name}: geocoding category"
+
+
+@pytest.mark.parametrize("name", FUNCTION_PARAMETERS)
+def test_function_description_examples_execute_on_real_sheets(con, name, poi_sheet, tmp_path, monkeypatch):
+    # Fixed documented filenames resolve to real sheets; execute the exact catalog SQL.
+    # Each parametrized case has its own database, so reset/load examples cannot mask failures.
+    (tmp_path / "mc.bin").symlink_to(SHEET)
+    (tmp_path / "mc_poi.bin").symlink_to(poi_sheet)
+    monkeypatch.chdir(tmp_path)
+    con.execute("SELECT gridpin_load('mc.bin')")
+    examples = con.execute(
+        "SELECT examples FROM duckdb_functions() WHERE function_name = ?", [name]
+    ).fetchone()[0]
+    assert examples, f"{name}: executable example required"
+    for example in examples:
+        rows = con.execute(example).fetchall()
+        assert rows and rows[0][0] is not None, f"{name}: example must perform a real call"
+    assert con.execute("SELECT 1").fetchone()[0] == 1, "connection survives examples"
+
+
+@pytest.mark.parametrize("loaded", [False, True])
+@pytest.mark.parametrize("sql", [
+    "SELECT gridpin_load(NULL)",
+    "SELECT gridpin_load_poi(NULL)",
+    "SELECT gridpin_geocode(NULL)",
+    "SELECT gridpin_reverse(NULL, 7.4)",
+    "SELECT gridpin_reverse(43.7, NULL)",
+])
+def test_null_arguments_before_and_after_load_return_null(con, sql, loaded):
+    # DuckDB's default NULL handling short-circuits before entering the Rust state checks.
+    if loaded:
+        con.execute(f"SELECT gridpin_load('{SHEET}')")
+    assert con.execute(sql).fetchall() == [(None,)]
+    assert con.execute("SELECT 1").fetchone()[0] == 1
+
 
 @pytest.fixture()
 def con():
     if not EXT.exists():
-        pytest.skip(f"no extension at {EXT} (build it: make bindings)")
+        pytest.skip(f"no extension at {EXT} (build it: make duckdb-ext)")
     if not SHEET.exists():
         pytest.skip(f"no test sheet at {SHEET}")
     c = duckdb.connect(config={"allow_unsigned_extensions": "true"})

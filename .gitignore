@@ -13,5 +13,8 @@ __pycache__/
 eval/control/*.csv
 data/wof/
 duckdb-ext/target/
+duckdb-ext/build/
+duckdb-ext/duckdb/
+duckdb-ext/*.duckdb_extension
 .wrangler/
 public-bench-work/

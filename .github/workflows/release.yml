@@ -248,28 +248,23 @@ jobs:
         run: |
           git clone https://github.com/duckdb/extension-ci-tools duckdb-ext/extension-ci-tools
           git -C duckdb-ext/extension-ci-tools checkout 5cad6aa9886a8ec6c9dbb772bed6fdae67c42d64  # pinned: a floating input can change the build between runs
-      - name: Build extension
-        run: cargo build --release --manifest-path duckdb-ext/Cargo.toml
-      - name: Append DuckDB metadata
+      - name: Build C++ extension against exact DuckDB v1.5.5 (Rust staticlib via CMake)
         shell: bash
         run: |
-          cd duckdb-ext
-          # extension version = its own Cargo.toml , NOT the engine tag;
-          # -dv v1.2.0 is the C_STRUCT ABI floor, not the dependency version
-          EXT_V=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
-          # The output BASENAME must stay `gridpin_ext`: DuckDB derives the init symbol
-          # (`gridpin_ext_init_c_api`) from the loaded file's basename, so a platform suffix
-          # in the FILENAME makes the asset unloadable — "symbol gridpin_ext-osx_arm64_init_c_api
-          # not found". The platform is carried by the ZIP wrapper below, not
-          # the extension's own name.
-          python3 extension-ci-tools/scripts/append_extension_metadata.py \
-            -l target/release/${{ matrix.libname }} -n gridpin_ext \
-            -o gridpin_ext.duckdb_extension \
-            -p ${{ matrix.platform }} -dv v1.2.0 -ev "v$EXT_V" --abi-type C_STRUCT
+          git clone --depth 1 --branch v1.5.5 https://github.com/duckdb/duckdb duckdb-source
+          cmake -S duckdb-source -B duckdb-build -DCMAKE_BUILD_TYPE=Release -DBUILD_UNITTESTS=OFF -DBUILD_SHELL=OFF -DOVERRIDE_GIT_DESCRIBE=v1.5.5 -DDUCKDB_EXTENSION_CONFIGS="$PWD/duckdb-ext/extension_config.cmake"
+          cmake --build duckdb-build --config Release --target gridpin_ext_loadable_extension --parallel 4
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          candidates = list(Path("duckdb-build/extension/gridpin_ext").rglob("gridpin_ext.duckdb_extension"))
+          assert len(candidates) == 1, candidates
+          shutil.copyfile(candidates[0], "duckdb-ext/gridpin_ext.duckdb_extension")
+          PY
       - name: Smoke — the SHIPPED basename actually LOADs
         shell: bash
         run: |
-          pip install --quiet duckdb==1.5.3
+          pip install --quiet duckdb==1.5.5
           # Copy into a clean dir under the exact basename users get after unzipping — this
           # reproduces the download/LOAD the release ships, not a build-path convenience name.
           # The directory is workspace-relative and the path is resolved by Python itself.

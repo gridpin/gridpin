@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 #[derive(Default)]
 struct Trace {
+    field_retries: Vec<Value>,
     parsed: Vec<Value>,
     boundaries: Vec<Value>,
     boundary_count: usize,
@@ -65,6 +66,7 @@ impl Scope {
         };
         json!({
             "version": 1,
+            "field_retries": t.field_retries,
             "parsed": {"attempts": t.parse_attempts, "examples": t.parsed, "boundary_attempts": t.boundary_count, "boundary_examples": t.boundaries,
                 "semantics": "Alternative parses, not a single accepted address; rest still includes the street/commune boundary. Examples capped at 8."},
             "area_candidates": {"count": t.areas.len(), "first_ids": t.areas.iter().take(8).collect::<Vec<_>>(),
@@ -173,5 +175,12 @@ pub(crate) fn guard(stage: &str, count: usize, accepted: bool, evidence: Value) 
                 json!({"stage": stage, "count": count, "accepted": accepted, "evidence": evidence}),
             );
         }
+    });
+}
+
+pub(crate) fn field_retry(form: usize, accepted: bool) {
+    observe(|t| {
+        t.field_retries
+            .push(json!({"form": form, "accepted": accepted}))
     });
 }

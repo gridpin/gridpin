@@ -6,6 +6,7 @@ mod de;
 mod de_effect_audit;
 pub mod diagnosis;
 pub mod index;
+mod levenshtein;
 pub mod ml;
 pub mod norm;
 pub mod query;

@@ -15,6 +15,7 @@ Addresses reach Overture via OpenAddresses.
 | ANNCSU (Italy), via Overture/OpenAddresses | Italy addresses | **CC BY 4.0** | Archivio Nazionale dei Numeri Civici delle Strade Urbane (ANNCSU) — CC BY 4.0 |
 | Nationaal Georegister / BAG (Netherlands), via Overture/OpenAddresses | Netherlands addresses | **Public Domain Mark 1.0** (no rights reserved) | Nationaal Georegister (Kadaster / BAG) — PDM 1.0 |
 | CartoCiudad — Instituto Geográfico Nacional / CNIG, scne.es (Spain), via Overture/OpenAddresses (release 2026-08-19.0) | Spain addresses (all 52 postal provinces, incl. Ceuta and Melilla) | **CC BY 4.0** | Obra derivada de CartoCiudad CC-BY 4.0 scne.es — address normalization applied |
+| IBGE — Instituto Brasileiro de Geografia e Estatistica, CNEFE 2022; via Overture Maps / OpenAddresses, release 2026-08-19.0 | Brazil addresses (nationwide) | Public data; implied licence recorded by AddressForAll as CC0 family; labelled CC0 by Overture | Address normalization applied |
 | Republički geodetski zavod (RGZ), data.gov.rs (Serbia), via Overture/OpenAddresses | Serbia addresses | **data.gov.rs Terms of use** | Републички геодетски завод (RGZ) — data.gov.rs Terms of use |
 | Overture Maps Foundation, places layer | optional POI sheet | **mixed permissive**: CDLA-Permissive-2.0 (Meta, Microsoft, …), Apache-2.0 (Foursquare), CC0-1.0 (AllThePlaces) | © Overture Maps Foundation and per-source contributors |
 | GeoNames | settlement-name aliases (multi-script, Serbia) | CC BY 4.0 | © GeoNames, geonames.org (CC BY 4.0) |

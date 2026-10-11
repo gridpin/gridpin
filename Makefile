@@ -8,17 +8,16 @@ RULES=$(if $(wildcard rules),--rules rules,)
 MODELS=--model ml/parser_v0.bin --rank ml/rank_v0.bin $(RULES)
 GEONAMES_RS=data/geonames_rs.txt
 
-# All recipes are phony (not files). Without this, a file named like a target (e.g. `regen-manifests`)
+# All recipes are phony (not files). Without this, a file named like a target (e.g. `smoke`)
 # in the working dir makes `make` consider the target up to date and silently skip the recipe — which
-# let the release gate skip its provenance check.
-.PHONY: engine bindings fr nl it rs es de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb \
-	provision regen-manifests public-gate http public-bench-contract public-bench
+# let the release check skip its provenance verification.
+.PHONY: engine bindings duckdb-ext fr nl it rs es de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb http public-bench-contract public-bench
 
 engine:
 	cargo build --release --manifest-path gridpin/Cargo.toml
 # Target-specific SHELL is inherited by every prerequisite, including engine/bindings.
 # The immutable OS sandbox also follows recursive make and children that replace env/PATH.
-# Keep the existing build/test recipes intact; gate uses only the already built CLI.
+# Keep the existing build/test recipes intact; the check uses only the already built CLI.
 .PHONY: lint-fmt lint-clippy
 # Match the pinned CI lint commands for both Rust packages. The lint cache must
 # never share the measurement engine target directory. Cargo stays offline.
@@ -35,7 +34,7 @@ lint-clippy:
 
 # Everything runnable without private data: Rust unit tests, worker tests, Python
 # bindings and DuckDB extension (against the Monaco smoke sheet). The full quality
-# full quality gate needs private sheets and lives in Makefile.lab.
+# full quality check needs private sheets and lives in Makefile.lab.
 test: engine
 	cargo test --release --manifest-path gridpin/Cargo.toml
 	cargo test --release --manifest-path duckdb-ext/Cargo.toml
@@ -47,11 +46,12 @@ test-py: bindings mc
 
 # DuckDB extension against the Monaco smoke sheet
 test-duckdb: bindings mc
-	GRIDPIN_TEST_SHEET=$$PWD/data/mc.bin .venv-py/bin/python -m pytest duckdb-ext/test/test_extension.py -q
+	test -s duckdb-ext/gridpin_ext.duckdb_extension || { echo 'Run make duckdb-ext first'; exit 1; }
+	GRIDPIN_TEST_SHEET=$$PWD/data/mc.bin $(DUCKDB_PYTHON) -m pytest duckdb-ext/test/test_extension.py -q
 
-# Rebuild ALL bindings after any engine change, or the Python wheel and the DuckDB
-# extension keep the old engine. Prereqs: a Python venv with maturin at .venv-py/, and
-# duckdb/extension-ci-tools cloned into duckdb-ext/extension-ci-tools (CI does both).
+# Rebuild the Python binding after engine changes. Rebuild the DuckDB extension
+# explicitly with duckdb-ext; only an explicit request starts that source build.
+# Prerequisite for Python: a venv with maturin at .venv-py/.
 # Platform-aware: the library name and DuckDB platform differ per OS
 # (a hardcoded .dylib/osx_arm64 made this target unrunnable on the Linux CI).
 UNAME_S := $(shell uname -s)
@@ -70,7 +70,19 @@ endif
 EXT_VERSION := $(shell grep -m1 '^version' duckdb-ext/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
 bindings: engine
 	cd gridpin && VIRTUAL_ENV=$$PWD/../.venv-py ../.venv-py/bin/maturin develop --release
-	cd duckdb-ext && cargo build --release && python3 extension-ci-tools/scripts/append_extension_metadata.py -l target/release/$(EXT_LIB) -n gridpin_ext -o gridpin_ext.duckdb_extension -p $(DUCKDB_PLATFORM) -dv v1.2.0 -ev v$(EXT_VERSION) --abi-type C_STRUCT
+
+# CPP ABI requires DuckDB v1.5.5 sources and the same runtime version.
+# Supply an existing source checkout/archive; this target never downloads it.
+DUCKDB_SOURCE_DIR ?= $(CURDIR)/duckdb-ext/duckdb
+DUCKDB_BUILD_DIR ?= $(CURDIR)/duckdb-ext/build/release
+DUCKDB_CMAKE_FLAGS ?=
+DUCKDB_BUILD_JOBS ?= 4
+DUCKDB_PYTHON ?= .venv-py/bin/python
+duckdb-ext:
+	test -f "$(DUCKDB_SOURCE_DIR)/CMakeLists.txt" || { echo 'Set DUCKDB_SOURCE_DIR to DuckDB v1.5.5 sources'; exit 1; }
+	cmake -S "$(DUCKDB_SOURCE_DIR)" -B "$(DUCKDB_BUILD_DIR)" -DCMAKE_BUILD_TYPE=Release -DBUILD_UNITTESTS=OFF -DBUILD_SHELL=ON -DOVERRIDE_GIT_DESCRIBE=v1.5.5 -DDUCKDB_EXTENSION_CONFIGS="$(CURDIR)/duckdb-ext/extension_config.cmake" $(DUCKDB_CMAKE_FLAGS)
+	cmake --build "$(DUCKDB_BUILD_DIR)" --target gridpin_ext_loadable_extension --parallel $(DUCKDB_BUILD_JOBS)
+	cp "$(DUCKDB_BUILD_DIR)/extension/gridpin_ext/gridpin_ext.duckdb_extension" duckdb-ext/gridpin_ext.duckdb_extension
 
 fr: engine
 	nice -n 19 python3 prep/normalize.py
@@ -94,6 +106,15 @@ es: engine
 	$(if $(wildcard rules),python3 prep/es_rules.py,)
 	nice -n 19 python3 prep/export_build.py data/es_norm.parquet data/build_es.csv.gz
 	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_es.csv.gz data/es.bin $(MODELS) --meta data/es_manifest.json
+
+# Brazil (ANSWERS §41): Overture 2026-08-19.0, whole country, one sheet. The extraction
+# streams from S3 in two passes (prep/overture.py BR) and never holds the 74M rows.
+br: RULES=$(if $(wildcard rules),--rules rules/br,)
+br: engine
+	nice -n 19 python3 prep/overture.py BR
+	$(if $(wildcard rules),python3 prep/br_rules.py,)
+	GRIDPIN_MEM=8GB nice -n 19 python3 prep/export_build.py data/br_norm.parquet data/build_br.csv.gz
+	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_br.csv.gz data/br.bin $(MODELS) --meta data/br_manifest.json
 
 rs: engine
 	test -f $(GEONAMES_RS) || python3 prep/fetch_zip.py https://download.geonames.org/export/dump/RS.zip RS.txt $(GEONAMES_RS)

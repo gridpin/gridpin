@@ -4,6 +4,21 @@
 
 require gridpin_ext
 
+# Every public function carries parameter names and usable documentation.
+query TTTTT
+SELECT function_name, parameters::VARCHAR, length(description) > 0,
+       array_length(examples) > 0, array_contains(categories, 'geocoding')
+FROM duckdb_functions()
+WHERE function_name IN ('gridpin_load', 'gridpin_load_poi', 'gridpin_reset',
+                        'gridpin_geocode', 'gridpin_reverse')
+ORDER BY function_name;
+----
+gridpin_geocode	[query]	true	true	true
+gridpin_load	[path]	true	true	true
+gridpin_load_poi	[path]	true	true	true
+gridpin_reset	[]	true	true	true
+gridpin_reverse	[lat, lon]	true	true	true
+
 # a query before gridpin_load must error, not crash
 statement error
 SELECT gridpin_geocode('10 rue de rivoli paris');

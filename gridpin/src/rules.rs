@@ -16,6 +16,8 @@ use std::sync::OnceLock;
 
 // section entry classes (u8) and their TSV file names
 pub const CLASSES: &[(u8, &str)] = &[
+    (26, "municipality_guard"), // optional municipality/region vocabulary
+    (23, "city_tail"),          // optional tail grammar and exact-city guard
     (1, "commune_alias"),       // key → value
     (2, "city_alias"),          // key → value
     (3, "abbrev2"),             // key="a b" → full word
@@ -36,9 +38,13 @@ pub const CLASSES: &[(u8, &str)] = &[
 ];
 
 pub struct Rules {
+    pub municipality_guard: HashMap<String, String>,
+    pub city_tail: HashMap<String, String>,
+    pub recipient_prefixes: HashSet<String>,
     pub commune_alias: HashMap<String, String>,
     pub city_alias: Vec<(String, String)>,
-    pub abbrev2: Vec<(String, String)>, // ("a b", "full")
+    pub street_rewrites: Vec<(String, String)>, // street keys only
+    pub abbrev2: Vec<(String, String)>,         // ("a b", "full")
     pub capitals: Vec<String>,
     pub types_cyr: Vec<String>,
     pub types_latin: Vec<String>,
@@ -75,10 +81,20 @@ impl Rules {
 
     fn add(&mut self, class: u8, key: String, val: String) {
         match class {
+            26 => {
+                self.municipality_guard.insert(key, val);
+            }
+            25 => {
+                self.recipient_prefixes.insert(key);
+            }
+            23 => {
+                self.city_tail.insert(key, val);
+            }
             1 => {
                 self.commune_alias.insert(key, val);
             }
             2 => self.city_alias.push((key, val)),
+            24 => self.street_rewrites.push((key, val)),
             3 => self.abbrev2.push((key, val)),
             4 => self.capitals.push(key),
             5 => self.types_cyr.push(key),
@@ -393,8 +409,12 @@ const D_PLACE_TYPE_STRIP: &[&str] = &[
 
 fn defaults() -> Rules {
     let mut r = Rules {
+        municipality_guard: HashMap::new(),
+        city_tail: HashMap::new(),
+        recipient_prefixes: HashSet::new(),
         commune_alias: HashMap::new(),
         city_alias: Vec::new(),
+        street_rewrites: Vec::new(),
         abbrev2: Vec::new(),
         capitals: Vec::new(),
         types_cyr: Vec::new(),
@@ -607,6 +627,8 @@ pub fn entries_from_tsv_dir(dir: &Path) -> std::io::Result<Vec<(u8, String, Stri
                 ("place_prefix" | "place_type_strip", ["de", key, ..]) => {
                     (22, (*key).to_string(), String::new())
                 }
+                ("abbrev2", ["street", key, val]) => (24, (*key).to_string(), (*val).to_string()),
+                ("abbrev2", ["recipient", key, "1"]) => (25, (*key).to_string(), String::new()),
                 ("abbrev2", [a, b, val, ..]) => (*class, format!("{a} {b}"), (*val).to_string()),
                 (_, [key, val, ..]) => (*class, (*key).to_string(), (*val).to_string()),
                 (_, [key]) => (*class, (*key).to_string(), String::new()),

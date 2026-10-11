@@ -7,8 +7,8 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::levenshtein::Levenshtein;
 use anyhow::{Context, Result};
-use fst::automaton::Levenshtein;
 use fst::{Automaton, IntoStreamer, Map, Streamer};
 use memmap2::Mmap;
 use serde::Serialize;
@@ -332,6 +332,548 @@ pub struct StreetMeta {
     pub house_count: u32,
     /// offset of the full postcode string in names (NL "1012XJ"); 0 = absent -> print numeric postcode
     pub postcode_disp_off: u32,
+}
+
+// One query re-runs the fuzzy street search for every variant it tries (country variants,
+// the retry without the neighbourhood), and each run used to rebuild the same Levenshtein
+// automata: on the Brazilian sheet that was ~90 % of the time. The automaton is a pure function
+// of (phrase, distance), so reusing it cannot change an answer; a failed build (too many
+// states) is remembered too. The cache is per thread and emptied at the start of every
+// top-level query, so its memory is bounded by one query's automata.
+type LevCache = HashMap<(String, u32), Option<std::rc::Rc<Levenshtein>>>;
+
+thread_local! {
+    static LEV_CACHE: std::cell::RefCell<LevCache> = std::cell::RefCell::new(HashMap::new());
+}
+
+const LEV_CACHE_MAX: usize = 256;
+
+fn cached_levenshtein(phrase: &str, dist: u32) -> Option<std::rc::Rc<Levenshtein>> {
+    LEV_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let key = (phrase.to_owned(), dist);
+        if let Some(found) = cache.get(&key) {
+            return found.clone();
+        }
+        if cache.len() >= LEV_CACHE_MAX {
+            cache.clear();
+        }
+        let built = Levenshtein::new(phrase, dist).ok().map(std::rc::Rc::new);
+        cache.insert(key, built.clone());
+        built
+    })
+}
+
+fn clear_levenshtein_cache() {
+    LEV_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
+#[cfg(test)]
+fn levenshtein_cache_len() -> usize {
+    LEV_CACHE.with(|cache| cache.borrow().len())
+}
+
+#[derive(Debug)]
+struct CityTail {
+    city: String,
+    retry: Option<String>,
+}
+
+fn city_tail(raw: &str) -> Option<CityTail> {
+    let cfg = &crate::rules::rules().city_tail;
+    if cfg.get("enabled").map(String::as_str) != Some("1") {
+        return None;
+    }
+    let regions = cfg.get("regions")?;
+    let forms = cfg.get("forms")?;
+    let parts: Vec<&str> = raw.split(',').map(str::trim).collect();
+    let mut end = parts.len().checked_sub(1)?;
+    let postal_digits = cfg.get("postal_digits")?.parse::<usize>().ok()?;
+    let postal_split = cfg.get("postal_split")?.parse::<usize>().ok()?;
+    let last = parts[end];
+    let digits: String = last.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() == postal_digits
+        && (last == digits
+            || (postal_split < digits.len()
+                && last == format!("{}-{}", &digits[..postal_split], &digits[postal_split..])))
+    {
+        end = end.checked_sub(1)?;
+    }
+    let is_region = |s: &str| {
+        regions
+            .split_whitespace()
+            .any(|v| v.eq_ignore_ascii_case(s))
+    };
+    let has_form = |s: &str| forms.split_whitespace().any(|v| v == s);
+    let (city_pos, city) = if has_form("comma") && is_region(parts[end]) {
+        let pos = end.checked_sub(1)?;
+        (pos, parts[pos])
+    } else if has_form("hyphen") {
+        let (city, region) = parts[end].rsplit_once(" - ")?;
+        if !is_region(region.trim()) {
+            return None;
+        }
+        (end, city.trim())
+    } else {
+        return None;
+    };
+    // An administrative name is not a postal code or an address fragment.
+    if city_pos == 0
+        || !city.chars().any(char::is_alphabetic)
+        || city
+            .nfc()
+            .any(|c| !(c.is_alphabetic() || c.is_whitespace() || matches!(c, '-' | '\'' | '’')))
+    {
+        return None;
+    }
+    let retry = if city_pos == 3
+        && !parts[0].is_empty()
+        && !parts[2].is_empty()
+        && (parts[1].chars().any(|c| c.is_ascii_digit())
+            || matches!(normalize(parts[1]).as_str(), "s n" | "sn"))
+    {
+        Some(
+            parts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| (i != 2).then_some(*s))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    } else {
+        None
+    };
+    Some(CityTail {
+        city: normalize(city),
+        retry,
+    })
+}
+
+// Field retries are separate from the frozen single-district retry grammar.
+// Explicit recipient syntax is data owned by this sheet. Never drop a street
+// field merely because another comma-delimited field resembles an address.
+fn recipient_field_retry(raw: &str) -> Option<&str> {
+    let prefixes = &crate::rules::rules().recipient_prefixes;
+    if prefixes.is_empty() {
+        return None;
+    }
+    let (first, address) = raw.split_once(',')?;
+    let first = normalize(first);
+    let recognized = prefixes.iter().any(|prefix| {
+        let prefix = normalize(prefix);
+        !prefix.is_empty()
+            && first
+                .strip_prefix(&prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    });
+    let address = address.trim();
+    (recognized && !address.is_empty()).then_some(address)
+}
+
+fn recipient_field_choose(
+    original: Vec<(Hit, [f32; N_FEATS])>,
+    raw: &str,
+    retry: impl FnOnce(&str) -> Vec<(Hit, [f32; N_FEATS])>,
+) -> Vec<(Hit, [f32; N_FEATS])> {
+    empty_field_choose(original, || recipient_field_retry(raw), retry)
+}
+
+struct AddressFieldRetries {
+    city: String,
+    number: u32,
+    forms: Vec<String>,
+}
+
+fn empty_field_choose<Q: AsRef<str>>(
+    original: Vec<(Hit, [f32; N_FEATS])>,
+    rewrite: impl FnOnce() -> Option<Q>,
+    retry: impl FnOnce(&str) -> Vec<(Hit, [f32; N_FEATS])>,
+) -> Vec<(Hit, [f32; N_FEATS])> {
+    if !original.is_empty() {
+        return original;
+    }
+    rewrite().map_or(original, |query| retry(query.as_ref()))
+}
+
+fn numeric_house_prefix(value: &str) -> Option<u32> {
+    let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+// Number labels belong to the number field, never to street-name tokens.
+fn field_number_unlabel(value: &str) -> &str {
+    let value = value.trim();
+    for label in ["n.º", "nº", "n°", "N.º", "Nº", "N°"] {
+        if let Some(rest) = value.strip_prefix(label) {
+            return rest.trim_start();
+        }
+    }
+    value
+}
+
+fn field_number_rewrite(raw: &str) -> String {
+    let mut parts: Vec<&str> = raw.split(',').collect();
+    if let Some(number) = parts.get_mut(1) {
+        *number = field_number_unlabel(number);
+    }
+    parts.join(",")
+}
+
+fn address_field_retries(raw: &str) -> Option<AddressFieldRetries> {
+    address_field_retries_anchored(&field_number_rewrite(raw))
+}
+
+// Unanchored input is deliberately limited to street + a separate number field.
+// Additional comma fields may name a city; they must not silently lose its guard.
+fn cityless_field_address(raw: &str) -> Option<(String, u32)> {
+    let cfg = &crate::rules::rules().city_tail;
+    if cfg.get("enabled").map(String::as_str) != Some("1") {
+        return None;
+    }
+    let parts: Vec<&str> = raw.split(',').map(str::trim).collect();
+    if parts.len() != 2 || !parts[0].chars().any(char::is_alphabetic) {
+        return None;
+    }
+    let field = field_number_unlabel(parts[1]);
+    let number = field.split_once(" - ").map_or(field, |(n, _)| n);
+    let number = number.split_once(" – ").map_or(number, |(n, _)| n);
+    let number = number.split_once(" — ").map_or(number, |(n, _)| n).trim();
+    let digits = number.chars().take_while(char::is_ascii_digit).count();
+    let suffix = &number[digits..];
+    if digits == 0
+        || digits > 5
+        || !(suffix.is_empty() || (suffix.len() == 1 && suffix.as_bytes()[0].is_ascii_alphabetic()))
+    {
+        return None;
+    }
+    // A region in the remaining payload is an explicit geographic anchor.
+    if cfg.get("regions").is_some_and(|regions| {
+        field.split_whitespace().any(|word| {
+            regions
+                .split_whitespace()
+                .any(|r| r.eq_ignore_ascii_case(word))
+        })
+    }) {
+        return None;
+    }
+    Some((prepared_query_key(parts[0]), numeric_house_prefix(number)?))
+}
+
+// Only explicit one-token type pairs in the sheet's street rules share a key.
+// Linkers, numerals and inner-name rewrites never enter this equivalence graph.
+fn field_street_type_aliases() -> HashMap<String, String> {
+    let rules = crate::rules::rules();
+    let mut graph: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (from, to) in &rules.street_rewrites {
+        if from.split_whitespace().count() != 1
+            || to.split_whitespace().count() != 1
+            || !rules.is_street_type(from)
+            || !rules.is_street_type(to)
+        {
+            continue;
+        }
+        graph.entry(from).or_default().push(to);
+        graph.entry(to).or_default().push(from);
+    }
+    let mut aliases = HashMap::new();
+    for &start in graph.keys() {
+        if aliases.contains_key(start) {
+            continue;
+        }
+        let mut group = Vec::new();
+        let mut pending = vec![start];
+        while let Some(word) = pending.pop() {
+            if group.contains(&word) {
+                continue;
+            }
+            group.push(word);
+            if let Some(next) = graph.get(word) {
+                pending.extend(next.iter().copied());
+            }
+        }
+        // Stable across rule order and direction, including transitive pairs.
+        let canonical = *group.iter().min().expect("nonempty type component");
+        for word in group {
+            aliases.insert(word.to_owned(), canonical.to_owned());
+        }
+    }
+    aliases
+}
+
+fn field_street_type_key(prepared: &str, aliases: &HashMap<String, String>) -> String {
+    let Some((kind, rest)) = prepared.split_once(' ') else {
+        return prepared.to_owned();
+    };
+    aliases.get(kind).map_or_else(
+        || prepared.to_owned(),
+        |canonical| format!("{canonical} {rest}"),
+    )
+}
+
+fn address_field_retries_anchored(raw: &str) -> Option<AddressFieldRetries> {
+    let cfg = &crate::rules::rules().city_tail;
+    if cfg.get("enabled").map(String::as_str) != Some("1") {
+        return None;
+    }
+    let regions = cfg.get("regions")?;
+    let forms = cfg.get("forms")?;
+    let digits = cfg.get("postal_digits")?.parse::<usize>().ok()?;
+    let split = cfg.get("postal_split")?.parse::<usize>().ok()?;
+    let postal = |value: &str| {
+        let d: String = value.chars().filter(char::is_ascii_digit).collect();
+        d.len() == digits
+            && (value == d
+                || (split < digits && value == format!("{}-{}", &d[..split], &d[split..])))
+    };
+    let region = |value: &str| {
+        regions
+            .split_whitespace()
+            .any(|r| r.eq_ignore_ascii_case(value))
+    };
+    let parts: Vec<&str> = raw.split(',').map(str::trim).collect();
+    // Locate the explicit city/region anchor even when unit payload follows it.
+    // Region names and postal shape still come from sheet rules, never country code.
+    let (region_pos, mut city_pos, mut city, region_name, separate_region) =
+        parts.iter().enumerate().rev().find_map(|(pos, part)| {
+            if forms.split_whitespace().any(|f| f == "comma") && region(part) {
+                let city_pos = pos.checked_sub(1)?;
+                Some((pos, city_pos, parts[city_pos], *part, true))
+            } else if forms.split_whitespace().any(|f| f == "hyphen") {
+                let (name, code) = part.rsplit_once(" - ")?;
+                region(code.trim()).then_some((pos, pos, name.trim(), code.trim(), false))
+            } else {
+                None
+            }
+        })?;
+    // A postal segment between city and UF is preserved in A, not mistaken for city.
+    if postal(city) {
+        city_pos = city_pos.checked_sub(1)?;
+        city = parts[city_pos];
+    }
+    if city_pos == 0
+        || !city.chars().any(char::is_alphabetic)
+        || city
+            .nfc()
+            .any(|c| !(c.is_alphabetic() || c.is_whitespace() || matches!(c, '-' | '\'' | '’')))
+    {
+        return None;
+    }
+    let house_token = |token: &str| {
+        let n = token.chars().take_while(char::is_ascii_digit).count();
+        let rest = &token[n..];
+        n > 0
+            && n <= 5
+            && (rest.is_empty() || (rest.len() == 1 && rest.as_bytes()[0].is_ascii_alphabetic()))
+    };
+    let separate_number = parts
+        .get(1)
+        .map(|p| p.split_once(" - ").map_or(*p, |(n, _)| n).trim());
+    let (address_end, number) = if separate_number.is_some_and(house_token) {
+        (2, numeric_house_prefix(separate_number?)?)
+    } else {
+        let token = parts[0].split_whitespace().last()?;
+        if !parts[0].contains(char::is_whitespace) || !house_token(token) {
+            return None;
+        }
+        (1, numeric_house_prefix(token)?)
+    };
+    if city_pos < address_end || parts[0].is_empty() {
+        return None;
+    }
+    let mut a = parts[..address_end].to_vec();
+    a.extend(
+        parts[address_end..city_pos]
+            .iter()
+            .filter(|p| postal(p))
+            .copied(),
+    );
+    a.extend_from_slice(&parts[city_pos..]);
+    let mut b = parts[..address_end].to_vec();
+    if address_end == 2 {
+        b[1] = separate_number?;
+    }
+    b.push(city);
+    // Keep the two accepted retries first, with their original byte surfaces.
+    let mut retries = vec![a.join(", "), b.join(", ")];
+    let mut push = |query: String| {
+        // Empty slots keep diagnostic form ids stable without repeating a search.
+        if query == raw || retries.contains(&query) {
+            retries.push(String::new());
+        } else {
+            retries.push(query);
+        }
+    };
+    let join = |p: Vec<&str>| p.join(", ");
+    // The query-visible probes retain the original number and city guard below.
+    let no_postal = join(parts.iter().copied().filter(|p| !postal(p)).collect());
+    push(no_postal); // no_postal
+    let without_region = |hyphen: bool| {
+        let mut p = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            if i == city_pos {
+                p.push(if hyphen {
+                    format!("{city} - {region_name}")
+                } else {
+                    city.to_owned()
+                });
+            } else if i != region_pos || !separate_region {
+                p.push((*part).to_owned());
+            }
+        }
+        p.join(", ")
+    };
+    push(without_region(false)); // no_region
+    push(without_region(true)); // city_hyphen
+    let mut comma_city = parts.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+    if !separate_region {
+        comma_city[city_pos] = format!("{city}, {region_name}");
+    }
+    push(comma_city.join(", ")); // city_comma
+    for (kind, hyphen, prefix) in [(0, false, false), (1, true, false), (2, false, true)] {
+        let rewritten = parts
+            .iter()
+            .map(|part| {
+                if !postal(part) {
+                    return (*part).to_owned();
+                }
+                let d: String = part.chars().filter(char::is_ascii_digit).collect();
+                if prefix && split > 0 && split < digits {
+                    d[..split].to_owned()
+                } else if hyphen && split > 0 && split < digits {
+                    format!("{}-{}", &d[..split], &d[split..])
+                } else {
+                    d
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        match kind {
+            0 => push(rewritten), // postal_plain
+            1 => push(rewritten), // postal_hyphen
+            _ => push(rewritten), // postal_prefix
+        }
+    }
+    push(join(
+        parts
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| (i <= region_pos || postal(p)).then_some(*p))
+            .collect(),
+    )); // no_unit
+
+    // Separate an attached terminal number only; never infer one from street digits.
+    if address_end == 1 {
+        if let Some((street, number)) = parts[0].rsplit_once(char::is_whitespace) {
+            let mut split_parts = vec![street, number];
+            split_parts.extend_from_slice(&parts[1..]);
+            push(join(split_parts)); // separate_house
+            push(format!("{street}, {number}, {city}")); // clean_fields
+        }
+    }
+    Some(AddressFieldRetries {
+        city: normalize(city),
+        number,
+        forms: retries,
+    })
+}
+
+fn address_field_choose(
+    original: Vec<(Hit, [f32; N_FEATS])>,
+    tail: &AddressFieldRetries,
+    mut retry: impl FnMut(usize, &str) -> Vec<(Hit, [f32; N_FEATS])>,
+) -> Vec<(Hit, [f32; N_FEATS])> {
+    if original.first().is_some_and(|(hit, _)| {
+        hit.precision == "house"
+            || (matches!(hit.precision, "near" | "interp") && normalize(&hit.commune) == tail.city)
+    }) {
+        return original;
+    }
+    for (i, q) in tail.forms.iter().enumerate() {
+        if q.is_empty() {
+            continue;
+        }
+        let alternate = retry(i, q);
+        let accepted = alternate.first().is_some_and(|(hit, _)| {
+            hit.precision == "house"
+                && hit.housenumber.as_deref().and_then(numeric_house_prefix) == Some(tail.number)
+                && normalize(&hit.commune) == tail.city
+        });
+        crate::diagnosis::field_retry(i, accepted);
+        if accepted {
+            return alternate;
+        }
+    }
+    original
+}
+
+fn strong_first(hits: &[(Hit, [f32; N_FEATS])]) -> bool {
+    hits.first()
+        .is_some_and(|(hit, _)| matches!(hit.precision, "house" | "interp" | "near"))
+}
+
+fn postal_retry(raw: &str) -> Option<String> {
+    let cfg = &crate::rules::rules().city_tail;
+    if cfg.get("enabled").map(String::as_str) != Some("1") {
+        return None;
+    }
+    let digits = cfg.get("postal_digits")?.parse::<usize>().ok()?;
+    let split = cfg.get("postal_split")?.parse::<usize>().ok()?;
+    if split == 0 || split >= digits {
+        return None;
+    }
+    let bytes = raw.as_bytes();
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        let blocked = |c: char| c == '-' || c.is_numeric();
+        if i - start == digits
+            && !raw[..start].chars().next_back().is_some_and(blocked)
+            && !raw[i..].chars().next().is_some_and(blocked)
+        {
+            out.push_str(&raw[copied..start + split]);
+            out.push('-');
+            copied = start + split;
+        }
+    }
+    if copied == 0 {
+        None
+    } else {
+        out.push_str(&raw[copied..]);
+        Some(out)
+    }
+}
+
+fn city_tail_choose(
+    original: Vec<(Hit, [f32; N_FEATS])>,
+    city: &str,
+    retry: impl FnOnce() -> Vec<(Hit, [f32; N_FEATS])>,
+) -> Vec<(Hit, [f32; N_FEATS])> {
+    if strong_first(&original) {
+        return original;
+    }
+    let alternate = retry();
+    if alternate
+        .first()
+        .is_some_and(|(hit, _)| normalize(&hit.commune) == city)
+    {
+        return alternate;
+    }
+    if original
+        .first()
+        .is_some_and(|(hit, _)| normalize(&hit.commune) == city)
+    {
+        return original;
+    }
+    Vec::new()
 }
 
 #[derive(Serialize, Clone)]
@@ -2371,6 +2913,96 @@ fn num_words_to_digits(phrase: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static STREET_DATA_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Rule alternatives for a street lookup key after house-number extraction.
+/// Two snapshot rounds compose a type with a numeral or linker rewrite.
+fn street_data_variants(phrase: &str) -> Vec<String> {
+    #[cfg(test)]
+    STREET_DATA_CALLS.with(|n| n.set(n.get() + 1));
+    const MAX_VARIANTS: usize = 8;
+    let rules = &crate::rules::rules().street_rewrites;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    // Rule shape supplies the kind; the engine carries no language-specific vocabulary.
+    let kind = |from: &str, to: &str| {
+        if digits(from) || digits(to) {
+            0
+        } else if to.starts_with(&format!("{from} ")) || from.starts_with(&format!("{to} ")) {
+            2
+        } else {
+            1
+        }
+    };
+    let particles = rules
+        .iter()
+        .filter_map(|(a, b)| {
+            if kind(a, b) != 2 {
+                return None;
+            }
+            let (short, long) = if a.len() < b.len() { (a, b) } else { (b, a) };
+            let suffix = long.strip_prefix(&format!("{short} "))?;
+            (!suffix.contains(' ')).then_some((short.as_str(), suffix))
+        })
+        .collect::<Vec<_>>();
+    let is_particle = |word: &str| particles.iter().any(|(_, p)| *p == word);
+    let doubled = |candidate: &str| {
+        particles.iter().any(|(ty, _)| {
+            candidate
+                .strip_prefix(&format!("{ty} "))
+                .is_some_and(|rest| {
+                    let mut words = rest.split_whitespace();
+                    words.next().is_some_and(&is_particle) && words.next().is_some_and(&is_particle)
+                })
+        })
+    };
+    let mut variants = vec![phrase.to_owned()];
+    // Each kind is applied once, to the snapshot from preceding kinds only.
+    // Numerals come first, then types, then linkers: composition never feeds its own kind.
+    for stage in 0..3 {
+        let bases = variants.clone();
+        for base in bases {
+            for (from, to) in rules {
+                if kind(from, to) != stage {
+                    continue;
+                }
+                let candidate = if stage == 0 {
+                    let padded = format!(" {base} ");
+                    let pattern = format!(" {from} ");
+                    if !padded.contains(&pattern) {
+                        continue;
+                    }
+                    padded
+                        .replacen(&pattern, &format!(" {to} "), 1)
+                        .trim()
+                        .to_owned()
+                } else {
+                    let Some(rest) = base.strip_prefix(&format!("{from} ")) else {
+                        continue;
+                    };
+                    // Adding a linker in front of an existing linker would duplicate it.
+                    if stage == 2
+                        && to.starts_with(&format!("{from} "))
+                        && rest.split_whitespace().next().is_some_and(&is_particle)
+                    {
+                        continue;
+                    }
+                    format!("{to} {rest}")
+                };
+                if !doubled(&candidate) && !variants.contains(&candidate) {
+                    if variants.len() > MAX_VARIANTS {
+                        return variants.into_iter().skip(1).collect();
+                    }
+                    variants.push(candidate);
+                }
+            }
+        }
+    }
+    variants.into_iter().skip(1).collect()
+}
+
 /// Serbian genitive street names: the registry stores "Kneza Mihaila" (genitive) while
 /// people write the nominative "Knez Mihailova". Title -> +a (knez -> kneza), possessive
 /// "-ova/-eva" -> "-a" (Mihailova -> Mihaila). Extra variant, Latin script only.
@@ -3029,6 +3661,9 @@ pub struct Index {
     /// a current sheet and an older one — never answer with each other's rules.
     rules: &'static crate::rules::Rules,
     es_particle_rules_may_supply_number: std::sync::OnceLock<bool>,
+    // Product-visible street names, not source FST keys; every source id is retained.
+    field_display_streets: std::sync::OnceLock<HashMap<String, Vec<u32>>>,
+    field_title_streets: std::sync::OnceLock<HashMap<String, Vec<u32>>>,
     /// Centroid of the most prominent commune in the index (the de-facto capital) — a weak
     /// anchor for tie-breaking homonyms when the query names no city.
     top_anchor: Option<(f64, f64)>,
@@ -3450,6 +4085,8 @@ impl Index {
             _mmap: mmap,
             _rules_owned: rules_owned,
             es_particle_rules_may_supply_number: std::sync::OnceLock::new(),
+            field_display_streets: std::sync::OnceLock::new(),
+            field_title_streets: std::sync::OnceLock::new(),
             format_version,
             communes_fst,
             streets_fst,
@@ -5218,11 +5855,10 @@ impl Index {
                     q_content.iter().any(|qc| lev(&kc, qc) <= 1)
                 })
             };
-            let lev = match Levenshtein::new(&street_phrase, dist) {
-                Ok(l) => l,
-                Err(_) => continue,
+            let Some(lev) = cached_levenshtein(&street_phrase, dist) else {
+                continue;
             };
-            let mut stream = self.streets_fst.search(lev.starts_with()).into_stream();
+            let mut stream = self.streets_fst.search((&*lev).starts_with()).into_stream();
             let mut taken = 0;
             while let Some((key, v)) = stream.next() {
                 let sep = match key.iter().position(|&b| b == KEY_SEP) {
@@ -5451,7 +6087,8 @@ impl Index {
         let k = bound_k(k); // cap result count before it drives allocation/sort
         let raw = bound_query(raw); // cap work before normalization
         let _rules = crate::rules::scope(self.rules); // this file's tables, not another file's
-        let mut hits = self.query_feats_country_variants(raw, k, None);
+        let mut hits = self.query_feats_street_data(raw, k, None);
+        hits = self.foreign_city_guard(raw, hits);
         Self::strip_deferred_locality_drop(&mut hits);
         Self::monotone_confidence(&mut hits);
         hits
@@ -5476,10 +6113,237 @@ impl Index {
             lon,
             streets: self.streets_around(lat, lon),
         };
-        let mut hits = self.query_feats_country_variants(raw, k, Some(&focus));
+        let mut hits = self.query_feats_street_data(raw, k, Some(&focus));
+        hits = self.foreign_city_guard(raw, hits);
         Self::strip_deferred_locality_drop(&mut hits);
         Self::monotone_confidence(&mut hits);
         Ok(hits)
+    }
+
+    /// An optional vocabulary carried by this sheet guards only the first answer.
+    /// No fallback is attempted: uncertainty about the requested municipality abstains.
+    fn foreign_city_guard(
+        &self,
+        raw: &str,
+        hits: Vec<(Hit, [f32; N_FEATS])>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        let Some((first, _)) = hits.first() else {
+            return hits;
+        };
+        if !matches!(first.precision, "house" | "interp" | "near" | "street") {
+            return hits;
+        }
+        let cfg = &self.rules.municipality_guard;
+        if cfg.is_empty() {
+            return hits;
+        }
+        let n = normalize(raw);
+        let toks: Vec<&str> = n.split_whitespace().collect();
+        let mut positions = Vec::new();
+        let mut off = 0;
+        for token in &toks {
+            let start = n[off..].find(token).unwrap() + off;
+            positions.push((start, start + token.len()));
+            off = start + token.len();
+        }
+        let words = |key: &str| -> HashSet<&str> {
+            cfg.get(key)
+                .map(|v| v.split_whitespace().collect())
+                .unwrap_or_default()
+        };
+        let streets = words("street_markers");
+        let districts = words("district_markers");
+        let regions = words("regions");
+        let mut street_ranges = Vec::new();
+        let mut district_ranges = Vec::new();
+        // The research grammar splits commas/semicolons/newlines and spaced dashes.
+        let chars: Vec<(usize, char)> = raw.char_indices().collect();
+        let mut boundaries = vec![0];
+        for (i, (pos, c)) in chars.iter().enumerate() {
+            if matches!(c, ',' | ';' | '\n')
+                || (matches!(c, '-' | '–' | '—')
+                    && i > 0
+                    && i + 1 < chars.len()
+                    && chars[i - 1].1.is_whitespace()
+                    && chars[i + 1].1.is_whitespace())
+            {
+                boundaries.push(*pos);
+                boundaries.push(*pos + c.len_utf8());
+            }
+        }
+        boundaries.push(raw.len());
+        let mut offset = 0;
+        for pair in boundaries.windows(2) {
+            let z = normalize(&raw[pair[0]..pair[1]]);
+            if z.is_empty() {
+                continue;
+            }
+            let Some(relative) = n[offset..].find(&z) else {
+                continue;
+            };
+            let pos = offset + relative;
+            let ts: Vec<&str> = z.split_whitespace().collect();
+            let mut loc = 0;
+            let mut street = false;
+            let mut district = false;
+            for (i, t) in ts.iter().enumerate() {
+                let start = z[loc..].find(t).unwrap() + loc;
+                loc = start + t.len();
+                if !street && streets.contains(t) {
+                    let end = ts[i + 1..]
+                        .iter()
+                        .find(|x| {
+                            x.chars().next().is_some_and(|c| c.is_ascii_digit())
+                                || **x == "sn"
+                                || **x == "s"
+                        })
+                        .and_then(|x| z[loc..].find(x).map(|j| loc + j))
+                        .unwrap_or(z.len());
+                    street_ranges.push((pos + start, pos + end));
+                    street = true;
+                }
+                if !district && districts.contains(t) {
+                    district_ranges.push((pos + start, pos + z.len()));
+                    district = true;
+                }
+            }
+            offset = pos + z.len();
+        }
+        let inside = |start: usize, ranges: &Vec<(usize, usize)>| {
+            ranges.iter().any(|(a, b)| *a <= start && start < *b)
+        };
+        let mut ufs: HashSet<String> = toks
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| {
+                regions.contains(&t.to_uppercase().as_str())
+                    && !inside(positions[*i].0, &street_ranges)
+            })
+            .map(|(_, t)| t.to_uppercase())
+            .collect();
+        let phrase_in = |phrase: &str| format!(" {n} ").contains(&format!(" {phrase} "));
+        for (key, uf) in cfg {
+            if let Some(name) = key.strip_prefix("state:") {
+                if !cfg.contains_key(&format!("city:{name}")) && phrase_in(name) {
+                    ufs.insert(uf.clone());
+                }
+            }
+        }
+        // (start, end, canonical name, permitted regions, exclusion).
+        let mut matches = Vec::new();
+        for i in 0..toks.len() {
+            for j in i..(i + 8).min(toks.len()) {
+                let name = &n[positions[i].0..positions[j].1];
+                let mut canonical = name.to_string();
+                if let Some(v) = cfg.get(&format!("alias:{name}")) {
+                    canonical = v.clone();
+                }
+                if let Some(opts) = cfg.get(&format!("city:{canonical}")) {
+                    matches.push((positions[i].0, positions[j].1, canonical, opts.clone(), 0u8));
+                }
+            }
+        }
+        let snapshot = matches.clone();
+        matches.retain(|m| {
+            !snapshot
+                .iter()
+                .any(|o| o.0 <= m.0 && o.1 >= m.1 && o.1 - o.0 > m.1 - m.0)
+        });
+        for m in &mut matches {
+            if inside(m.0, &street_ranges) {
+                m.4 = 1;
+            } else if inside(m.0, &district_ranges) {
+                m.4 = 2;
+                let tail = n[m.1..].trim();
+                let uf_tail = tail
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|t| regions.contains(t.to_uppercase().as_str()))
+                    && tail
+                        .split_whitespace()
+                        .skip(1)
+                        .all(|t| t.bytes().all(|c| c.is_ascii_digit()));
+                // A complete municipality field may itself begin with a district marker.
+                let complete = district_ranges.iter().any(|(a, b)| *a == m.0 && *b == m.1);
+                if uf_tail
+                    || (complete
+                        && ufs.len() == 1
+                        && m.3.split_whitespace().any(|uf| ufs.contains(uf)))
+                {
+                    m.4 = 0;
+                }
+            }
+            if m.4 == 0 && !ufs.is_empty() && !m.3.split_whitespace().any(|uf| ufs.contains(uf)) {
+                m.4 = 3;
+            }
+        }
+        if ufs.is_empty() {
+            let snapshot = matches.clone();
+            for m in &mut matches {
+                if m.4 != 0 {
+                    continue;
+                }
+                if let Some(uf) = cfg.get(&format!("state:{}", m.2)) {
+                    if !snapshot.iter().any(|o| o.4 == 0 && o.2 == m.2 && o.0 > m.0)
+                        && snapshot.iter().any(|o| {
+                            o.4 == 0
+                                && o.1 <= m.0
+                                && o.2 != m.2
+                                && o.3.split_whitespace().any(|u| u == uf)
+                        })
+                    {
+                        m.4 = 4;
+                    }
+                }
+            }
+            for m in &matches {
+                if m.4 == 4 {
+                    ufs.insert(cfg[&format!("state:{}", m.2)].clone());
+                }
+            }
+        }
+        let mut cities = HashSet::new();
+        let mut names = HashSet::new();
+        for m in &matches {
+            if m.4 == 0 {
+                for uf in m.3.split_whitespace() {
+                    if ufs.is_empty() || ufs.contains(uf) {
+                        cities.insert((m.2.clone(), uf.to_string()));
+                        names.insert(m.2.clone());
+                    }
+                }
+            }
+        }
+        let mut ans = normalize(&first.commune);
+        if let Some(v) = cfg.get(&format!("alias:{ans}")) {
+            ans = v.clone();
+        }
+        // A city sharing its name with an explicit state remains possible when
+        // no municipality survives the UF filter (e.g. an island's homonym).
+        if names.is_empty()
+            && cfg
+                .get(&format!("state:{ans}"))
+                .is_some_and(|uf| ufs.contains(uf))
+            && !phrase_in(&ans)
+        {
+            return hits;
+        }
+        let reject = if !names.is_empty() && !names.contains(&ans) {
+            cities.len() == 1 && ufs.len() == 1
+        } else if !names.contains(&ans) {
+            matches.iter().any(|m| m.2 == ans && m.4 != 0)
+                || phrase_in(&ans)
+                || cfg
+                    .get(&format!("state:{ans}"))
+                    .is_some_and(|uf| ufs.contains(uf))
+        } else {
+            false
+        };
+        if reject {
+            Vec::new()
+        } else {
+            hits
+        }
     }
 
     fn de_effect_flags(effect: crate::de::Effect) -> &'static [&'static str] {
@@ -6954,6 +7818,751 @@ impl Index {
             }
         }
         original
+    }
+
+    // Rewrite only the street field; preserve the explicit house number and locality.
+    fn query_feats_street_data(
+        &self,
+        raw: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        let original = self.query_feats_street_data_base(raw, k, focus);
+        let original = recipient_field_choose(original, raw, |clean| {
+            self.query_feats_street_data_base(clean, k, focus)
+        });
+        let original = self.query_feats_comma_fields(original, raw, k, focus);
+        let original = self.query_feats_geographic_fields(original, raw, k, focus);
+        self.query_feats_title_fields(original, raw, k, focus)
+    }
+
+    /// Recover separators only from an exact indexed street boundary and existing
+    /// number/postal/region grammar. Numerals belonging to the street stay intact.
+    fn comma_field_retry(&self, raw: &str) -> Option<String> {
+        if raw.contains(',') {
+            return None;
+        }
+        let cfg = &crate::rules::rules().city_tail;
+        if cfg.get("enabled").map(String::as_str) != Some("1") {
+            return None;
+        }
+        let digits = cfg.get("postal_digits")?.parse::<usize>().ok()?;
+        let split = cfg.get("postal_split")?.parse::<usize>().ok()?;
+        let regions = cfg.get("regions")?;
+        let mut offset = 0;
+        let words = raw
+            .split_whitespace()
+            .map(|word| {
+                let start = offset + raw[offset..].find(word).expect("raw token");
+                offset = start + word.len();
+                (start, offset, word)
+            })
+            .collect::<Vec<_>>();
+        let postal = |word: &str| {
+            let d: String = word.chars().filter(char::is_ascii_digit).collect();
+            d.len() == digits
+                && (word == d
+                    || (split < digits && word == format!("{}-{}", &d[..split], &d[split..])))
+        };
+        let postals = words
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| postal(w.2))
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        if postals.len() > 1 {
+            return None;
+        }
+        let postal_pos = postals.first().copied();
+        let region_pos = words.len().checked_sub(1).filter(|&i| {
+            regions
+                .split_whitespace()
+                .any(|r| r.eq_ignore_ascii_case(words[i].2))
+        });
+        let aliases = field_street_type_aliases();
+        let projection = self.field_street_projection();
+        let known_street = |street: &str| {
+            let street = prepared_query_key(street);
+            let mut forms = vec![street.clone()];
+            forms.extend(street_data_variants(&street));
+            forms.iter().any(|form| {
+                if projection.contains_key(&field_street_type_key(form, &aliases)) {
+                    return true;
+                }
+                let Some((kind, name)) = form.split_once(' ') else {
+                    return false;
+                };
+                if !is_street_type_word(kind) {
+                    return false;
+                }
+                let rules = crate::rules::rules();
+                rules
+                    .types_latin
+                    .iter()
+                    .chain(&rules.types_cyr)
+                    .chain(&rules.types_extra)
+                    .any(|kind| {
+                        projection.contains_key(&field_street_type_key(
+                            &format!("{kind} {name}"),
+                            &aliases,
+                        ))
+                    })
+            })
+        };
+        if known_street(raw) {
+            return None;
+        }
+        let limit = postal_pos.or(region_pos).unwrap_or(words.len());
+        let mut house = None;
+        for i in 1..limit {
+            let token = field_number_unlabel(words[i].2);
+            let n = token.chars().take_while(char::is_ascii_digit).count();
+            if n == 0
+                || n > 5
+                || !(token.len() == n
+                    || (token.len() == n + 1 && token.as_bytes()[n].is_ascii_alphabetic()))
+            {
+                continue;
+            }
+            let labeled =
+                token != words[i].2 || field_number_unlabel(words[i - 1].2) != words[i - 1].2;
+            let start = if labeled && field_number_unlabel(words[i - 1].2).is_empty() {
+                words[i - 1].0
+            } else {
+                words[i].0
+            };
+            let street = raw[..start].trim();
+            if is_street_type_word(&normalize(street)) {
+                continue;
+            }
+            if known_street(street) {
+                // The longest exact street prefix wins, never its initial numeral.
+                house = Some((start, words[i].1, labeled));
+            }
+        }
+        let (start, end, labeled) = house?;
+        let mut cuts = Vec::new();
+        if labeled {
+            cuts.push(start);
+        }
+        if !labeled || postal_pos.is_some() || region_pos.is_some() {
+            cuts.push(end);
+        }
+        if let Some(i) = postal_pos {
+            cuts.extend([words[i].0, words[i].1]);
+        }
+        if let Some(i) = region_pos {
+            cuts.push(words[i].0);
+        }
+        cuts.retain(|&p| p > 0 && p < raw.len());
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut parts = Vec::new();
+        let mut last = 0;
+        for p in cuts {
+            let part = raw[last..p].trim();
+            if !part.is_empty() {
+                parts.push(part);
+            }
+            last = p;
+        }
+        let part = raw[last..].trim();
+        if !part.is_empty() {
+            parts.push(part);
+        }
+        let query = parts.join(", ");
+        (query != raw && query.contains(',')).then_some(query)
+    }
+
+    fn query_feats_comma_fields(
+        &self,
+        original: Vec<(Hit, [f32; N_FEATS])>,
+        raw: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        empty_field_choose(
+            original,
+            || self.comma_field_retry(raw),
+            |query| {
+                let (number, city) = if let Some(tail) = address_field_retries(query) {
+                    (tail.number, Some(tail.city))
+                } else if let Some((_, number)) = cityless_field_address(query) {
+                    (number, None)
+                } else {
+                    return Vec::new();
+                };
+                let candidate = self.query_feats_street_data_base(query, k, focus);
+                let accepted = candidate.first().is_some_and(|(hit, _)| {
+                    hit.precision == "house"
+                        && hit.housenumber.as_deref().and_then(numeric_house_prefix) == Some(number)
+                        && (hit.flags.contains(&"street_exact")
+                            || hit.flags.contains(&"street_fuzzy"))
+                        && city
+                            .as_ref()
+                            .is_none_or(|city| normalize(&hit.commune) == *city)
+                });
+                if accepted {
+                    candidate
+                } else {
+                    Vec::new()
+                }
+            },
+        )
+    }
+
+    fn field_street_projection(&self) -> &HashMap<String, Vec<u32>> {
+        let types = field_street_type_aliases();
+        self.field_display_streets.get_or_init(|| {
+            let mut projection: HashMap<String, Vec<u32>> = HashMap::new();
+            for sid in 0..self.streets_meta.len() / STREET_META_SIZE {
+                let sid = u32::try_from(sid).expect("validated street table");
+                let m = self.street_meta(sid);
+                projection
+                    .entry(field_street_type_key(
+                        &prepared_query_key(self.name(m.name_off)),
+                        &types,
+                    ))
+                    .or_default()
+                    .push(sid);
+            }
+            projection
+        })
+    }
+
+    /// Recover a place only from fields following an explicit house number.
+    /// Sheet commune names are evidence; the rightmost longest match wins over
+    /// a district named after another place. No street tokens enter this scan.
+    fn geographic_field_retry(&self, raw: &str) -> Option<(String, u32, String)> {
+        if self.rules.city_tail.get("enabled").map(String::as_str) != Some("1") {
+            return None;
+        }
+        let (first, rest) = raw.split_once(',')?;
+        let first = first.trim();
+        let rest = field_number_unlabel(rest.trim());
+        let house = |s: &str| {
+            let n = s.chars().take_while(char::is_ascii_digit).count();
+            n > 0
+                && n <= 5
+                && (s.len() == n || (s.len() == n + 1 && s.as_bytes()[n].is_ascii_alphabetic()))
+        };
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        let suffix = usize::from(
+            rest.as_bytes()
+                .get(digits)
+                .is_some_and(u8::is_ascii_alphabetic),
+        );
+        let end = digits + suffix;
+        let (street, number_text, tail) = if house(&rest[..end])
+            && rest[end..].starts_with(|c: char| {
+                c.is_whitespace() || matches!(c, ',' | '-' | '–' | '—' | '.')
+            }) {
+            (first, &rest[..end], &rest[end..])
+        } else {
+            let (street, number) = first.rsplit_once(char::is_whitespace)?;
+            if !house(number) {
+                return None;
+            }
+            (street.trim(), number, rest)
+        };
+        if street.is_empty() || !street.chars().any(char::is_alphabetic) {
+            return None;
+        }
+        let cfg = &self.rules.city_tail;
+        let regions = cfg.get("regions")?;
+        let region = |word: &str| {
+            regions
+                .split_whitespace()
+                .any(|r| r.eq_ignore_ascii_case(word))
+        };
+        let postal_digits = cfg.get("postal_digits")?.parse::<usize>().ok()?;
+        let postal_split = cfg.get("postal_split")?.parse::<usize>().ok()?;
+        let has_region = tail
+            .split([',', '-', '–', '—', '.'])
+            .any(|field| normalize(field).split_whitespace().any(region));
+        let has_postal = tail.split_whitespace().any(|word| {
+            let word = word.trim_matches(|c: char| !c.is_ascii_digit() && c != '-');
+            let digits: String = word.chars().filter(char::is_ascii_digit).collect();
+            digits.len() == postal_digits
+                && (word == digits
+                    || (postal_split < postal_digits
+                        && word
+                            == format!("{}-{}", &digits[..postal_split], &digits[postal_split..])))
+        });
+        let mut city = None;
+        let mut anchored = false;
+        let mut distinct_places = false;
+        for field in tail.split([',', '-', '–', '—', '.']) {
+            let normalized = normalize(field);
+            let words: Vec<&str> = normalized.split_whitespace().collect();
+            for (slot, chunk) in words.split(|word| region(word)).enumerate() {
+                if slot > 0 {
+                    anchored = true;
+                }
+                let mut found = None;
+                for end in (1..=chunk.len()).rev() {
+                    for start in 0..end {
+                        let name = chunk[start..end].join(" ");
+                        if name.chars().all(|c| {
+                            c.is_alphabetic() || c.is_whitespace() || matches!(c, '\'' | '’')
+                        }) && !self.communes_by_name_raw(&name).is_empty()
+                        {
+                            found = Some(name);
+                            break;
+                        }
+                    }
+                    if found.is_some() {
+                        break;
+                    }
+                }
+                if let Some(found) = found {
+                    if anchored {
+                        if city.as_ref() != Some(&found) {
+                            return None;
+                        }
+                    } else {
+                        distinct_places |= city.as_ref().is_some_and(|previous| previous != &found);
+                        city = Some(found);
+                    }
+                }
+            }
+        }
+        // Without a region anchor, multiple places around a postal field are
+        // ambiguous. Do not choose the district merely because it comes first.
+        if !has_region && has_postal && distinct_places {
+            return None;
+        }
+        let city = city?;
+        Some((
+            format!("{street}, {number_text}, {city}"),
+            numeric_house_prefix(number_text)?,
+            city,
+        ))
+    }
+
+    fn query_feats_geographic_fields(
+        &self,
+        original: Vec<(Hit, [f32; N_FEATS])>,
+        raw: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        // The shared empty-only guard also protects the complete original list.
+        empty_field_choose(
+            original,
+            || self.geographic_field_retry(raw).map(|(query, _, _)| query),
+            |query| {
+                let mut parts = query.rsplit(',').map(str::trim);
+                let city = normalize(parts.next().expect("retry city"));
+                let number = numeric_house_prefix(parts.next().expect("retry number"))
+                    .expect("validated number");
+                let candidate = self.query_feats_street_data_base(query, k, focus);
+                if candidate.first().is_some_and(|(hit, _)| {
+                    hit.precision == "house"
+                        && hit.housenumber.as_deref().and_then(numeric_house_prefix) == Some(number)
+                        && (hit.flags.contains(&"street_exact")
+                            || hit.flags.contains(&"street_fuzzy"))
+                        && normalize(&hit.commune) == city
+                }) {
+                    candidate
+                } else {
+                    Vec::new()
+                }
+            },
+        )
+    }
+
+    fn title_street_key(&self, street: &str, types: &HashMap<String, String>) -> Option<String> {
+        let titles = self.rules.city_tail.get("street_titles")?;
+        let aliases = self.rules.city_tail.get("street_title_aliases")?;
+        let prepared = prepared_query_key(street);
+        let mut words = Vec::new();
+        for (position, word) in prepared.split_whitespace().enumerate() {
+            let canonical = aliases
+                .split_whitespace()
+                .filter_map(|p| p.split_once(':'))
+                .find_map(|(short, full)| (short == word).then_some(full))
+                .unwrap_or(word);
+            // A type at the start stays a type. Only configured title words are optional.
+            if position > 0 && titles.split_whitespace().any(|t| t == canonical) {
+                continue;
+            }
+            words.push(canonical);
+        }
+        if words.len() < 2 {
+            return None;
+        }
+        Some(field_street_type_key(&words.join(" "), types))
+    }
+
+    fn query_feats_title_fields(
+        &self,
+        original: Vec<(Hit, [f32; N_FEATS])>,
+        raw: &str,
+        _k: usize,
+        _focus: Option<&QueryFocus>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        if !original.is_empty() {
+            return original;
+        }
+        if !self.rules.city_tail.contains_key("street_titles") {
+            return original;
+        }
+        let parsed = self
+            .geographic_field_retry(raw)
+            .map(|(q, n, city)| {
+                (
+                    q.split(',').next().unwrap().trim().to_owned(),
+                    n,
+                    Some(city),
+                )
+            })
+            .or_else(|| {
+                address_field_retries(raw).map(|tail| {
+                    (
+                        raw.split(',').next().unwrap().trim().to_owned(),
+                        tail.number,
+                        Some(tail.city),
+                    )
+                })
+            })
+            .or_else(|| cityless_field_address(raw).map(|(street, n)| (street, n, None)));
+        let Some((street, number, city)) = parsed else {
+            return original;
+        };
+        let types = field_street_type_aliases();
+        let Some(key) = self.title_street_key(&street, &types) else {
+            return original;
+        };
+        let projection = self.field_title_streets.get_or_init(|| {
+            let mut out: HashMap<String, Vec<u32>> = HashMap::new();
+            for sid in 0..self.streets_meta.len() / STREET_META_SIZE {
+                let sid = u32::try_from(sid).expect("validated street table");
+                let m = self.street_meta(sid);
+                if let Some(key) = self.title_street_key(self.name(m.name_off), &types) {
+                    out.entry(key).or_default().push(sid);
+                }
+            }
+            out
+        });
+        let Some(ids) = projection.get(&key) else {
+            return original;
+        };
+        let query_has_title = field_street_type_key(&prepared_query_key(&street), &types) != key;
+        let ids: Vec<u32> = ids
+            .iter()
+            .copied()
+            .filter(|sid| {
+                (query_has_title
+                    || field_street_type_key(
+                        &prepared_query_key(self.name(self.street_meta(*sid).name_off)),
+                        &types,
+                    ) != key)
+                    && city.as_ref().is_none_or(|c| {
+                        normalize(self.commune_name(self.street_meta(*sid).commune_id)) == *c
+                    })
+            })
+            .collect();
+        self.field_house_from_ids(&ids, number)
+            .map_or(original, |h| vec![h])
+    }
+
+    fn query_feats_street_data_base(
+        &self,
+        raw: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        let original = self.query_feats_fields_retry(raw, k, focus);
+        if self.rules.street_rewrites.is_empty() {
+            return original;
+        }
+        let parts: Vec<&str> = raw.split(',').map(str::trim).collect();
+        if parts.len() < 2 {
+            return original;
+        }
+        let house_token = |s: &str| {
+            let n = s.chars().take_while(char::is_ascii_digit).count();
+            n > 0
+                && n <= 5
+                && (s.len() == n || (s.len() == n + 1 && s.as_bytes()[n].is_ascii_alphabetic()))
+        };
+        let second = parts[1]
+            .split_once(" - ")
+            .map_or(parts[1], |(n, _)| n)
+            .trim();
+        let (street, suffix, number) = if house_token(second) {
+            (
+                parts[0],
+                String::new(),
+                numeric_house_prefix(second).unwrap(),
+            )
+        } else if let Some((street, number)) = parts[0].rsplit_once(char::is_whitespace) {
+            if !house_token(number) {
+                return original;
+            }
+            (
+                street,
+                format!(" {number}"),
+                numeric_house_prefix(number).unwrap(),
+            )
+        } else {
+            return original;
+        };
+        // Ordinary candidates never contain data-driven street rewrites. Preserve the
+        // requested house before generating even one alternate street key.
+        if original.first().is_some_and(|(h, _)| {
+            h.precision == "house"
+                && h.housenumber.as_deref().and_then(numeric_house_prefix) == Some(number)
+        }) {
+            return original;
+        }
+        let city = if let Some(tail) = address_field_retries(raw) {
+            tail.city
+        } else if (parts.len() == 3 && suffix.is_empty())
+            || (parts.len() == 2 && !suffix.is_empty())
+        {
+            let city = parts.last().unwrap();
+            if !city.chars().any(char::is_alphabetic)
+                || !city.chars().all(|c| {
+                    c.is_alphabetic() || c.is_whitespace() || matches!(c, '-' | '\'' | '’')
+                })
+            {
+                return original;
+            }
+            normalize(city)
+        } else {
+            return original;
+        };
+        let number_text = if suffix.is_empty() {
+            second
+        } else {
+            suffix.trim()
+        };
+        let normalized_number = normalize(number_text);
+        let digits = normalized_number
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        let rep = *self
+            .rep_lookup
+            .get(&normalized_number[digits..])
+            .unwrap_or(&0);
+        let cids = self.communes_by_name(&city);
+        // Resolve exact alternate keys inside the explicit city. Re-parsing the
+        // whole address would consume a street numeral as the house number and
+        // repeat expensive fuzzy searches for every alternate.
+        for street in street_data_variants(&normalize(street)) {
+            let qwords: Vec<Vec<char>> = street
+                .split_whitespace()
+                .map(|w| w.chars().collect())
+                .collect();
+            let mut candidates = Vec::new();
+            for cid in &cids {
+                let mut key = street.clone().into_bytes();
+                key.push(KEY_SEP);
+                key.extend_from_slice(self.commune_insee(*cid).as_bytes());
+                if let Some(sid) = self.streets_fst.get(&key) {
+                    let h = self.make_hit(
+                        sid as u32,
+                        Feats {
+                            street_exact: true,
+                            commune_exact: true,
+                            ..Default::default()
+                        },
+                        Some(number),
+                        rep,
+                        None,
+                        &qwords,
+                    );
+                    if h.0.precision == "house"
+                        && h.0.housenumber.as_deref().and_then(numeric_house_prefix) == Some(number)
+                        && normalize(&h.0.commune) == city
+                    {
+                        candidates.push(h);
+                    }
+                }
+            }
+            candidates.sort_by(|a, b| {
+                b.0.score
+                    .total_cmp(&a.0.score)
+                    .then(b.2.cmp(&a.2))
+                    .then(a.3.cmp(&b.3))
+                    .then(b.4.cmp(&a.4))
+                    .then(a.5.cmp(&b.5))
+            });
+            candidates.truncate(k);
+            if !candidates.is_empty() {
+                let mut out: Vec<_> = candidates
+                    .into_iter()
+                    .map(|(h, f, _, _, _, _)| (h, f))
+                    .collect();
+                Self::monotone_confidence(&mut out);
+                return out;
+            }
+        }
+        original
+    }
+
+    fn query_feats_fields_retry(
+        &self,
+        raw: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        // Retry forms share pure automata within this raw query; the next query starts empty.
+        clear_levenshtein_cache();
+        let original = self.query_feats_postal_retry(raw, k, focus);
+        if let Some(tail) = address_field_retries(raw) {
+            return address_field_choose(original, &tail, |_, q| {
+                self.query_feats_postal_retry(q, k, focus)
+            });
+        }
+        if original
+            .first()
+            .is_some_and(|(hit, _)| hit.precision == "house")
+        {
+            return original;
+        }
+        let Some((street, number)) = cityless_field_address(raw) else {
+            return original;
+        };
+        self.cityless_field_house(&street, number)
+            .map_or(original, |hit| vec![hit])
+    }
+
+    /// A full-sheet uniqueness proof: all source ids for the display name and
+    /// all represented rows (including suffixes and duplicates) for the number.
+    /// Any malformed block or distant matching point rejects the fallback.
+    fn cityless_field_house(&self, street: &str, number: u32) -> Option<(Hit, [f32; N_FEATS])> {
+        let types = field_street_type_aliases();
+        let street_key = field_street_type_key(street, &types);
+        let projection = self.field_street_projection();
+        let ids = projection.get(&street_key)?;
+        self.field_house_from_ids(ids, number)
+    }
+
+    fn field_house_from_ids(&self, ids: &[u32], number: u32) -> Option<(Hit, [f32; N_FEATS])> {
+        let mut selected: Option<(u32, u32, f64, f64, u32)> = None;
+        for &sid in ids {
+            let m = self.street_meta(sid);
+            if m.house_count == 0 {
+                continue;
+            }
+            let (mut pos, dictionary, count, end) = self.house_block_layout(sid, &m)?;
+            let bounded = &self.houses[..end];
+            let mut current = 0u32;
+            for row in 0..m.house_count {
+                let delta = u32::try_from(strict_varint(bounded, &mut pos)?).ok()?;
+                current = if row == 0 {
+                    delta
+                } else {
+                    current.checked_add(delta)?
+                };
+                let rep = u32::try_from(strict_varint(bounded, &mut pos)?).ok()?;
+                let dlat = unzigzag(strict_varint(bounded, &mut pos)?);
+                let dlon = unzigzag(strict_varint(bounded, &mut pos)?);
+                let postcode =
+                    if self.format_version >= 7 && m.postcode_disp_off == PC_DISP_AMBIGUOUS {
+                        let id = u32::try_from(strict_varint(bounded, &mut pos)?).ok()?;
+                        self.house_postcode_offset(dictionary, count, id)
+                    } else {
+                        0
+                    };
+                if current != number {
+                    continue;
+                }
+                let lat = (m.lat_c as i64).checked_add(dlat)?;
+                let lon = (m.lon_c as i64).checked_add(dlon)?;
+                if !(-900_000_000..=900_000_000).contains(&lat)
+                    || !(-1_800_000_000..=1_800_000_000).contains(&lon)
+                {
+                    return None;
+                }
+                let (lat, lon) = (lat as f64 / 1e7, lon as f64 / 1e7);
+                if let Some((_, _, first_lat, first_lon, _)) = selected {
+                    if Self::dist_km(first_lat, first_lon, lat, lon) > 0.150 {
+                        return None;
+                    }
+                } else {
+                    selected = Some((sid, rep, lat, lon, postcode));
+                }
+            }
+        }
+        let (sid, rep, lat, lon, postcode) = selected?;
+        let f = Feats {
+            street_exact: true,
+            numero_present: true,
+            house_found: true,
+            house_exact_rep: rep == 0,
+            ..Default::default()
+        };
+        let m = self.street_meta(sid);
+        let score = self
+            .rank
+            .as_ref()
+            .map_or(f.legacy() as f32, |rank| rank.score(&f))
+            + 1.0;
+        let mut confidence = confidence_score("house", &f, 100);
+        if score < 0.0 {
+            confidence = confidence.min(0.4);
+        }
+        Some((
+            Hit {
+                lat,
+                lon,
+                precision: "house",
+                score,
+                confidence,
+                street: self.name(m.name_off).to_owned(),
+                housenumber: Some(self.house_number(number, rep)),
+                commune: self.commune_name(m.commune_id).to_owned(),
+                postcode: self.postcode_for_house(&m, postcode),
+                flags: match_flags(&f),
+                region: self.admin_at(lat, lon),
+                distance_m: None,
+            },
+            f.to_vec(),
+        ))
+    }
+
+    fn query_feats_postal_retry(
+        &self,
+        raw: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        let original = self.query_feats_city_tail(raw, k, focus);
+        if strong_first(&original) {
+            return original;
+        }
+        let Some(rewritten) = postal_retry(raw) else {
+            return original;
+        };
+        let alternate = self.query_feats_city_tail(&rewritten, k, focus);
+        if alternate.is_empty() {
+            original
+        } else {
+            alternate
+        }
+    }
+
+    fn query_feats_city_tail(
+        &self,
+        raw: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+    ) -> Vec<(Hit, [f32; N_FEATS])> {
+        let original = self.query_feats_country_variants(raw, k, focus);
+        let Some(tail) = city_tail(raw) else {
+            return original;
+        };
+        city_tail_choose(original, &tail.city, || {
+            tail.retry
+                .as_deref()
+                .map(|q| self.query_feats_country_variants(q, k, focus))
+                .unwrap_or_default()
+        })
     }
 
     fn query_feats_country_variants(
@@ -16133,8 +17742,10 @@ mod tests {
         }
     }
     fn es_particle_fixture(country: &str, street: &str) -> Index {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "gridpin-es-particle-{}-{country}-{}",
+            "gridpin-es-particle-{}-{country}-{}-{serial}",
             std::process::id(),
             street.replace(' ', "-")
         ));
@@ -16865,5 +18476,2228 @@ mod tests {
     fn es_same_point_empty_original_uses_candidate() {
         let candidate = es_same_point_hit(0.6, 5.0);
         assert!(!Index::es_particle_keep_original(None, &candidate));
+    }
+    fn city_tail_fixture_rules() -> &'static crate::rules::Rules {
+        let entries = [
+            ("enabled", "1"),
+            ("regions", "XY XZ"),
+            ("forms", "comma hyphen"),
+            ("postal_digits", "8"),
+            ("postal_split", "5"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (23, k.to_owned(), v.to_owned()))
+        .collect::<Vec<_>>();
+        crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+    }
+
+    fn city_tail_witness(
+        precision: &'static str,
+        commune: &str,
+        marker: f64,
+    ) -> (Hit, [f32; N_FEATS]) {
+        let mut h = hit(precision, 0.7, vec![]);
+        h.commune = commune.to_owned();
+        h.lat = marker;
+        (h, [0.0; N_FEATS])
+    }
+
+    #[test]
+    fn city_tail_forms_and_lexical_boundaries() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        for (q, expected_retry) in [
+            (
+                "Rua Azul, 1, Alto, Vila - XY, 12345678",
+                "Rua Azul, 1, Vila - XY, 12345678",
+            ),
+            (
+                "Rua Azul, 1, Alto, Vila, XY, 12345-678",
+                "Rua Azul, 1, Vila, XY, 12345-678",
+            ),
+            ("Rua Azul, S/N, Alto, Vila - XY", "Rua Azul, S/N, Vila - XY"),
+            ("Rua Azul, 1, Alto, Vila, XZ", "Rua Azul, 1, Vila, XZ"),
+        ] {
+            let tail = city_tail(q).unwrap();
+            assert_eq!(tail.city, "vila");
+            assert_eq!(tail.retry.as_deref(), Some(expected_retry), "{q}");
+        }
+        for q in [
+            "Rua Azul, 1, Alto, Vila - ZZ",
+            "Rua Azul, 1, Vila",
+            "Rua Azul, 1, 12345678, XY",
+            "Rua Azul, 1, s/n - Vila, XY",
+            "Rua Azul, 1, Vila - XY, extra",
+            "Rua Azul, 1, Vila - XY, 123456789",
+        ] {
+            assert!(city_tail(q).is_none(), "{q}");
+        }
+        assert!(city_tail("Rua Azul, 1, Vila - XY").unwrap().retry.is_none());
+        assert!(city_tail("Rua Azul, complement, Alto, Vila - XY")
+            .unwrap()
+            .retry
+            .is_none());
+    }
+
+    #[test]
+    fn city_tail_retry_rejects_extra_segments() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        for q in [
+            "Rua Azul, 1, Bloco B, Alto, Vila - XY",
+            "Rua Azul, 1, Bloco B, Apto 2, Alto, Vila - XY",
+        ] {
+            assert!(city_tail(q).unwrap().retry.is_none(), "{q}");
+        }
+    }
+
+    #[test]
+    fn city_tail_retry_rejects_empty_street() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        assert!(city_tail(", 1, Alto, Vila - XY").unwrap().retry.is_none());
+    }
+
+    #[test]
+    fn city_tail_retry_rejects_empty_district() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        assert!(city_tail("Rua Azul, 1, , Vila - XY")
+            .unwrap()
+            .retry
+            .is_none());
+    }
+
+    #[test]
+    fn city_tail_retry_accepts_sn_but_not_sna() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        assert_eq!(
+            city_tail("Rua Azul, SN, Alto, Vila - XY")
+                .unwrap()
+                .retry
+                .as_deref(),
+            Some("Rua Azul, SN, Vila - XY")
+        );
+        assert!(city_tail("Rua Azul, SNA, Alto, Vila - XY")
+            .unwrap()
+            .retry
+            .is_none());
+    }
+
+    #[test]
+    fn city_tail_absent_data_disables_parser() {
+        let _scope = crate::rules::scope(crate::rules::defaults_static());
+        assert!(city_tail("Rua Azul, 1, Alto, Vila - XY, 12345678").is_none());
+    }
+
+    #[test]
+    fn city_tail_every_precision_and_strong_original_priority() {
+        for precision in ["house", "interp", "near", "street", "city", "unknown"] {
+            let original = vec![city_tail_witness(precision, "Elsewhere", 1.0)];
+            let result = city_tail_choose(original, "vila", || {
+                vec![city_tail_witness("house", "Vila", 2.0)]
+            });
+            assert_eq!(
+                result[0].0.lat,
+                if matches!(precision, "house" | "interp" | "near") {
+                    1.0
+                } else {
+                    2.0
+                },
+                "{precision}"
+            );
+        }
+    }
+
+    #[test]
+    fn city_tail_strong_original_does_not_run_retry() {
+        let original = vec![city_tail_witness("house", "Elsewhere", 1.0)];
+        let bytes = serde_json::to_vec(&original[0].0).unwrap();
+        let result = city_tail_choose(original, "vila", || {
+            panic!("strong original must finish selection")
+        });
+        assert_eq!(bytes, serde_json::to_vec(&result[0].0).unwrap());
+    }
+
+    #[test]
+    fn city_tail_exact_city_rejects_prefix_and_checks_only_first() {
+        let weak = || vec![city_tail_witness("street", "Elsewhere", 1.0)];
+        for other in ["Vila Nova", "Nova Vila", "Vilas"] {
+            assert!(city_tail_choose(weak(), "vila", || vec![city_tail_witness(
+                "house", other, 2.0
+            )])
+            .is_empty());
+        }
+        assert!(city_tail_choose(weak(), "vila", || vec![
+            city_tail_witness("house", "Vila Nova", 2.0),
+            city_tail_witness("house", "Vila", 3.0)
+        ])
+        .is_empty());
+        assert!(city_tail_choose(
+            vec![
+                city_tail_witness("street", "Vila Nova", 1.0),
+                city_tail_witness("house", "Vila", 3.0)
+            ],
+            "vila",
+            Vec::new
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn city_tail_retry_wins_before_held_original_and_retains_ranked_bytes() {
+        let original = vec![city_tail_witness("street", "Vila", 1.0)];
+        let result = city_tail_choose(original, "vila", || {
+            vec![city_tail_witness("near", "Vila", 2.0)]
+        });
+        assert_eq!(result[0].0.lat, 2.0);
+        let original = vec![city_tail_witness("city", "Vila", 1.0)];
+        let bytes = serde_json::to_vec(&original[0].0).unwrap();
+        let result = city_tail_choose(original, "vila", || {
+            vec![city_tail_witness("house", "Vila Nova", 2.0)]
+        });
+        assert_eq!(bytes, serde_json::to_vec(&result[0].0).unwrap());
+    }
+
+    #[test]
+    fn city_tail_small_sheet_preserves_without_tail_or_data() {
+        let idx = forward_postcode_index_for_country("city-tail", "rua azul,001,vila,12345,12345,1,,8.0,50.0,Rua Azul,Vila\nrua azul,001,vila,12345,12345,3,,8.0002,50.0002,Rua Azul,Vila\nrua verde,002,alto,54321,54321,10,,18.0,40.0,Rua Verde,Alto\n", "xx");
+        let _scope = crate::rules::scope(idx.rules);
+        for q in [
+            "Rua Azul 1, Vila",
+            "Rua Azul 2, Vila",
+            "Rua Azul 99, Vila",
+            "Rua Azul, Vila",
+            "Vila",
+            "Rua Azul, 1, Alto, Vila - XY, 12345678",
+            "Rua Verde, Alto, Vila - XY",
+        ] {
+            let original = idx.query_feats_country_variants(q, 3, None);
+            let mut direct = original;
+            Index::strip_deferred_locality_drop(&mut direct);
+            Index::monotone_confidence(&mut direct);
+            let expected = direct.into_iter().map(|v| v.0).collect::<Vec<_>>();
+            assert_eq!(
+                serde_json::to_vec(&idx.query(q, 3)).unwrap(),
+                serde_json::to_vec(&expected).unwrap(),
+                "{q}"
+            );
+        }
+    }
+
+    #[test]
+    fn city_tail_small_sheet_activates_retry_and_rejects_wrong_place() {
+        let mut idx = forward_postcode_index_for_country("city-tail-active", "rua azul,001,vila,12345,12345,1,,8.0,50.0,Rua Azul,Vila\nrua azul,001,vila,12345,12345,3,,8.0002,50.0002,Rua Azul,Vila\nrua verde,002,alto,54321,54321,10,,18.0,40.0,Rua Verde,Alto\n", "xx");
+        assert!(idx.query("Rua Azul, 1, Alto, Vila - XY", 3).is_empty());
+        let old = idx.query("Rua Verde, Alto, Vila - XY", 3);
+        assert_eq!(old[0].commune, "Alto");
+        idx.rules = city_tail_fixture_rules();
+        for (number, precision) in [("1", "house"), ("2", "interp"), ("99", "near")] {
+            let result = idx.query(&format!("Rua Azul, {number}, Alto, Vila - XY"), 3);
+            assert_eq!(result[0].precision, precision);
+            assert_eq!(result[0].commune, "Vila");
+            assert_eq!(result[0].street, "Rua Azul");
+        }
+        assert!(idx.query("Rua Verde, Alto, Vila - XY", 3).is_empty());
+        assert!(idx.query("Rua Azul, Alto, Vila - XY", 3).is_empty());
+    }
+    #[test]
+    fn city_tail_decomposed_accents_cannot_bypass_holding() {
+        let mut idx = forward_postcode_index_for_country("city-tail-unicode", "rua azul,001,vila,12345,12345,1,,8.0,50.0,Rua Azul,Vila\nrua verde,002,alto,54321,54321,10,,18.0,40.0,Rua Verde,Alto\n", "xx");
+        let composed = "Rua Verde, Alto, Vilà - XY";
+        let decomposed: String = composed.nfd().collect();
+        assert_eq!(idx.query(&decomposed, 3)[0].commune, "Alto");
+        idx.rules = city_tail_fixture_rules();
+        assert!(idx.query(composed, 3).is_empty());
+        assert!(idx.query(&decomposed, 3).is_empty());
+    }
+
+    #[test]
+    fn field_retry_recovers_multiple_payload_segments_and_split_number() {
+        let mut idx = forward_postcode_index_for_country(
+            "field-retry",
+            "rua azul,001,vila,12345,12345,41,,8.0,50.0,Rua Azul,Vila\n",
+            "xx",
+        );
+        idx.rules = city_tail_fixture_rules();
+        for q in [
+            "Rua Azul 41, Bloco B, Centro, 12345-678, Vila, XY",
+            "Rua Azul, 41, Bloco B, Centro, 12345-678, Vila, XY",
+            "Rua Azul 41, Bloco B, Centro, 54321-678, Vila, XY",
+        ] {
+            let result = idx.query(q, 3);
+            assert!(!result.is_empty(), "{q}");
+            assert_eq!(result[0].precision, "house", "{q}");
+            assert_eq!(result[0].housenumber.as_deref(), Some("41"), "{q}");
+            assert_eq!(result[0].commune, "Vila", "{q}");
+        }
+    }
+
+    fn field_witness(
+        precision: &'static str,
+        number: &str,
+        city: &str,
+        marker: f64,
+    ) -> (Hit, [f32; N_FEATS]) {
+        let mut h = city_tail_witness(precision, city, marker);
+        h.0.housenumber = Some(number.to_owned());
+        h
+    }
+
+    #[test]
+    fn field_retry_guards_every_precision_number_city_and_rank() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        let tail =
+            address_field_retries("Rua Azul 12, Bloco, Centro, 12345-678, Vila, XY").unwrap();
+        let original = || vec![field_witness("city", "12", "Vila", 1.0)];
+        let bytes = serde_json::to_vec(&original()[0].0).unwrap();
+        for precision in ["near", "interp", "street", "city"] {
+            let result = address_field_choose(original(), &tail, |_, _| {
+                vec![field_witness(precision, "12", "Vila", 2.0)]
+            });
+            assert_eq!(
+                serde_json::to_vec(&result[0].0).unwrap(),
+                bytes,
+                "{precision}"
+            );
+        }
+        for number in ["13", "120"] {
+            let result = address_field_choose(original(), &tail, |_, _| {
+                vec![field_witness("house", number, "Vila", 2.0)]
+            });
+            assert_eq!(serde_json::to_vec(&result[0].0).unwrap(), bytes, "{number}");
+        }
+        for city in ["Vila Nova", "Nova Vila", "Vilas"] {
+            let result = address_field_choose(original(), &tail, |_, _| {
+                vec![field_witness("house", "12", city, 2.0)]
+            });
+            assert_eq!(serde_json::to_vec(&result[0].0).unwrap(), bytes, "{city}");
+        }
+        let result = address_field_choose(original(), &tail, |_, _| {
+            vec![
+                field_witness("house", "120", "Vila", 2.0),
+                field_witness("house", "12", "Vila", 3.0),
+            ]
+        });
+        assert_eq!(serde_json::to_vec(&result[0].0).unwrap(), bytes);
+        let result = address_field_choose(original(), &tail, |_, _| {
+            vec![field_witness("house", "12A", "Vilà", 2.0)]
+        });
+        assert_eq!(result[0].0.lat, 2.0);
+    }
+
+    #[test]
+    fn field_retry_keeps_every_strong_original_and_stops_at_first_accepted() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        let tail =
+            address_field_retries("Rua Azul 12, Bloco, Centro, 12345-678, Vila, XY").unwrap();
+        for precision in ["house", "near", "interp"] {
+            let result = address_field_choose(
+                vec![field_witness(precision, "120", "Vila", 1.0)],
+                &tail,
+                |_, _| panic!("strong original"),
+            );
+            assert_eq!(result[0].0.lat, 1.0);
+        }
+        let mut calls = Vec::new();
+        let result = address_field_choose(Vec::new(), &tail, |i, _| {
+            calls.push(i);
+            vec![field_witness("house", "12", "Vila", 2.0)]
+        });
+        assert_eq!(calls, [0]);
+        assert_eq!(result[0].0.lat, 2.0);
+        calls.clear();
+        let result = address_field_choose(Vec::new(), &tail, |i, _| {
+            calls.push(i);
+            if i == 0 {
+                Vec::new()
+            } else {
+                vec![field_witness("house", "12", "Vila", 3.0)]
+            }
+        });
+        assert_eq!(calls, [0, 1]);
+        assert_eq!(result[0].0.lat, 3.0);
+    }
+
+    #[test]
+    fn field_retry_preserves_whole_strong_original() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        let tail =
+            address_field_retries("Rua Azul 12, Bloco, Centro, 12345-678, Vila, XY").unwrap();
+        for (precision, city) in [
+            ("house", "Outra Vila"),
+            ("near", "Vila"),
+            ("interp", "Vilà"),
+        ] {
+            let mut original = vec![
+                field_witness(precision, "120", city, 1.0),
+                field_witness("house", "12", "Vila", 2.0),
+            ];
+            original[0].1.fill(0.25);
+            original[1].1.fill(0.75);
+            let expected_hits =
+                serde_json::to_vec(&original.iter().map(|(hit, _)| hit).collect::<Vec<_>>())
+                    .unwrap();
+            let expected_features = original.iter().map(|(_, f)| *f).collect::<Vec<_>>();
+            let result = address_field_choose(original, &tail, |_, _| {
+                panic!("strong original must bypass every retry: {precision} {city}")
+            });
+            assert_eq!(
+                serde_json::to_vec(&result.iter().map(|(hit, _)| hit).collect::<Vec<_>>(),)
+                    .unwrap(),
+                expected_hits
+            );
+            assert_eq!(
+                result.iter().map(|(_, f)| *f).collect::<Vec<_>>(),
+                expected_features
+            );
+        }
+    }
+
+    #[test]
+    fn field_retry_accepts_first_matching_house_with_whole_payload() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        let mut tail =
+            address_field_retries("Rua Azul 12, Bloco, Centro, 12345-678, Vila, XY").unwrap();
+        tail.forms = vec![
+            String::new(),
+            "wrong number".into(),
+            "wrong city".into(),
+            "accepted".into(),
+            "must not run".into(),
+        ];
+        let mut accepted = vec![
+            field_witness("house", "12A", "Vilà", 4.0),
+            field_witness("house", "120", "Outra Vila", 5.0),
+        ];
+        accepted[0].1.fill(0.25);
+        accepted[1].1.fill(0.75);
+        let expected_hits =
+            serde_json::to_vec(&accepted.iter().map(|(hit, _)| hit).collect::<Vec<_>>()).unwrap();
+        let expected_features = accepted.iter().map(|(_, f)| *f).collect::<Vec<_>>();
+        let mut calls = Vec::new();
+        let result = address_field_choose(
+            vec![field_witness("street", "12", "Vila", 1.0)],
+            &tail,
+            |i, _| {
+                calls.push(i);
+                match i {
+                    1 => vec![
+                        field_witness("house", "120", "Vila", 2.0),
+                        field_witness("house", "12", "Vila", 2.5),
+                    ],
+                    2 => vec![field_witness("house", "12", "Vilas", 3.0)],
+                    3 => accepted.clone(),
+                    _ => panic!("empty or later form was searched"),
+                }
+            },
+        );
+        assert_eq!(calls, [1, 2, 3]);
+        assert_eq!(
+            serde_json::to_vec(&result.iter().map(|(hit, _)| hit).collect::<Vec<_>>(),).unwrap(),
+            expected_hits
+        );
+        assert_eq!(
+            result.iter().map(|(_, f)| *f).collect::<Vec<_>>(),
+            expected_features
+        );
+    }
+
+    #[test]
+    fn field_retry_forms_preserve_number_postal_and_old_retry() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        for q in [
+            "Rua Azul, 41, Bloco, Centro, 12345-678, Vila, XY",
+            "Rua Azul, 41, Bloco, Centro, Vila, 12345-678, XY",
+        ] {
+            let tail = address_field_retries(q).unwrap();
+            assert_eq!(tail.number, 41);
+            assert_eq!(tail.forms[1], "Rua Azul, 41, Vila");
+            assert!(tail.forms[0].starts_with("Rua Azul, 41, "));
+            assert!(tail.forms[0].contains("12345-678"));
+            if let Some(old) = city_tail(q) {
+                assert!(old.retry.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn field_retry_house_number_width_and_suffix() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        for separate in [false, true] {
+            for (token, number) in [
+                ("1", 1),
+                ("12", 12),
+                ("123", 123),
+                ("1234", 1234),
+                ("12345", 12345),
+                ("1234A", 1234),
+            ] {
+                let address = if separate {
+                    format!("Rua Azul, {token}")
+                } else {
+                    format!("Rua Azul {token}")
+                };
+                let query = format!("{address}, Bloco, Vila, XY");
+                let tail = address_field_retries(&query)
+                    .unwrap_or_else(|| panic!("expected field retries for {query}"));
+                assert_eq!(tail.number, number, "{query}");
+                assert_eq!(tail.forms[0], format!("{address}, Vila, XY"), "{query}");
+                assert_eq!(tail.forms[1], format!("{address}, Vila"), "{query}");
+            }
+            let query = if separate {
+                "Rua Azul, 123456, Bloco, Vila, XY"
+            } else {
+                "Rua Azul 123456, Bloco, Vila, XY"
+            };
+            assert!(address_field_retries(query).is_none(), "{query}");
+        }
+    }
+
+    #[test]
+    fn field_retry_hyphen_city_and_number_payload_reach_house() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        let raw = "Rua Azul, 41 - Centro, Vila - XY, 12345-678";
+        let tail = address_field_retries(raw).expect("number before district payload");
+        assert_eq!(tail.number, 41);
+        assert_eq!(tail.city, normalize("Vila"));
+        for expected in [
+            "Rua Azul, 41 - Centro, Vila, 12345-678",
+            "Rua Azul, 41, Vila",
+        ] {
+            assert!(tail.forms.iter().any(|q| q == expected), "{expected}");
+            let result = address_field_choose(Vec::new(), &tail, |_, q| {
+                if q == expected {
+                    vec![field_witness("house", "41", "Vila", 2.0)]
+                } else {
+                    Vec::new()
+                }
+            });
+            assert_eq!(result[0].0.lat, 2.0);
+        }
+    }
+
+    #[test]
+    fn field_retry_original_city_controls_near_and_interp_only() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        let tail = address_field_retries("Rua Azul 41, Centro, Vila, XY").unwrap();
+        for precision in ["near", "interp"] {
+            for city in ["Vila Nova", "Vil", "Outra"] {
+                let result = address_field_choose(
+                    vec![field_witness(precision, "41", city, 1.0)],
+                    &tail,
+                    |_, _| vec![field_witness("house", "41", "Vila", 2.0)],
+                );
+                assert_eq!(result[0].0.lat, 2.0, "{precision}/{city}");
+            }
+            let result = address_field_choose(
+                vec![field_witness(precision, "42", "VILA", 1.0)],
+                &tail,
+                |_, _| panic!("same city {precision}"),
+            );
+            assert_eq!(result[0].0.lat, 1.0);
+        }
+        for city in ["Vila", "Vila Nova", "Outra"] {
+            let result = address_field_choose(
+                vec![field_witness("house", "42", city, 1.0)],
+                &tail,
+                |_, _| panic!("original house {city}"),
+            );
+            assert_eq!(result[0].0.lat, 1.0);
+        }
+        for city in ["Vila Nova", "Vil"] {
+            let original = vec![field_witness("near", "41", "Outra", 1.0)];
+            let result = address_field_choose(original, &tail, |_, _| {
+                vec![field_witness("house", "41", city, 2.0)]
+            });
+            assert_eq!(result[0].0.lat, 1.0, "candidate {city}");
+        }
+    }
+
+    fn street_fallback_mechanism_witness(label: &str, input: &str, target: &str, rules: &str) {
+        let idx = es_observer_fixture(
+            label,
+            &[
+                (input, "ciudad", "001", "42"),
+                (target, "ciudad", "001", "41"),
+            ],
+            rules,
+        );
+        let _scope = crate::rules::scope(idx.rules);
+        let raw = format!("{input}, 41, Ciudad");
+        let ordinary = idx.query_feats_fields_retry(&raw, 1, None);
+        assert!(
+            !ordinary.first().is_some_and(
+                |(h, _)| h.precision == "house" && h.housenumber.as_deref() == Some("41")
+            ),
+            "ordinary: {:?}",
+            es_observer_hits(&ordinary)
+        );
+        let actual = idx.query(&raw, 1);
+        assert_eq!(actual[0].precision, "house");
+        assert_eq!(actual[0].housenumber.as_deref(), Some("41"));
+        assert_eq!(actual[0].street, target);
+        assert_eq!(actual[0].commune, "ciudad");
+        assert_eq!(actual[0].lat, 40.4);
+        assert_eq!(actual[0].lon, -3.701);
+    }
+
+    #[test]
+    fn street_fallback_type_recovers_missing_house() {
+        street_fallback_mechanism_witness(
+            "fallback-type",
+            "boulevard azul",
+            "avenida azul",
+            "street\tboulevard\tavenida\n",
+        );
+    }
+
+    #[test]
+    fn street_fallback_particle_recovers_missing_house() {
+        street_fallback_mechanism_witness(
+            "fallback-particle",
+            "rua de azul",
+            "rua azul",
+            "street\trua de\trua\n",
+        );
+    }
+
+    #[test]
+    fn street_fallback_wrong_house_number_still_retries() {
+        let idx = es_observer_fixture(
+            "fallback-wrong-number",
+            &[
+                ("avenida", "ciudad", "001", "25"),
+                ("avenida vinte e cinco", "ciudad", "001", "41"),
+            ],
+            "street\t25\tvinte e cinco\n",
+        );
+        let _scope = crate::rules::scope(idx.rules);
+        let raw = "Avenida 25, 41, Ciudad";
+        let ordinary = idx.query_feats_fields_retry(raw, 1, None);
+        eprintln!("ORDINARY: {}", es_observer_hits(&ordinary));
+        let actual = idx.query(raw, 1);
+        eprintln!("ACTUAL: {}", serde_json::to_string(&actual).unwrap());
+        assert_eq!(ordinary[0].0.precision, "house");
+        assert_eq!(ordinary[0].0.housenumber.as_deref(), Some("25"));
+        assert_eq!(ordinary[0].0.street, "avenida");
+        assert_eq!(ordinary[0].0.commune, "ciudad");
+        assert_eq!(ordinary[0].0.lat, 40.4);
+        assert_eq!(ordinary[0].0.lon, -3.7);
+        assert_eq!(actual[0].precision, "house");
+        assert_eq!(actual[0].housenumber.as_deref(), Some("41"));
+        assert_eq!(actual[0].street, "avenida vinte e cinco");
+        assert_eq!(actual[0].commune, "ciudad");
+        assert_eq!(actual[0].lat, 40.4);
+        assert_eq!(actual[0].lon, -3.701);
+    }
+
+    #[test]
+    fn street_fallback_numeral_recovers_missing_house() {
+        let idx = es_observer_fixture(
+            "fallback-numeral",
+            &[("avenida vinte e cinco", "ciudad", "001", "41")],
+            "street\t25\tvinte e cinco\n",
+        );
+        let _scope = crate::rules::scope(idx.rules);
+        let raw = "Avenida 25, 41, Ciudad";
+        let ordinary = idx.query_feats_fields_retry(raw, 1, None);
+        assert!(
+            !ordinary.first().is_some_and(
+                |(h, _)| h.precision == "house" && h.housenumber.as_deref() == Some("41")
+            )
+        );
+        let actual = idx.query(raw, 1);
+        assert_eq!(actual[0].precision, "house");
+        assert_eq!(actual[0].housenumber.as_deref(), Some("41"));
+        assert_eq!(actual[0].street, "avenida vinte e cinco");
+        assert_eq!(actual[0].commune, "ciudad");
+        assert_eq!(actual[0].lat, 40.4);
+        assert_eq!(actual[0].lon, -3.7);
+    }
+
+    #[test]
+    fn street_fallback_preserves_ordinary_equal_score_house() {
+        let idx = es_observer_fixture(
+            "fallback-equal",
+            &[
+                ("rua livramento", "ciudad", "001", "515"),
+                ("rua do livramento", "otra", "002", "515"),
+            ],
+            "street\trua\trua do\n",
+        );
+        let _scope = crate::rules::scope(idx.rules);
+        let ordinary = idx.query_feats_fields_retry("Rua Livramento, 515", 1, None);
+        assert_eq!(ordinary[0].0.street, "rua livramento");
+        assert_eq!(ordinary[0].0.commune, "ciudad");
+        assert_eq!(ordinary[0].0.precision, "house");
+        let alternate = idx.query_feats_fields_retry("Rua do Livramento, 515", 1, None);
+        assert_eq!(alternate[0].0.score, ordinary[0].0.score);
+        let actual = idx.query_feats_street_data("Rua Livramento, 515", 1, None);
+        assert_eq!(es_observer_hits(&actual), es_observer_hits(&ordinary));
+    }
+
+    #[test]
+    fn street_fallback_does_not_expand_when_requested_house_found() {
+        let idx = es_observer_fixture(
+            "fallback-no-work",
+            &[("rua azul", "ciudad", "001", "41")],
+            "street\trua\trua de\n",
+        );
+        for raw in ["Rua Azul, 41", "Rua Azul, 41, Ciudad"] {
+            STREET_DATA_CALLS.with(|n| n.set(0));
+            let hits = idx.query(raw, 1);
+            assert_eq!(hits[0].precision, "house");
+            assert_eq!(hits[0].housenumber.as_deref(), Some("41"));
+            assert_eq!(STREET_DATA_CALLS.with(|n| n.get()), 0, "{raw}");
+        }
+    }
+
+    #[test]
+    fn street_data_rules_find_numerals_types_and_keep_house_number() {
+        let rules = "street\t02\tdois\nstreet\tdois\t02\nstreet\t25\tvinte e cinco\nstreet\tr\trua\nstreet\trua de\trua\n";
+        for (label, street, query, house) in [
+            ("digits", "avenida dois", "Avenida 02, 41, Ciudad", "41"),
+            ("words", "avenida 02", "Avenida Dois, 41, Ciudad", "41"),
+            ("type", "rua azul", "R. Azul, 41, Ciudad", "41"),
+            ("particle", "rua azul", "Rua de Azul, 41, Ciudad", "41"),
+            ("combined", "rua azul", "R. de Azul, 41, Ciudad", "41"),
+            (
+                "date",
+                "rua vinte e cinco de marco",
+                "Rua 25 de Março, 41, Ciudad",
+                "41",
+            ),
+            ("house", "rua azul", "Rua Azul, 02, Ciudad", "2"),
+        ] {
+            let idx = es_observer_fixture(label, &[(street, "ciudad", "001", house)], rules);
+            let hits = idx.query(query, 1);
+            assert!(!hits.is_empty(), "{label}");
+            assert_eq!(
+                hits[0].precision, "house",
+                "{label}: {} / {:?} / {:?}",
+                hits[0].street, hits[0].housenumber, hits[0].flags
+            );
+            assert_eq!(hits[0].housenumber.as_deref(), Some(house), "{label}");
+            assert_eq!(hits[0].street, street, "{label}");
+            if matches!(label, "words" | "type" | "particle" | "combined") {
+                assert_eq!(hits[0].commune, "ciudad");
+                assert_eq!(hits[0].lat, 40.4);
+                assert_eq!(hits[0].lon, -3.7);
+            } else {
+                assert!(
+                    hits[0].flags.contains(&"street_exact"),
+                    "{label}: {:?}",
+                    hits[0].flags
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn street_data_rules_stay_in_street_and_in_their_sheet() {
+        let idx = es_observer_fixture("no-rules", &[("avenida dois", "ciudad", "001", "41")], "");
+        let hits = idx.query("Avenida 02, 41, Ciudad", 1);
+        assert!(hits
+            .first()
+            .is_none_or(|h| !h.flags.contains(&"street_exact")));
+        let idx = es_observer_fixture(
+            "house-is-not-street",
+            &[("rua azul", "ciudad", "001", "2")],
+            "street\t2\tdois\n",
+        );
+        let hits = idx.query("Rua Azul, 2, Ciudad", 1);
+        assert_eq!(hits[0].housenumber.as_deref(), Some("2"));
+        assert_eq!(hits[0].precision, "house");
+    }
+
+    fn bounded_street_fixture(pairs: Vec<(&str, &str)>) -> &'static crate::rules::Rules {
+        let entries = pairs
+            .into_iter()
+            .map(|(a, b)| (24, a.to_owned(), b.to_owned()))
+            .collect::<Vec<_>>();
+        crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+    }
+
+    #[test]
+    fn street_bounded_particles_and_six_keys() {
+        let mut pairs = vec![
+            ("r", "rua"),
+            ("rua", "r"),
+            ("av", "avenida"),
+            ("avenida", "av"),
+            ("02", "dois"),
+            ("7", "sete"),
+            ("28", "vinte e oito"),
+            ("25", "vinte e cinco"),
+        ];
+        for (a, b) in [
+            ("rua", "rua de"),
+            ("rua", "rua da"),
+            ("rua", "rua do"),
+            ("rua", "rua dos"),
+            ("rua", "rua das"),
+            ("avenida", "avenida de"),
+            ("avenida", "avenida da"),
+            ("avenida", "avenida do"),
+            ("avenida", "avenida dos"),
+            ("avenida", "avenida das"),
+        ] {
+            pairs.push((a, b));
+            pairs.push((b, a));
+        }
+        let _scope = crate::rules::scope(bounded_street_fixture(pairs));
+        // Five street keys from the authorized remaining set, plus the reported defect.
+        for key in [
+            "rua azul",
+            "avenida 02",
+            "avenida 7 de setembro",
+            "avenida para",
+            "centro administrativo 28 de janeiro",
+            "r direita",
+        ] {
+            let variants = street_data_variants(key);
+            println!("bounded {key}: {} {variants:?}", variants.len());
+            assert!(!variants.is_empty(), "{key}");
+            assert!(variants.len() <= 8, "{key}: {}", variants.len());
+            for v in &variants {
+                let words = v.split_whitespace().collect::<Vec<_>>();
+                let particle = |w: &str| ["de", "da", "do", "dos", "das"].contains(&w);
+                assert!(
+                    !(words.len() > 2 && particle(words[1]) && particle(words[2])),
+                    "{key}: {v}"
+                );
+            }
+        }
+        assert!(street_data_variants("rua de azul").contains(&"rua azul".to_owned()));
+        assert!(!street_data_variants("rua de azul")
+            .iter()
+            .any(|v| v.starts_with("rua da de")));
+    }
+
+    #[test]
+    fn street_bounded_each_kind_once() {
+        let _scope = crate::rules::scope(bounded_street_fixture(vec![
+            ("r", "rua"),
+            ("rua", "avenida"),
+            ("2", "dois"),
+            ("dois", "02"),
+            ("rua de", "rua"),
+        ]));
+        let variants = street_data_variants("r de 2");
+        assert!(variants.contains(&"rua dois".to_owned()), "{variants:?}");
+        assert!(
+            !variants
+                .iter()
+                .any(|v| v.contains("avenida") || v.contains("02")),
+            "{variants:?}"
+        );
+    }
+
+    #[test]
+    fn street_bounded_cap_is_enforced_without_particles() {
+        let pairs = vec![
+            ("avenida", "alpha"),
+            ("avenida", "beta"),
+            ("avenida", "gamma"),
+            ("avenida", "delta"),
+            ("avenida", "epsilon"),
+            ("avenida", "zeta"),
+            ("avenida", "eta"),
+            ("avenida", "theta"),
+            ("avenida", "iota"),
+            ("avenida", "kappa"),
+        ];
+        let _scope = crate::rules::scope(bounded_street_fixture(pairs));
+        let variants = street_data_variants("avenida azul");
+        assert_eq!(variants.len(), 8, "{variants:?}");
+        assert!(variants.contains(&"alpha azul".to_owned()));
+    }
+
+    #[test]
+    fn street_bounded_date_and_house_25_are_distinct() {
+        let idx = es_observer_fixture(
+            "bounded-date-house",
+            &[("rua vinte e cinco de marco", "ciudad", "001", "25")],
+            "street\t25\tvinte e cinco\nstreet\tr\trua\nstreet\trua\trua de\nstreet\trua de\trua\n",
+        );
+        let hits = idx.query("R. 25 de Março, 25, Ciudad", 1);
+        assert_eq!(hits[0].precision, "house");
+        assert_eq!(hits[0].housenumber.as_deref(), Some("25"));
+        assert_eq!(hits[0].street, "rua vinte e cinco de marco");
+    }
+
+    fn field_retry_new_forms_cases() -> Vec<(&'static str, &'static str, &'static str)> {
+        vec![
+            (
+                "no_district",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila, XY",
+                "Rua Azul 41, 12345-678, Vila, XY",
+            ),
+            (
+                "address_city",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila, XY",
+                "Rua Azul 41, Vila",
+            ),
+            (
+                "no_postal",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila, XY",
+                "Rua Azul 41, Bloco B, Centro, Vila, XY",
+            ),
+            (
+                "no_region",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila, XY",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila",
+            ),
+            (
+                "city_hyphen",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila, XY",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila - XY",
+            ),
+            (
+                "city_comma",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila - XY",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila, XY",
+            ),
+            (
+                "postal_plain",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila, XY",
+                "Rua Azul 41, Bloco B, Centro, 12345678, Vila, XY",
+            ),
+            (
+                "postal_hyphen",
+                "Rua Azul 41, Bloco B, Centro, 12345678, Vila, XY",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila, XY",
+            ),
+            (
+                "postal_prefix",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila, XY",
+                "Rua Azul 41, Bloco B, Centro, 12345, Vila, XY",
+            ),
+            (
+                "no_unit",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila, XY, Sala 7",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila, XY",
+            ),
+            (
+                "separate_house",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila, XY",
+                "Rua Azul, 41, Bloco B, Centro, 12345-678, Vila, XY",
+            ),
+            (
+                "clean_fields",
+                "Rua Azul 41, Bloco B, Centro, 12345-678, Vila, XY",
+                "Rua Azul, 41, Vila",
+            ),
+        ]
+    }
+
+    #[test]
+    fn field_retry_new_forms_each_reaches_guarded_answer() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        for (slot, (name, raw, expected)) in field_retry_new_forms_cases().into_iter().enumerate() {
+            let tail = address_field_retries(raw).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(
+                tail.forms.get(slot).map(String::as_str),
+                Some(expected),
+                "{name}"
+            );
+            assert_eq!(tail.number, 41, "{name}");
+            assert_eq!(tail.city, "vila", "{name}");
+            assert!(
+                tail.forms.iter().any(|q| q == expected),
+                "{name}: {:?}",
+                tail.forms
+            );
+            let mut seen = false;
+            let result = address_field_choose(Vec::new(), &tail, |_, q| {
+                if q == expected {
+                    seen = true;
+                    vec![field_witness("house", "41", "Vila", 2.0)]
+                } else {
+                    Vec::new()
+                }
+            });
+            assert!(seen, "{name}");
+            assert_eq!(result[0].0.lat, 2.0, "{name}");
+        }
+    }
+
+    #[test]
+    fn field_retry_new_forms_each_rejects_near_misses_and_keeps_strong() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        for (name, raw, expected) in field_retry_new_forms_cases() {
+            let tail = address_field_retries(raw).unwrap_or_else(|| panic!("{name}"));
+            for (precision, number, city) in [
+                ("house", "42", "Vila"),
+                ("house", "410", "Vila"),
+                ("house", "41", "Vila Nova"),
+                ("house", "41", "Nova Vila"),
+                ("near", "41", "Vila"),
+                ("interp", "41", "Vila"),
+                ("street", "41", "Vila"),
+                ("city", "41", "Vila"),
+            ] {
+                let original = vec![field_witness("city", "41", "Vila", 1.0)];
+                let bytes = serde_json::to_vec(&original[0].0).unwrap();
+                let result = address_field_choose(original, &tail, |_, q| {
+                    if q == expected {
+                        vec![field_witness(precision, number, city, 2.0)]
+                    } else {
+                        Vec::new()
+                    }
+                });
+                assert_eq!(
+                    serde_json::to_vec(&result[0].0).unwrap(),
+                    bytes,
+                    "{name}: {precision}/{number}/{city}"
+                );
+            }
+            for precision in ["house", "interp", "near"] {
+                let original = vec![field_witness(precision, "41", "Vila", 1.0)];
+                let bytes = serde_json::to_vec(&original[0].0).unwrap();
+                let result =
+                    address_field_choose(original, &tail, |_, _| panic!("{name}: strong original"));
+                assert_eq!(serde_json::to_vec(&result[0].0).unwrap(), bytes, "{name}");
+            }
+        }
+    }
+
+    fn lev_observer_accepts<A: Automaton>(a: &A, bytes: &[u8]) -> bool {
+        let mut state = a.start();
+        for &byte in bytes {
+            state = a.accept(&state, byte);
+        }
+        a.is_match(&state)
+    }
+
+    #[test]
+    fn levenshtein_storage_matches_fst_on_index_and_utf8() {
+        let terms = [
+            "a",
+            "azul",
+            "calle mayor",
+            "avenida sol",
+            "rue de l'été",
+            "улица мира",
+            "é",
+            "ñ",
+            "東京",
+            "🦀",
+            "abcdefghijkl",
+            "abcdefghijklmnopqrstuvwxyzabcdefghijklmn",
+        ];
+        let mut words: Vec<String> = terms.iter().map(|s| (*s).to_owned()).collect();
+        if let Ok(path) = std::env::var("GRIDPIN_AUTOMATON_INDEX") {
+            let index = Index::open(Path::new(&path)).unwrap();
+            let mut stream = index.streets_fst.stream();
+            let mut ordinal = 0;
+            while let Some((key, _)) = stream.next() {
+                if ordinal % 101 == 0 {
+                    let name = key.split(|&b| b == KEY_SEP).next().unwrap();
+                    words.push(std::str::from_utf8(name).unwrap().to_owned());
+                }
+                ordinal += 1;
+            }
+            assert!(words.len() > terms.len(), "index sample must not be empty");
+        }
+        // A portable FST fixture remains active when no deployed index is supplied.
+        words.sort();
+        words.dedup();
+        let index = fst::Set::from_iter(&words).unwrap();
+        for phrase in [
+            "",
+            "a",
+            "abcde",
+            "avenida sol",
+            "abcdefghijkl",
+            "abcdefghijklmnopqrstuvwxyzabcdefghijklmn",
+            "é",
+            "rue de l'été",
+            "улица мира",
+            "東京",
+            "🦀",
+        ] {
+            for distance in 0..=2 {
+                let actual = Levenshtein::new(phrase, distance);
+                let expected = fst::automaton::Levenshtein::new(phrase, distance);
+                match (actual, expected) {
+                    (Ok(a), Ok(b)) => {
+                        let found_a = index.search(&a).into_stream().into_strs().unwrap();
+                        let found_b = index.search(&b).into_stream().into_strs().unwrap();
+                        assert_eq!(found_a, found_b, "{phrase:?}/{distance}");
+                        let mut candidates = vec![
+                            phrase.to_owned(),
+                            format!("{phrase}a"),
+                            format!("é{phrase}"),
+                            format!("{phrase}я"),
+                            phrase.chars().skip(1).collect::<String>(),
+                            "zzzz".to_owned(),
+                        ];
+                        candidates.extend(words.iter().cloned());
+                        for candidate in candidates {
+                            assert_eq!(
+                                lev_observer_accepts(&a, candidate.as_bytes()),
+                                lev_observer_accepts(&b, candidate.as_bytes()),
+                                "{phrase:?}/{distance}: {candidate:?}"
+                            );
+                        }
+                        for bytes in [
+                            &[0xff][..],
+                            &[0xc0, 0x80],
+                            &[0xed, 0xa0, 0x80],
+                            &[0xf4, 0x90, 0x80, 0x80],
+                        ] {
+                            assert_eq!(
+                                lev_observer_accepts(&a, bytes),
+                                lev_observer_accepts(&b, bytes)
+                            );
+                        }
+                    }
+                    (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
+                    (a, b) => {
+                        panic!("construction differs for {phrase:?}/{distance}: {a:?} vs {b:?}")
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn levenshtein_storage_preserves_state_limit_refusal() {
+        let long_phrase = "abcdefghijklmnopqrstuvwxyz".repeat(20);
+        let phrase = long_phrase.as_str();
+        let expected = fst::automaton::Levenshtein::new(phrase, 2).unwrap_err();
+        let actual = Levenshtein::new(phrase, 2).unwrap_err();
+        assert_eq!(actual.to_string(), expected.to_string());
+        assert!(expected.to_string().contains("10000"));
+        // At distance zero even this long phrase succeeds; blanket refusal is not valid.
+        let exact = Levenshtein::new(phrase, 0).unwrap();
+        assert!(lev_observer_accepts(&exact, phrase.as_bytes()));
+        assert!(!lev_observer_accepts(&exact, b""));
+    }
+
+    #[test]
+    fn levenshtein_storage_exact_limit_decision() {
+        // At distance zero each four-byte scalar adds one prefix state and
+        // three UTF-8 intermediate states: 1 + 4 * 2,500 = 10,001 states.
+        // Observe refusal versus success, not just the printed error limit.
+        let below = "\u{1f980}".repeat(2_499);
+        assert!(fst::automaton::Levenshtein::new(&below, 0).is_ok());
+        assert!(Levenshtein::new(&below, 0).is_ok());
+        let phrase = "\u{1f980}".repeat(2_500);
+        assert!(fst::automaton::Levenshtein::new(&phrase, 0).is_err());
+        assert!(fst::automaton::Levenshtein::new_with_limit(&phrase, 0, 10_001).is_ok());
+        assert!(Levenshtein::new(&phrase, 0).is_err());
+    }
+
+    fn automaton_matches(lev: &Levenshtein, text: &str) -> bool {
+        let mut state = lev.start();
+        for b in text.bytes() {
+            state = lev.accept(&state, b);
+        }
+        lev.is_match(&state)
+    }
+
+    #[test]
+    fn levenshtein_cache_keys_on_phrase_and_distance() {
+        clear_levenshtein_cache();
+        let one = cached_levenshtein("rua azul", 1).unwrap();
+        let two = cached_levenshtein("rua azul", 2).unwrap();
+        // two edits away: only the distance-2 automaton accepts it
+        assert!(!automaton_matches(&one, "rua axxl"));
+        assert!(automaton_matches(&two, "rua axxl"));
+        let other = cached_levenshtein("rua verde", 1).unwrap();
+        assert!(automaton_matches(&other, "rua verd"));
+        assert!(!automaton_matches(&other, "rua azul"));
+        // a repeated request returns the very same automaton, not a rebuild
+        assert!(std::rc::Rc::ptr_eq(
+            &one,
+            &cached_levenshtein("rua azul", 1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn levenshtein_cache_is_emptied_and_bounded() {
+        clear_levenshtein_cache();
+        cached_levenshtein("rua azul", 1);
+        cached_levenshtein("rua verde", 1);
+        assert_eq!(levenshtein_cache_len(), 2);
+        clear_levenshtein_cache();
+        assert_eq!(levenshtein_cache_len(), 0);
+        for i in 0..=LEV_CACHE_MAX {
+            cached_levenshtein(&format!("rua {i:04}"), 1);
+        }
+        assert!(levenshtein_cache_len() <= LEV_CACHE_MAX);
+        clear_levenshtein_cache();
+    }
+
+    #[test]
+    fn levenshtein_cache_starts_empty_for_every_query() {
+        let idx = forward_postcode_index_for_country(
+            "lev-cache",
+            "rua azul,001,vila,12345,12345,1,,8.0,50.0,Rua Azul,Vila\n",
+            "xx",
+        );
+        let _scope = crate::rules::scope(idx.rules);
+        clear_levenshtein_cache();
+        let stale = cached_levenshtein("left over from another query", 1);
+        assert!(stale.is_some() && levenshtein_cache_len() == 1);
+        idx.query("Rua Azull 1, Vila", 1);
+        LEV_CACHE.with(|cache| {
+            assert!(!cache
+                .borrow()
+                .contains_key(&("left over from another query".to_owned(), 1)));
+        });
+        clear_levenshtein_cache();
+    }
+    fn postal_fallback_fixture(case: &str) -> Index {
+        let mut idx = forward_postcode_index_for_country(case, "rua azul,001,vila,12345,12345,1,,8.0,50.0,Rua Azul,Vila\nrua azul,001,vila,12345,12345,3,,8.0002,50.0002,Rua Azul,Vila\nrua azul,002,alto,54321,54321,10,,18.0,40.0,Rua Azul,Alto\n", "xx");
+        idx.rules = city_tail_fixture_rules();
+        idx
+    }
+
+    fn postal_fallback_direct(idx: &Index, q: &str) -> Vec<Hit> {
+        let _scope = crate::rules::scope(idx.rules);
+        let mut hits = idx.query_feats_country_variants(q, 3, None);
+        Index::strip_deferred_locality_drop(&mut hits);
+        Index::monotone_confidence(&mut hits);
+        hits.into_iter().map(|v| v.0).collect()
+    }
+
+    #[test]
+    fn postal_fallback_eight_digits_recovers_empty() {
+        let idx = postal_fallback_fixture("postal-eight");
+        let raw = "Rua Azul 1, 12345678";
+        assert!(postal_fallback_direct(&idx, raw).is_empty());
+        let expected = idx.query("Rua Azul 1, 12345-678", 3);
+        assert_eq!(expected[0].precision, "house");
+        assert_eq!(
+            serde_json::to_vec(&idx.query(raw, 3)).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn postal_fallback_near_miss_tokens_preserve_original() {
+        let idx = postal_fallback_fixture("postal-boundaries");
+        for token in [
+            "1234567",
+            "123456789",
+            "12345-678",
+            "12345678-9",
+            "9-12345678",
+            "-12345678",
+            "12345678-",
+        ] {
+            let q = format!("Rua Azul 1, {token}");
+            assert_eq!(
+                serde_json::to_vec(&idx.query(&q, 3)).unwrap(),
+                serde_json::to_vec(&postal_fallback_direct(&idx, &q)).unwrap(),
+                "{token}"
+            );
+        }
+    }
+
+    #[test]
+    fn postal_fallback_preserves_each_strong_precision() {
+        let idx = postal_fallback_fixture("postal-strong");
+        for (number, precision) in [("1", "house"), ("2", "interp"), ("99", "near")] {
+            let q = format!("Rua Azul {number}, 54321678, Vila");
+            let original = postal_fallback_direct(&idx, &q);
+            assert_eq!(original[0].precision, precision);
+            assert_eq!(original[0].commune, "Vila");
+            let alternate = idx.query(&q.replace("54321678", "54321-678"), 3);
+            assert_eq!(alternate[0].commune, "Alto");
+            assert_eq!(
+                serde_json::to_vec(&idx.query(&q, 3)).unwrap(),
+                serde_json::to_vec(&original).unwrap(),
+                "{precision}"
+            );
+        }
+    }
+
+    #[test]
+    fn postal_fallback_replaces_street_and_city() {
+        let idx = postal_fallback_fixture("postal-weak");
+        for (q, rewritten, precision) in [
+            (
+                "Rua Azul, 54321678, Vila",
+                "Rua Azul, 54321-678, Vila",
+                "street",
+            ),
+            (
+                "Rua Azul, S/N, Bairro, 12345678, Vila, XY",
+                "Rua Azul, S/N, Bairro, 12345-678, Vila, XY",
+                "city",
+            ),
+        ] {
+            let original = postal_fallback_direct(&idx, q);
+            assert_eq!(original[0].precision, precision);
+            let expected = idx.query(rewritten, 3);
+            assert!(!expected.is_empty());
+            assert_ne!(
+                serde_json::to_vec(&original).unwrap(),
+                serde_json::to_vec(&expected).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_vec(&idx.query(q, 3)).unwrap(),
+                serde_json::to_vec(&expected).unwrap(),
+                "{precision}"
+            );
+        }
+    }
+
+    #[test]
+    fn postal_fallback_empty_alternate_retains_weak_original() {
+        let idx = postal_fallback_fixture("postal-empty-alternate");
+        let q = "Rua Azul, 99999678, Vila Alto";
+        let original = postal_fallback_direct(&idx, q);
+        assert_eq!(original[0].precision, "street");
+        assert!(idx.query("Rua Azul, 99999-678, Vila Alto", 3).is_empty());
+        assert_eq!(
+            serde_json::to_vec(&idx.query(q, 3)).unwrap(),
+            serde_json::to_vec(&original).unwrap()
+        );
+    }
+
+    #[test]
+    fn postal_fallback_absent_data_preserves_original() {
+        let mut idx = postal_fallback_fixture("postal-absent");
+        idx.rules = crate::rules::defaults_static();
+        assert!(idx.query("Rua Azul 1, 12345678", 3).is_empty());
+        assert!(!idx.query("Rua Azul 1, 12345-678", 3).is_empty());
+    }
+
+    #[test]
+    fn postal_fallback_shared_strength_checks_top_not_any() {
+        for weak in ["street", "city", "unknown"] {
+            let result = city_tail_choose(
+                vec![
+                    city_tail_witness(weak, "Vila", 1.0),
+                    city_tail_witness("house", "Vila", 2.0),
+                ],
+                "vila",
+                || vec![city_tail_witness("street", "Vila", 3.0)],
+            );
+            assert_eq!(result[0].0.lat, 3.0, "{weak}");
+        }
+    }
+    #[test]
+    fn field_retry_number_labels_keep_city_guard() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        for label in ["nº", "n°", "n.º"] {
+            let raw = format!("Rua Azul, {label} 12, Centro, Vila, XY");
+            let tail = address_field_retries(&raw).expect("explicit labeled number");
+            assert_eq!(tail.number, 12);
+            assert_eq!(tail.city, "vila");
+            let rejected = address_field_choose(Vec::new(), &tail, |_, _| {
+                vec![field_witness("house", "13", "Vila", 1.0)]
+            });
+            assert!(rejected.is_empty());
+            let wrong_city = address_field_choose(Vec::new(), &tail, |_, _| {
+                vec![field_witness("house", "12", "Outra", 1.0)]
+            });
+            assert!(wrong_city.is_empty());
+        }
+    }
+
+    #[test]
+    fn field_retry_cityless_unique_labeled_house() {
+        let idx = es_observer_fixture("182-unique", &[("rua azul", "vila", "001", "12")], "");
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        for label in ["nº", "n°", "n.º"] {
+            let hits =
+                idx.query_feats_fields_retry(&format!("Rua Azul, {label} 12 - Centro"), 3, None);
+            assert!(!hits.is_empty(), "{label}");
+            assert_eq!(hits[0].0.precision, "house");
+            assert_eq!(hits[0].0.housenumber.as_deref(), Some("12"));
+            assert_eq!(normalize(&hits[0].0.street), "rua azul");
+        }
+    }
+
+    #[test]
+    fn field_retry_cityless_rejects_distant_homonyms_and_duplicate_records() {
+        for (label, city, id) in [
+            ("182-homonym", "outra", "002"),
+            ("182-duplicate", "vila", "001"),
+        ] {
+            let idx = es_observer_fixture(
+                label,
+                &[
+                    ("rua azul", "vila", "001", "12"),
+                    ("rua branca", "vila", "001", "1"),
+                    ("rua cinza", "vila", "001", "1"),
+                    ("rua azul", city, id, "12"),
+                ],
+                "",
+            );
+            let _scope = crate::rules::scope(city_tail_fixture_rules());
+            let raw = "Rua Azul, nº 12 - Centro";
+            let original = idx.query_feats_postal_retry(raw, 3, None);
+            assert!(original.first().is_none_or(|h| h.0.precision != "house"));
+            assert_eq!(
+                es_observer_hits(&idx.query_feats_fields_retry(raw, 3, None)),
+                es_observer_hits(&original)
+            );
+        }
+    }
+
+    #[test]
+    fn field_retry_cityless_wrong_number_never_replaces_original() {
+        let idx = es_observer_fixture("182-number", &[("rua azul", "vila", "001", "13")], "");
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        let raw = "Rua Azul, nº 12 - Centro";
+        let original = idx.query_feats_postal_retry(raw, 3, None);
+        assert_eq!(
+            es_observer_hits(&idx.query_feats_fields_retry(raw, 3, None)),
+            es_observer_hits(&original)
+        );
+    }
+
+    #[test]
+    fn field_retry_number_labels_preserve_strong_original() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        let tail = address_field_retries("Rua Azul, nº 12, Centro, Vila, XY").unwrap();
+        let original = vec![field_witness("house", "13", "Outra", 1.0)];
+        let saved = es_observer_hits(&original);
+        let actual =
+            address_field_choose(original, &tail, |_, _| panic!("strong original is frozen"));
+        assert_eq!(es_observer_hits(&actual), saved);
+    }
+
+    fn field_retry_type_rules(pairs: bool) -> &'static crate::rules::Rules {
+        let mut entries = vec![
+            (23, "enabled".to_owned(), "1".to_owned()),
+            (23, "regions".to_owned(), "XY XZ".to_owned()),
+        ];
+        for kind in [
+            "av",
+            "avenida",
+            "r",
+            "rua",
+            "al",
+            "alameda",
+            "pca",
+            "praca",
+            "xy",
+            "xylophone",
+        ] {
+            entries.push((16, kind.to_owned(), String::new()));
+        }
+        if pairs {
+            for (short, full) in [
+                ("av", "avenida"),
+                ("r", "rua"),
+                ("al", "alameda"),
+                ("pca", "praca"),
+                ("xy", "xylophone"),
+            ] {
+                entries.push((24, short.to_owned(), full.to_owned()));
+                entries.push((24, full.to_owned(), short.to_owned()));
+            }
+        }
+        crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+    }
+
+    #[test]
+    fn field_retry_type_abbreviation_from_sheet_reaches_unique_house() {
+        for (label, short, full) in [
+            ("185-av", "Av.", "avenida"),
+            ("185-r", "R.", "rua"),
+            ("185-al", "Al.", "alameda"),
+            ("185-pca", "Pça.", "praca"),
+            ("185-generic", "XY.", "xylophone"),
+        ] {
+            let street = format!("{full} azul");
+            let mut idx = es_observer_fixture(label, &[(&street, "vila", "001", "12")], "");
+            idx.rules = field_retry_type_rules(true);
+            let _scope = crate::rules::scope(idx.rules);
+            let raw = format!("{short} Azul, nº 12 - Centro");
+            let hits = idx.query_feats_fields_retry(&raw, 3, None);
+            assert!(!hits.is_empty(), "{raw}");
+            assert_eq!(hits[0].0.precision, "house", "{raw}");
+            assert_eq!(hits[0].0.housenumber.as_deref(), Some("12"), "{raw}");
+            assert_eq!(normalize(&hits[0].0.street), street, "{raw}");
+        }
+    }
+
+    #[test]
+    fn field_retry_type_abbreviation_checks_every_city_and_spelling() {
+        for (label, second_street, second_city) in [
+            ("185-homonyms", "avenida azul", "outra"),
+            ("185-alias-homonyms", "av azul", "outra"),
+            ("185-duplicates", "avenida azul", "vila"),
+        ] {
+            let mut idx = es_observer_fixture(
+                label,
+                &[
+                    ("avenida azul", "vila", "001", "12"),
+                    ("rua branca", "vila", "001", "1"),
+                    ("rua cinza", "vila", "001", "1"),
+                    (second_street, second_city, "002", "12"),
+                ],
+                "",
+            );
+            idx.rules = field_retry_type_rules(true);
+            let _scope = crate::rules::scope(idx.rules);
+            let (street, number) = cityless_field_address("Av. Azul, nº 12 - Centro").unwrap();
+            assert!(
+                idx.cityless_field_house(&street, number).is_none(),
+                "{label}"
+            );
+            let raw = "Av. Azul, nº 12 - Centro";
+            let original = idx.query_feats_postal_retry(raw, 3, None);
+            assert!(
+                original.first().is_none_or(|h| h.0.precision != "house"),
+                "{label}"
+            );
+            assert_eq!(
+                es_observer_hits(&idx.query_feats_fields_retry(raw, 3, None)),
+                es_observer_hits(&original),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn field_retry_type_abbreviation_without_sheet_pair_stays_literal() {
+        let mut idx =
+            es_observer_fixture("185-no-pair", &[("avenida azul", "vila", "001", "12")], "");
+        idx.rules = field_retry_type_rules(false);
+        let _scope = crate::rules::scope(idx.rules);
+        let (street, number) = cityless_field_address("Av. Azul, nº 12").unwrap();
+        assert!(idx.cityless_field_house(&street, number).is_none());
+        assert!(idx.cityless_field_house("avenida azul", number).is_some());
+    }
+
+    #[test]
+    fn field_retry_type_abbreviation_preserves_strong_original() {
+        let mut idx = es_observer_fixture(
+            "185-strong",
+            &[
+                ("av azul", "vila", "001", "13"),
+                ("avenida azul", "outra", "002", "13"),
+            ],
+            "",
+        );
+        idx.rules = field_retry_type_rules(true);
+        let _scope = crate::rules::scope(idx.rules);
+        let raw = "Av. Azul, 13";
+        let original = idx.query_feats_postal_retry(raw, 3, None);
+        assert_eq!(original[0].0.precision, "house");
+        assert_eq!(original[0].0.housenumber.as_deref(), Some("13"));
+        assert_eq!(
+            es_observer_hits(&idx.query_feats_fields_retry(raw, 3, None)),
+            es_observer_hits(&original)
+        );
+    }
+
+    fn field_retry_recipient_rules(enabled: bool) -> &'static crate::rules::Rules {
+        let mut entries = vec![
+            (23, "enabled".into(), "1".into()),
+            (23, "regions".into(), "MG AC".into()),
+            (23, "forms".into(), "comma hyphen".into()),
+            (23, "postal_digits".into(), "8".into()),
+            (23, "postal_split".into(), "5".into()),
+            (16, "avenida".into(), String::new()),
+            (16, "av".into(), String::new()),
+            (24, "av".into(), "avenida".into()),
+            (24, "avenida".into(), "av".into()),
+        ];
+        if enabled {
+            for prefix in ["A/C", "Aos cuidados de"] {
+                entries.push((25, prefix.into(), String::new()));
+            }
+        }
+        crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+    }
+
+    #[test]
+    fn field_retry_recipient_recovers_names_beyond_generator_template() {
+        let mut idx = es_observer_fixture(
+            "189-recipient",
+            &[("avenida afonso pena", "belo horizonte", "001", "867")],
+            "",
+        );
+        idx.rules = field_retry_recipient_rules(true);
+        let _scope = crate::rules::scope(idx.rules);
+        for prefix in [
+            "A/C Recepção",
+            "A/C João da Silva",
+            "Aos cuidados de Maria Souza",
+        ] {
+            let raw = format!("{prefix}, Av. Afonso Pena, nº 867");
+            let hits = idx.query_feats_street_data(&raw, 3, None);
+            assert!(!hits.is_empty(), "{raw}");
+            assert_eq!(hits[0].0.precision, "house", "{raw}");
+            assert_eq!(hits[0].0.housenumber.as_deref(), Some("867"), "{raw}");
+            assert_eq!(normalize(&hits[0].0.commune), "belo horizonte", "{raw}");
+        }
+    }
+
+    #[test]
+    fn field_retry_recipient_requires_initial_whole_word_from_sheet() {
+        let _scope = crate::rules::scope(field_retry_recipient_rules(true));
+        for raw in [
+            "Rua X, 10, Rio Branco, AC",
+            "Rua A/C 10, Av. Afonso Pena, nº 867",
+            "Avenida Afonso Pena, 867",
+            "Recepção, Av. Afonso Pena, nº 867",
+            "A/Carlos, Av. Afonso Pena, nº 867",
+            "Aos cuidados demais, Av. Afonso Pena, nº 867",
+            "A/C João da Silva sem vírgula",
+        ] {
+            assert!(recipient_field_retry(raw).is_none(), "{raw}");
+        }
+        for raw in [
+            "A/C Recepção, Av. Afonso Pena, nº 867",
+            "A/C João da Silva, Av. Afonso Pena, nº 867",
+            "Aos cuidados de Maria Souza, Av. Afonso Pena, nº 867",
+        ] {
+            assert_eq!(
+                recipient_field_retry(raw),
+                Some("Av. Afonso Pena, nº 867"),
+                "{raw}"
+            );
+        }
+        drop(_scope);
+        let _scope = crate::rules::scope(field_retry_recipient_rules(false));
+        assert!(recipient_field_retry("A/C Recepção, Av. Afonso Pena, nº 867").is_none());
+    }
+
+    #[test]
+    fn field_retry_recipient_keeps_every_nonempty_original() {
+        let _scope = crate::rules::scope(field_retry_recipient_rules(true));
+        for precision in ["house", "interp", "near", "street", "city"] {
+            let original = vec![
+                field_witness(precision, "9", "Outra", 1.0),
+                field_witness("house", "867", "Belo Horizonte", 2.0),
+            ];
+            let saved = es_observer_hits(&original);
+            let got = recipient_field_choose(
+                original,
+                "A/C Recepção, Av. Afonso Pena, nº 867",
+                |_| panic!("nonempty original must not retry"),
+            );
+            assert_eq!(es_observer_hits(&got), saved, "{precision}");
+        }
+    }
+
+    #[test]
+    fn field_retry_recipient_reuses_existing_address_guards() {
+        let mut idx = es_observer_fixture(
+            "189-guards",
+            &[("avenida afonso pena", "belo horizonte", "001", "867")],
+            "",
+        );
+        idx.rules = field_retry_recipient_rules(true);
+        let _scope = crate::rules::scope(idx.rules);
+        for q in [
+            "Av. Afonso Pena, nº 868",
+            "Av. Afonso Pena, nº 867, Outra, MG",
+            "Av. Afonso Pena, nº 867, Belo Horizonte, MG",
+        ] {
+            let clean = idx.query_feats_street_data(q, 3, None);
+            let restored = idx.query_feats_street_data(&format!("A/C João da Silva, {q}"), 3, None);
+            assert_eq!(es_observer_hits(&restored), es_observer_hits(&clean), "{q}");
+        }
+    }
+    fn field_retry_comma_rules() -> &'static crate::rules::Rules {
+        let mut entries = vec![
+            (23, "enabled".into(), "1".into()),
+            (23, "regions".into(), "SC XY XZ".into()),
+            (23, "forms".into(), "comma hyphen".into()),
+            (23, "postal_digits".into(), "8".into()),
+            (23, "postal_split".into(), "5".into()),
+        ];
+        for kind in ["alameda", "rua", "avenida", "av"] {
+            entries.push((16, kind.into(), String::new()));
+        }
+        entries.push((24, "av".into(), "avenida".into()));
+        crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+    }
+
+    #[test]
+    fn field_retry_comma_restores_anchored_house() {
+        let mut idx = es_observer_fixture(
+            "192-anchors",
+            &[("alameda duque de caxias", "blumenau", "001", "78")],
+            "",
+        );
+        idx.rules = field_retry_comma_rules();
+        let _scope = crate::rules::scope(idx.rules);
+        let hits = idx.query_feats_street_data(
+            "Alameda Duque de Caxias 78 Centro 89015-010 Blumenau SC",
+            3,
+            None,
+        );
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].0.precision, "house");
+        assert_eq!(hits[0].0.housenumber.as_deref(), Some("78"));
+        assert_eq!(normalize(&hits[0].0.street), "alameda duque de caxias");
+        assert_eq!(normalize(&hits[0].0.commune), "blumenau");
+    }
+
+    #[test]
+    fn field_retry_comma_restores_labeled_house() {
+        let mut idx = es_observer_fixture(
+            "192-label",
+            &[("avenida joao machado", "vila", "001", "348")],
+            "",
+        );
+        idx.rules = field_retry_comma_rules();
+        let _scope = crate::rules::scope(idx.rules);
+        let hits = idx.query_feats_street_data("Av. João Machado n° 348", 3, None);
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].0.precision, "house");
+        assert_eq!(hits[0].0.housenumber.as_deref(), Some("348"));
+        assert_eq!(normalize(&hits[0].0.street), "avenida joao machado");
+    }
+
+    #[test]
+    fn field_retry_comma_preserves_numeral_street_name() {
+        let mut idx = es_observer_fixture(
+            "192-numeral",
+            &[
+                ("rua 7 de setembro", "vila", "001", "100"),
+                ("rua 7", "outra", "002", "7"),
+            ],
+            "",
+        );
+        idx.rules = field_retry_comma_rules();
+        let _scope = crate::rules::scope(idx.rules);
+        let hits =
+            idx.query_feats_street_data("Rua 7 de Setembro 100 Centro 12345-678 Vila XY", 3, None);
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].0.housenumber.as_deref(), Some("100"));
+        assert_eq!(normalize(&hits[0].0.street), "rua 7 de setembro");
+    }
+
+    #[test]
+    fn field_retry_comma_keeps_comma_query_and_nonempty_original() {
+        let mut idx = es_observer_fixture("192-frozen", &[("rua azul", "vila", "001", "12")], "");
+        idx.rules = field_retry_comma_rules();
+        let _scope = crate::rules::scope(idx.rules);
+        for raw in ["Rua Azul, 12, Vila, XY", "Rua Azul 12", "Rua Azul"] {
+            let before = idx.query_feats_street_data_base(raw, 3, None);
+            assert!(!before.is_empty(), "{raw}");
+            assert_eq!(
+                es_observer_hits(&idx.query_feats_street_data(raw, 3, None)),
+                es_observer_hits(&before),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn field_retry_comma_rejects_missing_house_and_wrong_city() {
+        let mut idx = es_observer_fixture("192-guards", &[("rua azul", "vila", "001", "12")], "");
+        idx.rules = field_retry_comma_rules();
+        let _scope = crate::rules::scope(idx.rules);
+        for raw in [
+            "Rua Azul Centro",
+            "Rua Azul 99 Centro 12345-678 Vila XY",
+            "Rua Azul 12 Centro 12345-678 Outra XY",
+        ] {
+            let before = idx.query_feats_street_data_base(raw, 3, None);
+            assert_eq!(
+                es_observer_hits(&idx.query_feats_street_data(raw, 3, None)),
+                es_observer_hits(&before),
+                "{raw}"
+            );
+        }
+    }
+    fn field_retry_geo_rules() -> &'static crate::rules::Rules {
+        let mut entries = vec![
+            (23, "enabled".into(), "1".into()),
+            (23, "regions".into(), "CE SP GO XY".into()),
+            (23, "forms".into(), "comma hyphen".into()),
+            (23, "postal_digits".into(), "8".into()),
+            (23, "postal_split".into(), "5".into()),
+        ];
+        for kind in ["rua", "avenida", "av"] {
+            entries.push((16, kind.into(), String::new()));
+        }
+        entries.push((24, "av".into(), "avenida".into()));
+        crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+    }
+
+    #[test]
+    fn field_retry_geo_dash_postal_reaches_house() {
+        let mut idx = es_observer_fixture(
+            "195-fortaleza",
+            &[("avenida da abolicao", "fortaleza", "001", "3207")],
+            "",
+        );
+        idx.rules = field_retry_geo_rules();
+        let _scope = crate::rules::scope(idx.rules);
+        let hits = idx.query_feats_street_data(
+            "Av. da Abolição, 3207 – Meireles - Fortaleza - CE CEP 60165-081",
+            3,
+            None,
+        );
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].0.precision, "house");
+        assert_eq!(hits[0].0.housenumber.as_deref(), Some("3207"));
+        assert_eq!(normalize(&hits[0].0.commune), "fortaleza");
+        assert_eq!(normalize(&hits[0].0.street), "avenida da abolicao");
+    }
+
+    #[test]
+    fn field_retry_geo_labeled_number_reaches_house() {
+        let mut idx = es_observer_fixture(
+            "195-carlos",
+            &[("rua dona alexandrina", "sao carlos", "001", "1478")],
+            "",
+        );
+        idx.rules = field_retry_geo_rules();
+        let _scope = crate::rules::scope(idx.rules);
+        let hits = idx.query_feats_street_data(
+            "Rua Dona Alexandrina, nº 1478, Centro - São Carlos - SP",
+            3,
+            None,
+        );
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].0.precision, "house");
+        assert_eq!(hits[0].0.housenumber.as_deref(), Some("1478"));
+        assert_eq!(normalize(&hits[0].0.commune), "sao carlos");
+        assert_eq!(normalize(&hits[0].0.street), "rua dona alexandrina");
+    }
+
+    #[test]
+    fn field_retry_geo_last_commune_avoids_district_homonym() {
+        let mut idx = es_observer_fixture(
+            "195-last",
+            &[
+                ("rua azul", "campinas", "001", "395"),
+                ("rua azul", "goiania", "002", "395"),
+            ],
+            "",
+        );
+        idx.rules = field_retry_geo_rules();
+        let _scope = crate::rules::scope(idx.rules);
+        let hits =
+            idx.query_feats_street_data("Rua Azul, 395, Campinas, 74520-100, Goiânia, GO", 3, None);
+        assert!(hits
+            .first()
+            .is_none_or(|(h, _)| normalize(&h.commune) == "goiania"));
+        let raw = "Rua Azul, nº 395 – Campinas – 74520-100 – Goiânia – GO";
+        assert!(idx.query_feats_street_data_base(raw, 3, None).is_empty());
+        let hits = idx.query_feats_street_data(raw, 3, None);
+        assert_eq!(
+            normalize(&hits.first().expect("city after district").0.commune),
+            "goiania"
+        );
+    }
+
+    #[test]
+    fn field_retry_geo_city_in_street_is_not_tail() {
+        let mut idx = es_observer_fixture(
+            "195-street",
+            &[("rua fortaleza", "fortaleza", "001", "10")],
+            "",
+        );
+        idx.rules = field_retry_geo_rules();
+        let _scope = crate::rules::scope(idx.rules);
+        for raw in [
+            "Rua Fortaleza, 10",
+            "Rua Fortaleza, 10, Centro, XY",
+            "Rua Fortaleza, nº 10 – Meireles - CE",
+        ] {
+            let before = idx.query_feats_street_data_base(raw, 3, None);
+            assert_eq!(
+                es_observer_hits(&idx.query_feats_street_data(raw, 3, None)),
+                es_observer_hits(&before),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn field_retry_geo_no_known_commune_preserves_answer() {
+        let mut idx =
+            es_observer_fixture("195-unknown", &[("rua azul", "fortaleza", "001", "10")], "");
+        idx.rules = field_retry_geo_rules();
+        let _scope = crate::rules::scope(idx.rules);
+        let raw = "Rua Azul, nº 10 – Meireles - CE";
+        let before = idx.query_feats_street_data_base(raw, 3, None);
+        assert_eq!(
+            es_observer_hits(&idx.query_feats_street_data(raw, 3, None)),
+            es_observer_hits(&before)
+        );
+    }
+
+    #[test]
+    fn field_retry_geo_preserves_every_nonempty_original() {
+        let mut idx = es_observer_fixture(
+            "195-nonempty",
+            &[("rua azul", "fortaleza", "001", "10")],
+            "",
+        );
+        idx.rules = field_retry_geo_rules();
+        let _scope = crate::rules::scope(idx.rules);
+        for precision in ["house", "interp", "near", "street", "city"] {
+            let original = vec![
+                field_witness(precision, "10", "fortaleza", 1.0),
+                field_witness("house", "11", "outra", 2.0),
+            ];
+            let expected = es_observer_hits(&original);
+            let mut called = false;
+            let hits = empty_field_choose(
+                original,
+                || {
+                    called = true;
+                    Some("Rua Azul, 10, Fortaleza")
+                },
+                |_| Vec::new(),
+            );
+            assert!(!called, "{precision}");
+            assert_eq!(es_observer_hits(&hits), expected);
+        }
+    }
+    #[test]
+    fn field_retry_geo_anchor_rejects_conflicting_suffix() {
+        let mut idx = es_observer_fixture(
+            "195-anchor",
+            &[
+                ("rua azul", "campinas", "001", "395"),
+                ("rua azul", "goiania", "002", "395"),
+            ],
+            "",
+        );
+        idx.rules = field_retry_geo_rules();
+        let _scope = crate::rules::scope(idx.rules);
+        for raw in [
+            "Rua Azul, nº 395 – Campinas – GO – Goiânia",
+            "Rua Azul, nº 395 – Campinas – 74520-100 – Goiânia",
+        ] {
+            assert!(idx.geographic_field_retry(raw).is_none(), "{raw}");
+            let original = idx.query_feats_street_data_base(raw, 3, None);
+            assert_eq!(
+                es_observer_hits(&idx.query_feats_street_data(raw, 3, None)),
+                es_observer_hits(&original),
+                "{raw}"
+            );
+        }
+    }
+    #[allow(dead_code)]
+    trait TitleRetryBeforeImplementation {
+        fn query_feats_title_fields(
+            &self,
+            original: Vec<(Hit, [f32; N_FEATS])>,
+            _raw: &str,
+            _k: usize,
+            _focus: Option<&QueryFocus>,
+        ) -> Vec<(Hit, [f32; N_FEATS])> {
+            original
+        }
+    }
+    impl TitleRetryBeforeImplementation for Index {}
+
+    fn field_retry_title_rules() -> &'static crate::rules::Rules {
+        let mut entries = vec![
+            (23, "enabled".into(), "1".into()),
+            (23, "regions".into(), "PA PB PR PE SP XY".into()),
+            (23, "postal_digits".into(), "8".into()),
+            (23, "postal_split".into(), "5".into()),
+            (
+                23,
+                "street_titles".into(),
+                "almirante doutor coronel marechal padre dom general".into(),
+            ),
+        ];
+        entries.push((
+            23,
+            "street_title_aliases".into(),
+            "alm:almirante dr:doutor cel:coronel mal:marechal pe:padre".into(),
+        ));
+        for word in ["av", "avenida", "r", "rua"] {
+            entries.push((16, word.into(), String::new()));
+        }
+        for (a, b) in [("av", "avenida"), ("r", "rua")] {
+            entries.push((24, a.into(), b.into()));
+        }
+        crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+    }
+
+    #[test]
+    fn field_retry_title_abbreviation_and_optional_title_reach_house() {
+        for (slot, (street, query, city, num)) in [
+            (
+                "avenida almirante barroso",
+                "Av. Alm. Barroso, 2305, Belém",
+                "belem",
+                "2305",
+            ),
+            (
+                "avenida marechal floriano peixoto",
+                "Avenida Floriano Peixoto 825, Campina Grande",
+                "campina grande",
+                "825",
+            ),
+            ("rua coronel azul", "Rua Cel. Azul, 12, Vila", "vila", "12"),
+            ("rua dr azul", "Rua Doutor Azul, 12, Vila", "vila", "12"),
+            ("rua azul", "Rua Doutor Azul, 12, Vila", "vila", "12"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut idx = es_observer_fixture(
+                &format!("198-positive-{slot}"),
+                &[(street, city, "001", num)],
+                "",
+            );
+            idx.rules = field_retry_title_rules();
+            let _scope = crate::rules::scope(idx.rules);
+            let hits = idx.query_feats_title_fields(Vec::new(), query, 3, None);
+            assert!(!hits.is_empty(), "{query}");
+            assert_eq!(hits[0].0.precision, "house", "{query}");
+            assert_eq!(hits[0].0.housenumber.as_deref(), Some(num));
+            assert_eq!(normalize(&hits[0].0.street), street);
+            assert_eq!(normalize(&hits[0].0.commune), city);
+        }
+    }
+
+    #[test]
+    fn field_retry_title_keeps_name_number_city_and_region() {
+        let mut idx = es_observer_fixture(
+            "198-negative",
+            &[
+                ("rua coronel veiga", "general carneiro", "001", "12"),
+                ("rua padre azul", "vila", "002", "12"),
+                ("rua doutor azul", "padre vila", "003", "12"),
+            ],
+            "",
+        );
+        idx.rules = field_retry_title_rules();
+        let _scope = crate::rules::scope(idx.rules);
+        for q in [
+            "Rua Coronel Viana, 12, General Carneiro, PR",
+            "Rua Coronel Veiga, 13, General Carneiro, PR",
+        ] {
+            let hits = idx.query_feats_title_fields(Vec::new(), q, 3, None);
+            assert!(hits.is_empty(), "{q}");
+        }
+        let mut cityidx = es_observer_fixture(
+            "198-city-region",
+            &[
+                ("rua doutor azul", "padre vila", "003", "12"),
+                ("rua verde", "vila", "004", "99"),
+            ],
+            "",
+        );
+        cityidx.rules = field_retry_title_rules();
+        for q in ["Rua Azul, 12, Vila, PE", "Rua Azul, 12, Vila"] {
+            assert!(
+                cityidx
+                    .query_feats_title_fields(Vec::new(), q, 3, None)
+                    .is_empty(),
+                "{q}"
+            );
+        }
+        let q = "Rua Coronel Veiga, 12, General Carneiro, PR";
+        let hits = idx.query_feats_title_fields(Vec::new(), q, 3, None);
+        assert_eq!(normalize(&hits[0].0.commune), "general carneiro");
+    }
+
+    #[test]
+    fn field_retry_title_preserves_whole_nonempty_answer() {
+        let mut idx = es_observer_fixture(
+            "198-preserve",
+            &[
+                ("rua azul", "vila", "001", "12"),
+                ("rua doutor azul", "outra", "002", "12"),
+            ],
+            "",
+        );
+        idx.rules = field_retry_title_rules();
+        let _scope = crate::rules::scope(idx.rules);
+        for q in ["Rua Azul, 12, Vila", "Rua Doutor Azul, 12, Outra"] {
+            let original = idx.query_feats_street_data_base(q, 3, None);
+            assert!(!original.is_empty());
+            assert_eq!(
+                es_observer_hits(&idx.query_feats_title_fields(original.clone(), q, 3, None)),
+                es_observer_hits(&original)
+            );
+        }
+    }
+
+    #[allow(dead_code)]
+    trait ForeignCityBeforeImplementation {
+        fn foreign_city_guard(
+            &self,
+            _raw: &str,
+            hits: Vec<(Hit, [f32; N_FEATS])>,
+        ) -> Vec<(Hit, [f32; N_FEATS])> {
+            hits
+        }
+    }
+    impl ForeignCityBeforeImplementation for Index {}
+
+    fn foreign_city_fixture() -> Index {
+        static SERIAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let label = format!(
+            "202-foreign-city-{}",
+            SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let mut idx =
+            es_observer_fixture(&label, &[("rua azul", "rio de janeiro", "001", "10")], "");
+        let mut rows = vec![];
+        for (name, regions) in [
+            ("rio de janeiro", "RJ"),
+            ("comendador levy gasparian", "RJ"),
+            ("niteroi", "RJ"),
+            ("duque de caxias", "RJ"),
+            ("jardim", "CE MS"),
+            ("vila bela da santissima trindade", "MT"),
+            ("fundao", "ES"),
+            ("lages", "SC"),
+            ("paracambi", "RJ"),
+            ("rio branco", "AC MT"),
+            ("blumenau", "SC"),
+            ("bonito", "BA MS PE"),
+            ("campinas", "SP"),
+            ("sao paulo", "SP"),
+        ] {
+            rows.push((26, format!("city:{name}"), regions.to_string()));
+        }
+        for (name, uf) in [
+            ("rio de janeiro", "RJ"),
+            ("sao paulo", "SP"),
+            ("santa catarina", "SC"),
+        ] {
+            rows.push((26, format!("state:{name}"), uf.to_string()));
+        }
+        rows.push((26, "regions".into(), "AC BA CE ES MS MT PE RJ SC SP".into()));
+        rows.push((26, "street_markers".into(), "rua ru r avenida av alameda al travessa tv estrada rodovia praca pca pc largo beco viela".into()));
+        rows.push((
+            26,
+            "district_markers".into(),
+            "bairro vila jardim jd distrito setor parque pq residencial loteamento colonia col"
+                .into(),
+        ));
+        idx.rules = crate::rules::from_section(&crate::rules::serialize_entries(&rows));
+        idx
+    }
+
+    #[test]
+    fn foreign_city_rejects_only_first_precise_response() {
+        let idx = foreign_city_fixture();
+        for (query, city) in [
+            (
+                "Praça João Werneck 173, Comendador Levy Gasparian, Rio de Janeiro, Brasil",
+                "Rio de Janeiro",
+            ),
+            (
+                "R. Nossa Senhora de Fátima, n° 10 - Bairro Niterói",
+                "Niterói",
+            ),
+            ("Av. Duque de Caxias, s/n", "Duque de Caxias"),
+            ("Rua Azul, 10, Campinas SP", "Rio de Janeiro"),
+        ] {
+            for precision in ["house", "interp", "near", "street"] {
+                let hits = vec![
+                    field_witness(precision, "10", city, 1.0),
+                    field_witness("house", "10", "Campinas", 2.0),
+                ];
+                assert!(
+                    idx.foreign_city_guard(query, hits).is_empty(),
+                    "{query} / {precision}"
+                );
+            }
+            let city_hit = vec![field_witness("city", "", city, 1.0)];
+            assert_eq!(
+                es_observer_hits(&idx.foreign_city_guard(query, city_hit.clone())),
+                es_observer_hits(&city_hit)
+            );
+        }
+        let hits = vec![
+            field_witness("house", "10", "Campinas", 1.0),
+            field_witness("house", "10", "Rio de Janeiro", 2.0),
+        ];
+        assert_eq!(
+            es_observer_hits(&idx.foreign_city_guard("Rua Azul 10 Campinas SP", hits.clone())),
+            es_observer_hits(&hits)
+        );
+    }
+
+    #[test]
+    fn foreign_city_near_misses_preserve_all_ranked_bytes() {
+        let idx = foreign_city_fixture();
+        for (query, city) in [
+            (
+                "MS, Rua Ten. Ari Rodrigues 252, Centro, 79240-000, Jardim",
+                "Jardim",
+            ),
+            (
+                "MT, Rua Azul 10, Vila Bela da Santíssima Trindade",
+                "Vila Bela da Santíssima Trindade",
+            ),
+            (
+                "Avenida Pedro Calmon, nº 550 – Ilha do Fundão/RJ",
+                "Rio de Janeiro",
+            ),
+            ("Av. Rio Branco, 100, Rio Branco - AC", "Rio Branco"),
+            (
+                "Alameda Duque de Caxias 78 Centro 89015-010 Blumenau SC",
+                "Blumenau",
+            ),
+            ("Rua Azul 10 Bonito", "Rio de Janeiro"),
+            ("Rua Azul 10 Campinas", "Rio de Janeiro"),
+            ("Rua Azul 10 Campinas SP Niterói RJ", "Blumenau"),
+            ("Rua Azul 10 Campinas São Paulo SP", "Blumenau"),
+            ("Rua Azul 10 Campinas SP", "Campinas"),
+        ] {
+            for precision in ["house", "interp", "near", "street", "city"] {
+                let hits = vec![
+                    field_witness(precision, "10", city, 1.0),
+                    field_witness("house", "11", "Duque de Caxias", 2.0),
+                ];
+                assert_eq!(
+                    es_observer_hits(&idx.foreign_city_guard(query, hits.clone())),
+                    es_observer_hits(&hits),
+                    "{query} / {precision}"
+                );
+            }
+        }
+        let mut plain = foreign_city_fixture();
+        plain.rules = crate::rules::defaults_static();
+        let hits = vec![field_witness("house", "10", "Rio de Janeiro", 1.0)];
+        assert_eq!(
+            es_observer_hits(&plain.foreign_city_guard("Rua Azul 10 Campinas SP", hits.clone())),
+            es_observer_hits(&hits)
+        );
+        assert!(idx
+            .foreign_city_guard("Rua Azul 10 Campinas SP", vec![])
+            .is_empty());
+    }
+
+    #[test]
+    fn foreign_city_inferred_region_excludes_foreign_district_homonym() {
+        let idx = foreign_city_fixture();
+        let q = "Rua Anibal Cardoso, S/N Lages, Paracambi - Rio de Janeiro";
+        for precision in ["house", "interp", "near", "street"] {
+            assert!(
+                idx.foreign_city_guard(
+                    q,
+                    vec![field_witness(precision, "", "Rio de Janeiro", 1.0)]
+                )
+                .is_empty(),
+                "{precision}"
+            );
+        }
+        for (q, city) in [
+            ("Rua Anibal Cardoso, S/N, Lages - SC", "Lages"),
+            ("Rua Anibal Cardoso, Lages, Paracambi", "Rio de Janeiro"),
+        ] {
+            for precision in ["house", "interp", "near", "street", "city"] {
+                let original = vec![
+                    field_witness(precision, "", city, 1.0),
+                    field_witness("house", "11", "Outra", 2.0),
+                ];
+                assert_eq!(
+                    es_observer_hits(&idx.foreign_city_guard(q, original.clone())),
+                    es_observer_hits(&original),
+                    "{q}"
+                );
+            }
+        }
     }
 }

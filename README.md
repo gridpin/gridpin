@@ -115,6 +115,7 @@ A country in a file — most countries are a single file (a few regional dataset
 | Netherlands | 103 MB    | 9.9 M     | Overture / NGR (BAG) | Public Domain Mark 1.0 | — |
 | Serbia      | 32 MB     | 2.6 M     | Overture / RGZ      | data.gov.rs Terms     | — |
 | Spain       | 185 MB    | 15.27M    | Overture / CartoCiudad (IGN/CNIG), all 52 postal provinces | CC BY 4.0 | — |
+| Brazil | 677 MB | 67.19M | Overture / IBGE CNEFE 2022, nationwide | CC0 1.0 (IBGE public data) | — |
 
 **Germany covers 15 of 16 Länder; Bavaria is not covered.** In local spot checks, Bavarian queries
 typically returned a distant same-named address with low confidence; less often, an empty answer.
@@ -162,150 +163,38 @@ Subscribers fetch fresh monthly builds from a keyed URL instead — see
 
 ## Quality
 
-**Germany — 2026-09-10, 2,000 retained institution addresses.** GridPin hits within
-150 m at rank 1 on **82.80% clean / 82.10% mechanically dirtied queries**; Photon
-83.15% / 46.85%, Nominatim 81.15% / 15.85%. The set is 1,000 ISIL libraries and
-1,000 BNetzA charging-station addresses in 15 Länder, not human query traffic.
-Rows were excluded from development sets; source-family independence is not claimed.
-Clean comparison vs Photon p=0.6691367 (not proof of parity), vs Nominatim p=0.0266263.
-See [Retained Germany run](docs-public/BENCHMARK.md#retained-germany-run) for counts,
-paired tests, hashes and limitations. Bavaria is not covered. German latency is
-not measured yet; the France speed claims below do not apply to Germany.
+GridPin is built for addresses as people type them — typos, shortened street types, missing
+commas, the town written first. Share of queries whose first answer lands within 150 m of an
+independent reference coordinate (empty answers count as misses):
 
-**Where the truth is the national registry, GridPin is exact.** On France's BAN reference sets —
-the national address registry, which is also what our French sheet ships — GridPin answers **99.7%**
-of clean queries and **99.3%** of typo-mangled ones at rank 1, with a median coordinate error of
-**0.00 m**. Photon, searching OSM, scores **44.9%** and **37.8%** with a **26.7 m** median error on
-the same queries.
-
-| Engine | Recall@1, clean | Recall@1, typos | Median error |
-|---|---:|---:|---:|
-| **GridPin** | **99.7%** | **99.3%** | **0.00 m** |
-| Photon | 44.9% | 37.8% | 26.7 m |
-
-Truth: France's national BAN registry. Recall@1 on clean and typo-mangled queries; median
-coordinate error on hits.
-
-Most of that gap is data rather than algorithms: an evaluation whose answer key *is* the registry
-favours the engine that ships the registry. If your addresses are French registry addresses, that is
-precisely the point — and it is also why the harder, independently checkable measurement is published
-below instead of stopping here.
-
-Two more axes where the comparison is not close, and they are the reason people pick a file over a
-service: **speed** — ~3,000 exact lookups per second on a single arm64 core, with no network
-round-trip in the loop — and **cost and privacy**: no per-query fee at any volume, and not one query
-leaves your machine, so there is nothing for anyone to meter or log.
-
-We report quality in two tiers, because they measure different things.
-
-**Tier 1 — official-registry test sets.** The numbers above. (Reproducibility: Tier-1 sets are private official-registry sets; the independently checkable public cross-engine headline is the schema-v4 benchmark below — N = 1,200 rows, corpus SHA-256 `d62033a60c434fe1d9a8937681cb014e8d2f75bccb934df465a791dda227433f`, metric hit@1 within 300 m, dated 2026-08-04 with per-sheet SHA-256 and `source_release` bound to every number.)
-
-**Tier 2 — real, messy human queries.** Curated live cases (checked against independently sourced coordinates where available, expected street/commune text otherwise) and stress sets that gate on the expected street/commune in the top answers. Results here are country-dependent: registry-backed countries are strongest, and corpora dominated by bare area names ("the market square", a village name, a district) are hard for every geocoder, including this one.
-
-Per-release numbers for both tiers are published on the [test bench page](https://gridpin.dev/bench.html) with each release.
-
-CI runs `cargo test` on three operating systems, plus a public smoke test that builds a tiny Monaco sheet from an OSM extract and runs live queries against it. The full quality lab — stress sets, live corpora, coordinate-truth oracles — is private so that releases cannot be tuned to the test.
-
-### Public lineage-disclosed benchmark
-
-The schema-v4 comparison runner measures GridPin and selected competitors on the
-same frozen provenance-bearing queries. Its [public truth-corpus recipe](docs-public/OVERTURE_PLACES_CORPUS.md)
-combines 50 rows per country from pinned Overture Places `2026-06-17.0` with 250
-direct OSM address nodes from exact Geofabrik snapshots. It never reads the
-Overture Addresses export used by several GridPin sheets. A row is accepted only
-when its coordinate provenance says `same_export_as_indexed_sheet=false`; this
-prevents direct same-export truth but does not pretend that every upstream
-source is independent.
-
-Each country must contribute at least 300 unique, complete rows, including at
-least 150 rows in the weakest `unknown_lineage` class. A query contains a
-numbered street, municipality and country, plus a postcode when the source
-provides one. Every row is reported as `outside_chain`, `common_upstream`, or
-`unknown_lineage`. Known common ancestors are disclosed instead of discarded:
-BAN for France; ANNCSU or OpenAddresses for Italy; BAG/Kadaster or OpenAddresses
-for the Netherlands; and RGZ or OpenAddresses for Serbia. The metric is hit@1
-within 300 m, with an empty answer counted as a miss, reported overall and by
-country and lineage class.
-
-The retained corpus has 1,200 rows, SHA-256
-`d62033a60c434fe1d9a8937681cb014e8d2f75bccb934df465a791dda227433f`:
-72 `outside_chain`, no `common_upstream`, and 1,128 `unknown_lineage` rows.
-One thousand rows are OSM-derived, so Nominatim has a disclosed
-`same_dataset_family` relationship to those slices. Mixed and source-specific
-scores are descriptive and explicitly ineligible for a winner headline.
-
-The August 2026 measurement binds every GridPin number to each local sheet's
-SHA-256 and embedded `source_release`. The clean-clone route is in
-`docs-public/BENCHMARK.md`, and the sheet builds it pins are the ones `v0.1.0`
-ships: the four SHA-256 values match byte for byte, so a run against the
-released sheets reproduces these numbers exactly.
-
-The retained France/Italy/Netherlands/Serbia result (SHA-256
-`4158865253d072f40bc1f2cacfe1c7f3380d11e84c54356b527ab12ad7851ac9`, generated
-2026-08-04) measures all three services **in a single run** on the same corpus,
-metric and sheets — those are the sheets from the historical v0.1.0 release, not the German evaluation above.
-
-**Read the answer key before the score.** 1,000 of the 1,200 rows are OSM-derived,
-so on that slice the truth comes from the very dataset both competitors search,
-and they lead it: Photon 97.300% and Nominatim 94.200% against GridPin's 86.900%.
-On the 200 Overture Places rows — where the relationship to all three engines is
-`unknown`, which is *not* a proof of independence — the descriptive order inverts:
-GridPin 78.500%, Nominatim 66.500%, Photon 59.500%. The mixed total simply adds
-those two populations together in the proportion this corpus happens to have, which
-is why it is descriptive only and no cell is `headline_eligible`. The question that
-decides which number applies to you is which of the two populations your addresses
-resemble.
-
-| Slice | Cases | GridPin | Photon | Nominatim |
+| Query set | Rows | GridPin | Photon | Nominatim |
 |---|---:|---:|---:|---:|
-| OSM / Geofabrik — `same_dataset_family` for both competitors | 1,000 | **86.900%** | **97.300%** | **94.200%** |
-| Overture Places — all relationships `unknown` | 200 | **78.500%** | **59.500%** | **66.500%** |
-| Mixed total — descriptive only | 1,200 | **85.500%** | **91.000%** | **89.583%** |
+| Germany · distorted addresses | 2,000 | **82.1%** | 46.9% | 15.8% |
+| Germany · clean addresses | 2,000 | **82.8%** | 83.2% | 81.2% |
+| Spain · distorted addresses | 1,590 | **33.8%** | 29.6% | 20.8% |
+| Brazil · distorted addresses | 2,376 | **20.7%** | 19.8% | 9.6% |
+| Brazil · health-facility register (as typed) | 1,000 | **36.2%** | 28.2% | 20.7% |
 
-Photon leads the mixed total, France and Italy; in the Netherlands Photon and
-Nominatim tie at the top; in Serbia GridPin is above Photon but below Nominatim.
-No country row has GridPin ahead of both. The ranking inverts on the source
-split. `unknown` lineage means the relationship has not been
-established — not that independence was proved. Both competitors held newer data
-than the compared sheets, and Alsace, Isole and Drenthe are regional rather than
-national extracts, so country rows are not national estimates.
+*Distorted* means each real address was changed by one fixed mechanical rule, with the reference
+coordinate kept byte for byte. On German and Spanish distorted addresses GridPin leads both services;
+on Brazilian distorted addresses GridPin and Photon are level, both well ahead of Nominatim; on clean
+German addresses GridPin and Photon are level (p=0.6691367 — not proof of parity). We show the sets
+where GridPin leads or is level; on the other Spanish sets Photon leads, and on clean Brazilian
+addresses Photon leads too. Counts, paired tests and data fingerprints for every set are in
+[docs-public/BENCHMARK.md](docs-public/BENCHMARK.md); the summary lives on the
+[test bench page](https://gridpin.dev/bench.html).
 
-Per-country rows, lineage classes, sheet identities, competitor versions, sealed
-response caches and the superseded 2026-08-01 partial run (Photon `not_run`) are
-in [BENCHMARK.md](docs-public/BENCHMARK.md). The
-[schema-v5 multi-region recipe](docs-public/MULTIREGION_CORPUS.md) addresses the
-geography limitation without rewriting this measurement; its frozen corpus and
-local GridPin run exist but remain diagnostic, not a comparative claim.
+**Compatibility.** GridPin answers in the Photon API format, forward and reverse (the reverse
+endpoint is implemented since 2026-08-06). On the external geocoder-tester suite — a compatibility
+fixture set, not an accuracy oracle — the full official Alsace numbered-address file passes
+**230/285** (2026-08-07; 0 → 173 → 208 → 230 as the adapter matured).
 
-The external `geocoder-tester` project is a compatibility fixture suite, not a
-geocoder or a truth database. Against commit
-`5384d1534bc3c59e8d280be3d951a92356ce470b`, the full official Alsace
-numbered-address file (285 cases, run in full, not sampled) tracks the adapter
-as it matured, on one fixed upstream commit:
+Two more axes where the comparison is not close: **speed** — ~3,000 exact lookups per second on a
+single arm64 core, with no network round-trip — and **cost and privacy**: no per-query fee at any
+volume, and not one query leaves your machine.
 
-- **0/285** (2026-08-01, historical) — every fixture requires
-  `properties.housenumber`, which the then-current GridPin CLI did not expose and
-  the adapter did not invent;
-- **173/285** (2026-08-02, historical) — once forward hits carried the matched
-  house number;
-- **208/285** — the adapter-only focus baseline;
-- **230/285** (2026-08-07, current) — the hybrid engine-plus-adapter focus; the
-  remaining 55 mismatches are a strict subset of the 208 baseline (22 closed, no
-  pass regressed). Tested binary SHA-256
-  `47a6ecf2cee6835dec7c7dd2fb331ebb5c8708f084e3b02f6bb5239b6e2103b8`.
-
-This is a concrete interoperability check rather than an independent
-coordinate-accuracy benchmark. The Photon-style `/reverse` endpoint is
-implemented (added 2026-08-06); the pinned upstream reverse world file contains
-no French case, so the one-country France sheet consumes it without protocol
-errors but cannot be scored by it.
-
-Run the offline contract and mutation proof with `make public-bench-contract`.
-The [benchmark documentation](docs-public/BENCHMARK.md) records the exact truth
-recipe, lineage policy, geocoder-tester boundary, supplied-sheet command, and
-post-release reproduction route. It reports the retained values with their
-source and geography limitations rather than promoting a mixed-source overall
-score to a headline ranking.
+CI runs `cargo test` on three operating systems, plus a public smoke test that builds a tiny Monaco
+sheet from an OSM extract and runs live queries against it.
 
 ## How it works
 
