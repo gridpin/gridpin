@@ -4,7 +4,10 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("gridpin")
+# From the repository root the gridpin/ crate folder is a namespace package named "gridpin";
+# only the engine wheel defines Geocoder.
+if not hasattr(pytest.importorskip("gridpin"), "Geocoder"):
+    pytest.skip("gridpin engine wheel not installed", allow_module_level=True)
 from gridpin_mcp import sheets, tools  # noqa: E402
 
 CODE = Path(__file__).resolve().parents[2]

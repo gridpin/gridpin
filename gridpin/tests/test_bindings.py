@@ -10,6 +10,10 @@ import pathlib
 import pytest
 
 gridpin = pytest.importorskip("gridpin")
+# Run from the repository root, the gridpin/ crate folder is an importable namespace package named
+# "gridpin": importorskip passes without the wheel. The wheel is what defines Geocoder.
+if not hasattr(gridpin, "Geocoder"):
+    pytest.skip("gridpin wheel not installed (run `maturin develop`)", allow_module_level=True)
 
 CODE = pathlib.Path(__file__).resolve().parents[2]
 SHEET = pathlib.Path(os.environ.get("GRIDPIN_TEST_SHEET", CODE / "data" / "mc.bin"))

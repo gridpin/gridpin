@@ -5,8 +5,12 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("mcp")
-pytest.importorskip("gridpin")
+# Not importorskip("mcp"): run from the repository root, the mcp/ folder of this package is an
+# importable namespace package named "mcp", so that check passes without the SDK and the
+# collection fails. A real SDK module is the only proof the SDK is installed.
+pytest.importorskip("mcp.server.mcpserver")
+if not hasattr(pytest.importorskip("gridpin"), "Geocoder"):  # same trap for the gridpin/ folder
+    pytest.skip("gridpin engine wheel not installed", allow_module_level=True)
 from mcp import Client  # noqa: E402
 
 from gridpin_mcp import server, tools  # noqa: E402
