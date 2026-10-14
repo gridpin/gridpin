@@ -8,6 +8,9 @@ use gridpin::query::{Hit, Index};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+mod support;
+use support::Scratch;
+
 // Explicit witness vocabulary: no dependency on the private release rule tree.
 fn write_fixture_rules(dir: &Path) -> std::path::PathBuf {
     std::fs::create_dir_all(dir).unwrap();
@@ -152,7 +155,7 @@ fn fixture_rows() -> Vec<String> {
     .collect()
 }
 
-fn build_fixture_with_rules(country: &str, tag: &str, rules: &Path) -> PathBuf {
+fn build_fixture_with_rules(country: &str, tag: &str, rules: &Path) -> Scratch {
     let dir = std::env::temp_dir().join(format!("gridpin-de-f3-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let csv = dir.join("addresses.csv");
@@ -175,14 +178,14 @@ fn build_fixture_with_rules(country: &str, tag: &str, rules: &Path) -> PathBuf {
     .unwrap();
     let bin = dir.join("addresses.bin");
     gridpin::builder::build(&csv, &bin, None, None, Some(rules), None, Some(&manifest)).unwrap();
-    bin
+    Scratch::file(dir, bin)
 }
 
-fn build_fixture(country: &str, tag: &str) -> PathBuf {
+fn build_fixture(country: &str, tag: &str) -> Scratch {
     build_fixture_with_rules(country, tag, fixture_rules())
 }
 
-fn build_official_commune_alias_target_absent_fixture() -> PathBuf {
+fn build_official_commune_alias_target_absent_fixture() -> Scratch {
     let dir = std::env::temp_dir().join(format!(
         "gridpin-de-official-commune-target-absent-{}",
         std::process::id()
@@ -205,10 +208,10 @@ fn build_official_commune_alias_target_absent_fixture() -> PathBuf {
     let rules = fixture_rules();
     let bin = dir.join("addresses.bin");
     gridpin::builder::build(&csv, &bin, None, None, Some(rules), None, Some(&manifest)).unwrap();
-    bin
+    Scratch::file(dir, bin)
 }
 
-fn build_postcode_capital_prior_fixture(country: &str, tag: &str) -> PathBuf {
+fn build_postcode_capital_prior_fixture(country: &str, tag: &str) -> Scratch {
     let dir = std::env::temp_dir().join(format!(
         "gridpin-{tag}-postcode-capital-prior-{}",
         std::process::id()
@@ -238,10 +241,10 @@ fn build_postcode_capital_prior_fixture(country: &str, tag: &str) -> PathBuf {
     .unwrap();
     let bin = dir.join("addresses.bin");
     gridpin::builder::build(&csv, &bin, None, None, None, None, Some(&manifest)).unwrap();
-    bin
+    Scratch::file(dir, bin)
 }
 
-fn build_missing_postcode_comma_fixture() -> PathBuf {
+fn build_missing_postcode_comma_fixture() -> Scratch {
     let dir = std::env::temp_dir().join(format!(
         "gridpin-de-missing-postcode-comma-{}",
         std::process::id()
@@ -265,10 +268,10 @@ fn build_missing_postcode_comma_fixture() -> PathBuf {
     let rules = fixture_rules();
     let bin = dir.join("addresses.bin");
     gridpin::builder::build(&csv, &bin, None, None, Some(rules), None, Some(&manifest)).unwrap();
-    bin
+    Scratch::file(dir, bin)
 }
 
-fn build_retained_locality_fixture(country: &str, tag: &str, ambiguous: bool) -> PathBuf {
+fn build_retained_locality_fixture(country: &str, tag: &str, ambiguous: bool) -> Scratch {
     let dir = std::env::temp_dir().join(format!(
         "gridpin-{tag}-retained-locality-{}",
         std::process::id()
@@ -338,7 +341,7 @@ fn build_retained_locality_fixture(country: &str, tag: &str, ambiguous: bool) ->
     .unwrap();
     let bin = dir.join("addresses.bin");
     gridpin::builder::build(&csv, &bin, None, None, None, None, Some(&manifest)).unwrap();
-    bin
+    Scratch::file(dir, bin)
 }
 
 fn write_postal_tail_rank(dir: &Path) -> PathBuf {
@@ -363,7 +366,7 @@ fn build_postal_tail_fixture(
     exact_count: usize,
     weaken_exact_house: bool,
     far_exact: bool,
-) -> PathBuf {
+) -> Scratch {
     let dir =
         std::env::temp_dir().join(format!("gridpin-{tag}-postal-tail-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -400,7 +403,7 @@ fn build_postal_tail_fixture(
     .unwrap();
     let bin = dir.join("addresses.bin");
     gridpin::builder::build(&csv, &bin, None, Some(&rank), None, None, Some(&manifest)).unwrap();
-    bin
+    Scratch::file(dir, bin)
 }
 
 fn build_postal_tail_named_fixture(
@@ -409,7 +412,7 @@ fn build_postal_tail_named_fixture(
     street_display: &str,
     number: u32,
     rep: &str,
-) -> PathBuf {
+) -> Scratch {
     let dir = std::env::temp_dir().join(format!(
         "gridpin-{tag}-postal-tail-house-effect-{}",
         std::process::id()
@@ -448,14 +451,14 @@ fn build_postal_tail_named_fixture(
         Some(&manifest),
     )
     .unwrap();
-    bin
+    Scratch::file(dir, bin)
 }
 
-fn build_postal_tail_house_effect_fixture(tag: &str, number: u32, rep: &str) -> PathBuf {
+fn build_postal_tail_house_effect_fixture(tag: &str, number: u32, rep: &str) -> Scratch {
     build_postal_tail_named_fixture(tag, "postallee", "Postallee", number, rep)
 }
 
-fn build_letter_range_tie_fixture() -> PathBuf {
+fn build_letter_range_tie_fixture() -> Scratch {
     let dir = std::env::temp_dir().join(format!("gridpin-letter-range-tie-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let csv = dir.join("addresses.csv");
@@ -479,10 +482,10 @@ fn build_letter_range_tie_fixture() -> PathBuf {
     .unwrap();
     let bin = dir.join("addresses.bin");
     gridpin::builder::build(&csv, &bin, None, None, None, None, Some(&manifest)).unwrap();
-    bin
+    Scratch::file(dir, bin)
 }
 
-fn build_postal_capital_order_fixture() -> PathBuf {
+fn build_postal_capital_order_fixture() -> Scratch {
     let dir = std::env::temp_dir().join(format!(
         "gridpin-postal-capital-order-{}",
         std::process::id()
@@ -519,10 +522,10 @@ fn build_postal_capital_order_fixture() -> PathBuf {
     .unwrap();
     let bin = dir.join("addresses.bin");
     gridpin::builder::build(&csv, &bin, None, Some(&rank), None, None, Some(&manifest)).unwrap();
-    bin
+    Scratch::file(dir, bin)
 }
 
-fn mutant_rules(tag: &str, removed_lines: &[&str]) -> PathBuf {
+fn mutant_rules(tag: &str, removed_lines: &[&str]) -> Scratch {
     let source = fixture_rules();
     let target = std::env::temp_dir().join(format!(
         "gridpin-de-f3-mutant-rules-{tag}-{}",
@@ -543,11 +546,11 @@ fn mutant_rules(tag: &str, removed_lines: &[&str]) -> PathBuf {
             + "\n";
         std::fs::write(target.join(path.file_name().unwrap()), filtered).unwrap();
     }
-    target
+    Scratch::file(target.clone(), target)
 }
 
 fn de_index() -> Index {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    static BIN: OnceLock<Scratch> = OnceLock::new(); // lives for the whole process: one directory per run
     Index::open(BIN.get_or_init(|| build_fixture("de", "de"))).unwrap()
 }
 
@@ -1813,7 +1816,7 @@ fn structured_de_input_gets_the_same_country_scoped_fallbacks() {
 
 #[test]
 fn germany_fallbacks_do_not_run_on_another_country_sheet() {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    static BIN: OnceLock<Scratch> = OnceLock::new(); // lives for the whole process: one directory per run
     let index = Index::open(BIN.get_or_init(|| build_fixture("nl", "non-de"))).unwrap();
     let hits = index.query("Caecilienstrasse 29-33 50676 Koeln", 3);
     assert!(

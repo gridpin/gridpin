@@ -43,6 +43,8 @@ test: engine
 # Python bindings against the Monaco smoke sheet (build it first: make mc)
 test-py: bindings mc
 	.venv-py/bin/python -m pytest gridpin/tests/ -q
+	# gridpin-mcp: sheet downloads and agent tools; the MCP wiring tests skip without the mcp SDK
+	.venv-py/bin/python -m pytest mcp/tests/ -q
 
 # DuckDB extension against the Monaco smoke sheet
 test-duckdb: bindings mc

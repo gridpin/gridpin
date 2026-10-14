@@ -1,7 +1,7 @@
 # Examples
 
 Small, runnable examples. The two product examples below need a country sheet — download one
-from <https://gridpin.dev/docs.html#delivery> (no account, no key) and pass its path.
+from <https://gridpin.dev/docs#delivery> (no account, no key) and pass its path.
 
 For the quickest trial, run `batch.py` against a downloaded `france.bin`.
 

@@ -10725,6 +10725,7 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::Scratch;
 
     // Keep the frozen fixtures' explicit fields; grouping them would rewrite the test call sites.
     #[allow(clippy::too_many_arguments)]
@@ -12481,6 +12482,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let csv = dir.join("addresses.csv");
         std::fs::write(
             &csv,
@@ -12502,6 +12504,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let csv = dir.join("addresses.csv");
         std::fs::write(
             &csv,
@@ -12523,6 +12526,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let csv = dir.join("addresses.csv");
         std::fs::write(
             &csv,
@@ -12556,6 +12560,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let csv = dir.join("addresses.csv");
         std::fs::write(
             &csv,
@@ -13860,6 +13865,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let csv = dir.join("addresses.csv");
         std::fs::write(
             &csv,
@@ -13902,6 +13908,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let csv = dir.join("addresses.csv");
         std::fs::write(
             &csv,
@@ -13941,6 +13948,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let csv = dir.join("addresses.csv");
         std::fs::write(
             &csv,
@@ -14225,6 +14233,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let csv = dir.join("addresses.csv");
         std::fs::write(
             &csv,
@@ -14507,6 +14516,7 @@ mod tests {
         // not silently drop regions. admin_sidecar derives the expected name and flags a mismatch.
         let dir = std::env::temp_dir().join(format!("gridpin-sidecar-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         // a valid WOFA sidecar named for the ORIGINAL sheet (rs.bin -> rs_admin.bin)
         let mut wofa = b"WOFA".to_vec();
         wofa.extend_from_slice(&0u32.to_le_bytes()); // n = 0 regions
@@ -14538,6 +14548,7 @@ mod tests {
         // Deterministic (immune to parallel tests): clone the Arc<Mapping> and watch strong_count.
         let dir = std::env::temp_dir().join(format!("gridpin-h12-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let csv = dir.join("h12.csv");
         std::fs::write(
             &csv,
@@ -14906,6 +14917,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("gridpin-homonym-qualifier-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let csv = dir.join("homonyms.csv");
         std::fs::write(
             &csv,
@@ -14995,6 +15007,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let csv = dir.join("guards.csv");
         std::fs::write(
             &csv,
@@ -17750,6 +17763,7 @@ mod tests {
             street.replace(' ', "-")
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let csv = dir.join("rows.csv");
         let decoy = match country {
             "fr" => "rue de la pais",
@@ -17895,6 +17909,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let csv = dir.join("rows.csv");
         let mut rows = Vec::new();
         for (i, (_, street, city, house)) in examples.iter().enumerate() {
@@ -18025,6 +18040,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let mut csv_rows: Vec<_> = rows
             .iter()
             .enumerate()
@@ -18325,6 +18341,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = Scratch::keep(&dir);
         let mut csv_rows: Vec<_> = rows
             .iter()
             .enumerate()

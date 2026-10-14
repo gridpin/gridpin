@@ -4,6 +4,25 @@
 
 ![GridPin demo: typo-tolerant forward and reverse geocoding in the terminal](docs-public/demo.gif)
 
+## Quick start
+
+```console
+$ pip install gridpin gridpin-mcp
+$ gridpin-fetch fr    # France sheet, 365 MB, checked against the signed release; prints its path
+```
+
+```python
+import gridpin
+from gridpin_mcp import sheets
+
+g = gridpin.Geocoder(str(sheets.download("fr")))  # no-op once the sheet is downloaded
+g.geocode("1 rue de la Paix, Paris", 1)
+```
+
+Countries: `br` `de` `es` `fr` `it` `nl` `rs` (`gridpin-fetch --list`). For AI agents there is an
+MCP server — `claude mcp add gridpin -- uvx gridpin-mcp`, details in [mcp/README.md](mcp/README.md).
+Everything after the download runs offline.
+
 [GridPin](https://gridpin.dev) is an offline geocoder: a country in a data file, memory-mapped and ready in milliseconds, with no server, no database import, and no network. It resolves addresses to coordinates (forward) and coordinates to the nearest indexed address (reverse — approximate: streets are indexed by centroid, so each result carries its `distance_m`). On a single arm64 laptop core, measured on the France sheet: exact address lookups run at ~3,000/s, reverse geocoding at ~1,800/s, and typo-tolerant fuzzy matching much slower — tens of milliseconds per query, so batch it across cores when you feed it messy input. The engine and every query run fully offline — not a byte of what you geocode leaves your machine; the only network step is you downloading a sheet yourself, and a downloaded sheet carries no query data. Because you compute results locally from openly licensed data, you may store them forever, which hosted geocoding APIs typically forbid. If you have considered self-hosting Nominatim (a beefy server, days of import) or an on-prem geocoder license, the alternative here is: download one file, open it on any laptop.
 
 ## Install
@@ -160,7 +179,7 @@ there is no directory listing, so link straight to the object you want:
 [`fr_poi.bin`](https://dl.gridpin.dev/v0.4.0/fr_poi.bin) (231 MB). The matching `SHA256SUMS` manifest (covering the
 engine binary and every sheet) is on the [GitHub release](https://github.com/gridpin/gridpin/releases).
 Subscribers fetch fresh monthly builds from a keyed URL instead — see
-[gridpin.dev/docs](https://gridpin.dev/docs.html).
+[gridpin.dev/docs](https://gridpin.dev/docs).
 
 ## Quality
 
@@ -183,7 +202,7 @@ German addresses GridPin and Photon are level (p=0.6691367 — not proof of pari
 where GridPin leads or is level; on the other Spanish sets Photon leads, and on clean Brazilian
 addresses Photon leads too. Counts, paired tests and data fingerprints for every set are in
 [docs-public/BENCHMARK.md](docs-public/BENCHMARK.md); the summary lives on the
-[test bench page](https://gridpin.dev/bench.html).
+[test bench page](https://gridpin.dev/bench).
 
 **Compatibility.** GridPin answers in the Photon API format, forward and reverse (the reverse
 endpoint is implemented since 2026-08-06). On the external geocoder-tester suite — a compatibility

@@ -1845,6 +1845,7 @@ mod tests {
         let rules_dir = crate::rules::tests::write_fixture_rules(&std::env::temp_dir().join(
             format!("gridpin-de-postal-tail-rules-{}", std::process::id()),
         ));
+        let _scratch = crate::scratch::Scratch::keep(&rules_dir);
         let entries = crate::rules::entries_from_tsv_dir(&rules_dir).unwrap();
         let section = crate::rules::serialize_entries(&entries);
         let installed = crate::rules::from_section(&section);

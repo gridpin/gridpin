@@ -1,6 +1,6 @@
 # Public quality benchmark
 
-This file is the full version of the [benchmark on gridpin.dev](https://gridpin.dev/bench.html): the same
+This file is the full version of the [benchmark on gridpin.dev](https://gridpin.dev/bench): the same
 sets, with every count, the significance tests and the fingerprints of the data, so anyone can check the
 numbers.
 

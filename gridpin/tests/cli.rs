@@ -6,13 +6,14 @@ use gridpin::query::Index;
 use std::io::Write;
 use std::process::Command;
 
+mod support;
+use support::Scratch;
+
 const BIN: &str = env!("CARGO_BIN_EXE_gridpin");
 const HDR: &str = "nom_voie_norm,code_insee,nom_commune_norm,code_postal,numero,rep,lon,lat,nom_voie,nom_commune\n";
 
-fn tmpdir(name: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("gridpin-cli-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn tmpdir(name: &str) -> Scratch {
+    Scratch::dir(&format!("cli-{name}"))
 }
 
 fn build_sheet(dir: &std::path::Path) -> std::path::PathBuf {
@@ -1095,7 +1096,7 @@ fn place_provenance_prefix_group() {
     assert_eq!(hit["flags"], serde_json::json!(["place_prefix_group"]));
 }
 
-fn guard_drop_sheet(name: &str) -> std::path::PathBuf {
+fn guard_drop_sheet(name: &str) -> Scratch {
     let dir = tmpdir(name);
     let csv = dir.join("in.csv");
     std::fs::write(
@@ -1125,12 +1126,12 @@ fn guard_drop_sheet(name: &str) -> std::path::PathBuf {
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    sheet
+    dir.into_file(sheet)
 }
 
 // The foreign Zqx street prevents the full query from bypassing the drop guards.
 // After one drop Cannes yields a fuzzy local street; after two, Alpha Beta is exact.
-fn guard_drop_longer_prefix_sheet(name: &str, houses: &[u32]) -> std::path::PathBuf {
+fn guard_drop_longer_prefix_sheet(name: &str, houses: &[u32]) -> Scratch {
     let dir = tmpdir(name);
     let csv = dir.join("in.csv");
     let mut rows = HDR.to_string();
@@ -1168,7 +1169,7 @@ fn guard_drop_longer_prefix_sheet(name: &str, houses: &[u32]) -> std::path::Path
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    sheet
+    dir.into_file(sheet)
 }
 
 fn guard_drop_assert_local_prefix_premise(
@@ -1298,7 +1299,7 @@ fn guard_drop_deferred_branch_sheet(
     name: &str,
     street_type: bool,
     umbrella: Option<&str>,
-) -> std::path::PathBuf {
+) -> Scratch {
     let dir = tmpdir(name);
     let target = if street_type {
         "rue alpha beta"
@@ -1345,7 +1346,7 @@ fn guard_drop_deferred_branch_sheet(
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    sheet
+    dir.into_file(sheet)
 }
 
 fn guard_drop_deferred_branch_pair(
@@ -1447,7 +1448,7 @@ fn guard_drop_deferred_second_locality_bypass_keeps_first() {
     guard_drop_deferred_branch_pair("guard-drop-deferred-second", false, None, true, false, true);
 }
 
-fn guard_drop_tail_priority_sheet(name: &str, with_house: bool) -> std::path::PathBuf {
+fn guard_drop_tail_priority_sheet(name: &str, with_house: bool) -> Scratch {
     guard_drop_tail_locality_sheet(
         name,
         with_house.then_some(("37261", "tours", "37000", "Tours")),
@@ -1457,7 +1458,7 @@ fn guard_drop_tail_priority_sheet(name: &str, with_house: bool) -> std::path::Pa
 fn guard_drop_tail_locality_sheet(
     name: &str,
     house_locality: Option<(&str, &str, &str, &str)>,
-) -> std::path::PathBuf {
+) -> Scratch {
     let dir = tmpdir(name);
     let csv = dir.join("in.csv");
     // N3 uses a prefix-only earlier locality (Tour), while the final Tours
@@ -1506,7 +1507,7 @@ fn guard_drop_tail_locality_sheet(
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    sheet
+    dir.into_file(sheet)
 }
 
 #[test]
@@ -1613,7 +1614,7 @@ fn guard_drop_tail_no_commune_department_postcode_keeps_prefix() {
     );
 }
 
-fn guard_drop_de_subaddress_priority_sheet(name: &str, with_campus_e: bool) -> std::path::PathBuf {
+fn guard_drop_de_subaddress_priority_sheet(name: &str, with_campus_e: bool) -> Scratch {
     let dir = tmpdir(name);
     let csv = dir.join("in.csv");
     let mut rows = vec![
@@ -1653,7 +1654,7 @@ fn guard_drop_de_subaddress_priority_sheet(name: &str, with_campus_e: bool) -> s
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    sheet
+    dir.into_file(sheet)
 }
 
 #[test]
@@ -1694,7 +1695,7 @@ fn guard_drop_de_subaddress_answer_beats_locality_only_prefix_bypass() {
 
 // The parser model is material here: without it this fixture takes a prefix
 // path and cannot observe the suffix guard's locality-only bypass.
-fn guard_drop_de_modeled_sheet(name: &str, rows: &[&str]) -> std::path::PathBuf {
+fn guard_drop_de_modeled_sheet(name: &str, rows: &[&str]) -> Scratch {
     let dir = tmpdir(name);
     let csv = dir.join("in.csv");
     let mut rows = rows.to_vec();
@@ -1729,7 +1730,7 @@ fn guard_drop_de_modeled_sheet(name: &str, rows: &[&str]) -> std::path::PathBuf 
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    sheet
+    dir.into_file(sheet)
 }
 
 fn guard_drop_diagnose(sheet: &std::path::Path, query: &str) -> serde_json::Value {
@@ -1971,7 +1972,7 @@ fn guard_drop_rejects_fuzzy_street_with_exact_commune_and_department_postcode() 
     }
 }
 
-fn guard_drop_typefree_sheet(name: &str) -> std::path::PathBuf {
+fn guard_drop_typefree_sheet(name: &str) -> Scratch {
     let dir = tmpdir(name);
     let csv = dir.join("in.csv");
     std::fs::write(
@@ -2004,7 +2005,7 @@ fn guard_drop_typefree_sheet(name: &str) -> std::path::PathBuf {
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    sheet
+    dir.into_file(sheet)
 }
 
 fn guard_drop_query(sheet: &std::path::Path, query: &str) -> Vec<serde_json::Value> {
@@ -2164,7 +2165,7 @@ fn guard_drop_accepts_real_umbrella_commune_without_noise_penalty() {
 
 // The drop guard must use the first locality candidate even when a valid rank
 // section puts an exact house on a fuzzy, differently localized street first.
-fn guard_drop_ordered_sheet(name: &str) -> std::path::PathBuf {
+fn guard_drop_ordered_sheet(name: &str) -> Scratch {
     let dir = tmpdir(name);
     let csv = dir.join("in.csv");
     std::fs::write(
@@ -2212,7 +2213,7 @@ fn guard_drop_ordered_sheet(name: &str) -> std::path::PathBuf {
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    sheet
+    dir.into_file(sheet)
 }
 
 fn guard_drop_query_k2(sheet: &std::path::Path, query: &str) -> Vec<serde_json::Value> {
@@ -2510,7 +2511,7 @@ fn guard_drop_suffix_rejects_prefix_only_commune_with_exact_postcode() {
 
 // Public CSV and rank inputs keep the weaker, exact-house tail first. The
 // foreign longest street blocks the full-query subset path before the guards.
-fn guard_drop_tail_choice_sheet(name: &str, later_exact_tail: bool) -> std::path::PathBuf {
+fn guard_drop_tail_choice_sheet(name: &str, later_exact_tail: bool) -> Scratch {
     let dir = tmpdir(name);
     let (number, weak_tail, foreign_tail) = if later_exact_tail {
         (10, "Tours Tours", "Tours Tours Tours")
@@ -2563,7 +2564,7 @@ fn guard_drop_tail_choice_sheet(name: &str, later_exact_tail: bool) -> std::path
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    sheet
+    dir.into_file(sheet)
 }
 
 fn guard_drop_assert_saved_tail_prefix(hits: &[serde_json::Value]) {
@@ -2664,9 +2665,7 @@ fn guard_drop_tail_stops_at_first_accepted_tail() {
 
 #[test]
 fn exact_original_blocks_competing_article_house() {
-    let dir =
-        std::env::temp_dir().join(format!("gridpin-es-article-compete-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::dir("es-article-compete");
     let csv = dir.join("rows.csv");
     std::fs::write(&csv, "nom_voie_norm,code_insee,nom_commune_norm,code_postal,numero,rep,lon,lat,nom_voie,nom_commune\ncalle de ejemplo,001,ciudad,28001,7,,-4.7,41.4,calle de ejemplo,Ciudad\ncalle ejemplo,001,ciudad,28001,7,,-3.7,40.4,calle ejemplo,Ciudad\n").unwrap();
     let rules = dir.join("rules");

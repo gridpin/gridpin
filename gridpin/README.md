@@ -13,8 +13,13 @@ pip install --upgrade gridpin==0.4.0
 
 The wheel contains the engine, not the data: **download a country sheet
 separately**. Free static sheets for France, Germany, Italy, the Netherlands, Serbia, Spain and Brazil
-are listed at <https://gridpin.dev/docs.html#delivery> — no account, no key, no
+are listed at <https://gridpin.dev/docs#delivery> — no account, no key, no
 sign-up.
+
+One command does the download and the check: `pip install gridpin-mcp`, then
+`gridpin-fetch fr` puts the France sheet in `~/.cache/gridpin` and verifies it against the
+signed release; from Python, `gridpin_mcp.sheets.download("fr")` returns the same path. The
+same package is an MCP server for AI agents (`uvx gridpin-mcp`).
 
 Germany covers **15 of 16 Länder; Bavaria is not covered**. Spain covers all
 52 postal provinces; Brazil is one nationwide sheet. Client update required:
@@ -42,9 +47,9 @@ Three limits worth knowing before you build on this:
 - **POI is France-only today** and opt-in. Address lookup is the core product;
   the POI layer is younger and never overrides an exact address match.
 
-- Country files & docs: <https://gridpin.dev/docs.html>
+- Country files & docs: <https://gridpin.dev/docs>
 - Quality benchmark, including where other geocoders score higher:
-  <https://gridpin.dev/bench.html>
+  <https://gridpin.dev/bench>
 - Source: <https://github.com/gridpin/gridpin>
 - Issues: <https://github.com/gridpin/gridpin/issues>
 - Engine license: Apache-2.0. Data files carry their own source licenses —

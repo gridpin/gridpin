@@ -1201,6 +1201,7 @@ mod tests {
         // a degenerate (0-row) rebuild to the SAME path must fail WITHOUT touching the good file
         let dir2 = std::env::temp_dir().join(format!("gridpin-h08r6-{}", std::process::id()));
         std::fs::create_dir_all(&dir2).unwrap();
+        let _scratch2 = crate::scratch::Scratch::keep(&dir2);
         let empty = dir2.join("empty.csv");
         std::fs::write(&empty, HDR).unwrap();
         let err = build(&empty, &target, None, None, None, None, None)
@@ -1551,6 +1552,7 @@ mod tests {
         use std::io::Write as _;
         let dir = std::env::temp_dir().join(format!("gridpin-bomb-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = crate::scratch::Scratch::keep(&dir);
         let src = dir.join("bomb.csv.gz");
         let mut enc = flate2::write::GzEncoder::new(
             std::fs::File::create(&src).unwrap(),
@@ -1587,6 +1589,7 @@ mod tests {
         let _cap_guard = CAP_ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("gridpin-m10-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = crate::scratch::Scratch::keep(&dir);
         let src = dir.join("big.csv.gz");
         let mut enc = flate2::write::GzEncoder::new(
             std::fs::File::create(&src).unwrap(),
@@ -1884,6 +1887,7 @@ mod tests {
         // required; the build stamps its own meta_schema + builder_version.
         let dir = std::env::temp_dir().join(format!("gridpin-m05-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = crate::scratch::Scratch::keep(&dir);
         let write = |name: &str, json: &str| {
             let p = dir.join(name);
             std::fs::write(&p, json).unwrap();
@@ -2135,6 +2139,7 @@ mod tests {
     fn build_validates_parser_and_rank_sections() {
         let dir = std::env::temp_dir().join(format!("gridpin-m01-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = crate::scratch::Scratch::keep(&dir);
         let src = dir.join("in.csv");
         std::fs::write(
             &src,
@@ -2174,6 +2179,7 @@ mod tests {
         // silently losing ALL provenance + country/layer identity. The build must REJECT it.
         let dir = std::env::temp_dir().join(format!("gridpin-meta1025-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = crate::scratch::Scratch::keep(&dir);
         let src = dir.join("in.csv");
         std::fs::write(
             &src,
@@ -2237,6 +2243,7 @@ mod tests {
         // magic (GPML -> XPML) and re-open.
         let dir = std::env::temp_dir().join(format!("gridpin-m01open-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = crate::scratch::Scratch::keep(&dir);
         let src = dir.join("in.csv");
         std::fs::write(
             &src,
@@ -2274,6 +2281,7 @@ mod tests {
         // provenance pins exactly which input produced it. Deterministic: same input -> same hash.
         let dir = std::env::temp_dir().join(format!("gridpin-m05prov-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = crate::scratch::Scratch::keep(&dir);
         let src = dir.join("in.csv");
         std::fs::write(
             &src,
@@ -2334,6 +2342,9 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("gridpin-m03fin-{}/nested", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = crate::scratch::Scratch::keep(
+            &std::env::temp_dir().join(format!("gridpin-m03fin-{}", std::process::id())),
+        );
         let tmp = dir.join(".t.tmp");
         let out = dir.join("published.bin");
         std::fs::write(&tmp, b"repack-bytes").unwrap();
@@ -2350,6 +2361,9 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("gridpin-m03-{}/nested/deep", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = crate::scratch::Scratch::keep(
+            &std::env::temp_dir().join(format!("gridpin-m03-{}", std::process::id())),
+        );
         let out = dir.join("f.bin");
         write_atomic(&out, &[b"hello ", b"world"]).expect("first write");
         assert_eq!(std::fs::read(&out).unwrap(), b"hello world");
@@ -2446,6 +2460,7 @@ mod tests {
         // while the mixed street as a whole still emits EMPTY rather than a neighbour's value.
         let dir = std::env::temp_dir().join(format!("gridpin-h10-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let _scratch = crate::scratch::Scratch::keep(&dir);
         let src = dir.join("h10.csv");
         // needs the code_postal_display column (build reads headers dynamically)
         std::fs::write(

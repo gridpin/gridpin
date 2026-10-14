@@ -1,0 +1,87 @@
+# gridpin-mcp release: on an mcp-vX.Y.Z tag, build the pure-Python package in mcp/ and publish it
+# to PyPI. Publishing needs a manual approval (the "pypi" environment has a required reviewer),
+# so a tag alone never publishes anything. The engine release (release.yml, tags v*) is separate:
+# "mcp-v0.1.0" does not match "v*".
+name: release-mcp
+
+on:
+  push:
+    tags: ["mcp-v*"]
+
+# Read-only by default; `id-token: write` (OIDC) is granted ONLY to the publish job.
+permissions:
+  contents: read
+
+jobs:
+  # Fuse: the tag must match every place that states the package version, or PyPI and the
+  # MCP registry would disagree about what was released.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Tag matches pyproject.toml, __init__.py and server.json
+        run: |
+          tag="${GITHUB_REF_NAME#mcp-v}"
+          py_v=$(grep -m1 '^version' mcp/pyproject.toml | sed 's/.*"\(.*\)"/\1/')
+          init_v=$(grep -m1 '^__version__' mcp/src/gridpin_mcp/__init__.py | sed 's/.*"\(.*\)"/\1/')
+          json_v=$(python3 -c 'import json;d=json.load(open("mcp/server.json"));print(d["version"]);assert d["packages"][0]["version"]==d["version"]')
+          echo "tag=$tag pyproject=$py_v __init__=$init_v server.json=$json_v"
+          for v in "$py_v" "$init_v" "$json_v"; do
+            [ "$tag" = "$v" ] || { echo "::error::tag mcp-v$tag disagrees with a package version ($v)"; exit 1; }
+          done
+
+  ci-passed:
+    # Same rule as release.yml: only a successful ci.yml run from a push to main of THIS repository
+    # proves the tagged commit was tested; a PR, fork or branch run does not count.
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require a successful push-to-main CI run for ${{ github.sha }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          n=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&per_page=100" \
+                --jq '[.workflow_runs[]
+                       | select(.status=="completed" and .conclusion=="success"
+                                and .event=="push" and .head_branch=="main"
+                                and .head_repository.full_name==env.REPO)] | length')
+          echo "trusted (push->main, this repo) successful ci.yml runs for $SHA: ${n:-0}"
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "::error::no successful ci.yml run from a push to main of $REPO for $SHA"; exit 1
+          fi
+
+  # Build, test the built wheel, then publish with Trusted Publishing (OIDC): PyPI verifies the
+  # workflow identity and issues a short-lived token, no long-lived secret exists.
+  # One-time setup on PyPI: Publishing -> add a pending GitHub publisher for project "gridpin-mcp"
+  # (owner gridpin, repo gridpin, workflow release-mcp.yml, environment pypi).
+  pypi:
+    needs: [check, ci-passed]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --quiet build==1.3.0 twine==6.2.0  # pinned build inputs
+          python -m build --outdir dist mcp
+          python -m twine check --strict dist/*
+      # Sheet download and verification tests run here; the engine and MCP tests need the Monaco
+      # smoke sheet and run in ci.yml (make test-py), which ci-passed already requires.
+      - name: Test the built wheel
+        run: |
+          python -m pip install --quiet dist/*.whl pytest==9.1.1
+          python -m pytest mcp/tests -q -p no:cacheprovider
+      - name: Publish (Trusted Publishing / OIDC)
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          packages-dir: dist

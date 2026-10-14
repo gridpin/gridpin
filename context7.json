@@ -1,0 +1,14 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "GridPin",
+  "description": "Offline forward and reverse geocoder: one memory-mapped file per country, with Python, CLI, DuckDB and MCP interfaces. No server, no API key.",
+  "excludeFolders": ["prep", "eval", "gridpin/src", "gridpin/tests", "duckdb-ext/src", "duckdb-ext/test", "mcp/tests", ".github"],
+  "rules": [
+    "Install with `pip install gridpin gridpin-mcp`; download a country sheet with `gridpin-fetch <code>` (br, de, es, fr, it, nl, rs) or `gridpin_mcp.sheets.download(code)`, which verifies it against the signed release and returns its path.",
+    "One sheet holds one country: open `gridpin.Geocoder(path)` for the country of the address; other countries are not covered, and Germany has no Bavaria.",
+    "Check `precision` in every result: `house` is a door-level match, `street` and `city` are approximate; reverse geocoding returns `distance_m` and is approximate.",
+    "For many addresses use `Geocoder.geocode_many(queries, k)` in Python or `gridpin batch` in the CLI instead of a loop of single calls.",
+    "In DuckDB 1.5.5+: `INSTALL gridpin_ext FROM community; LOAD gridpin_ext;`, then `SELECT gridpin_load(path)` once per session; one country per session, `SELECT gridpin_reset()` to switch.",
+    "Geocoding never uses the network; only downloading a sheet does."
+  ]
+}

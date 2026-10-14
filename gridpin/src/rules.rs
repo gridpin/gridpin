@@ -741,6 +741,7 @@ pub(crate) mod tests {
             "gridpin-de-rule-family-fixture-{}",
             std::process::id()
         )));
+        let _scratch = crate::scratch::Scratch::keep(&dir);
         let entries = entries_from_tsv_dir(&dir).unwrap();
         let rules = rules_from_entries(entries);
 
