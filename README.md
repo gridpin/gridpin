@@ -19,6 +19,9 @@ g = gridpin.Geocoder(str(sheets.download("fr")))  # no-op once the sheet is down
 g.geocode("1 rue de la Paix, Paris", 1)
 ```
 
+No install: [try it in Colab](https://colab.research.google.com/github/gridpin/gridpin/blob/main/examples/colab_quickstart.ipynb)
+— the Serbia sheet, forward, reverse and batch geocoding in five minutes.
+
 Countries: `br` `de` `es` `fr` `it` `nl` `rs` (`gridpin-fetch --list`). For AI agents there is an
 MCP server — `claude mcp add gridpin -- uvx gridpin-mcp`, details in [mcp/README.md](mcp/README.md).
 Everything after the download runs offline.
