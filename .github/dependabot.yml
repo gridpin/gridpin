@@ -1,17 +1,20 @@
-# Keep GitHub Actions (and Cargo deps) current so pinned versions don't rot so they don't rot.
-# Actions should ultimately be pinned to a commit SHA (e.g. actions/checkout@<sha> # v4.2.2);
-# dependabot then bumps the SHA + comment in a reviewable PR.
+# Version-update pull requests are disabled (open-pull-requests-limit: 0): this public repository is a mirror
+# of the GridPin source tree, and dependencies are updated there and released after the full test gate, so
+# pull requests opened here are never merged. GitHub security alerts and `cargo deny` in CI still apply.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
   - package-ecosystem: cargo
     directory: "/gridpin"
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
   - package-ecosystem: cargo
     directory: "/duckdb-ext"
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
