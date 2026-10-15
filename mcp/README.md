@@ -23,6 +23,8 @@ Any client that reads an `mcpServers` config (Claude Desktop, Cursor, ...):
 { "mcpServers": { "gridpin": { "command": "uvx", "args": ["gridpin-mcp"] } } }
 ```
 
+Step-by-step setup for agents (requirements, settings, verification): [llms-install.md](llms-install.md).
+
 ## Tools
 
 | Tool | What it does |

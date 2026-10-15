@@ -18,6 +18,25 @@ use crate::index::*;
 use crate::norm::normalize;
 
 const PLACE_GROUP_RADIUS_KM: f64 = 40.0;
+/// A fallback answer farther than this from every centroid of the locality the query names
+/// is another town: "Friedrichstraße 100, Berlin" must not become Dortmund. Covers a city's
+/// own districts (Spandau is ~14 km from the Berlin centroid).
+const NAMED_LOCALITY_RADIUS_KM: f64 = 25.0;
+/// Locality tail window: "La Cuesta, San Cristóbal de La Laguna, Tenerife, España" is 9
+/// tokens, "Vandellòs i l'Hospitalet de l'Infant" alone 7.
+const NAMED_LOCALITY_TAIL: usize = 12;
+/// Longer names that may share the leading words of one place: "Oldenburg (Oldenb.), Stadt"
+/// and "Oldenburg in Holstein, Stadt". More is a generic word: "Sant" starts dozens of
+/// Catalan communes, "Centro" — Brazilian ones.
+const NAMED_LOCALITY_LEAD_MAX: usize = 3;
+
+/// The locality a query names, for the fallback guard: tail tokens and the communes found in
+/// them, each with the token run that named it.
+#[derive(Default)]
+struct NamedLocality {
+    tail: Vec<String>,
+    communes: Vec<(u32, usize, usize)>,
+}
 
 /// Owns a file mapping so it is freed on Drop: opening a sheet no longer permanently
 /// leaks the mmap, so repeated open/close (Python/DuckDB churn) reclaims memory. The Index holds it
@@ -4722,6 +4741,102 @@ impl Index {
         )
     }
 
+    /// The locality part of a query: tokens after the last all-digit token (house number or
+    /// postcode), and every run of them that is a commune name or its leading whole words.
+    /// No digit token — no locality: street and place cannot be told apart. All homonyms and
+    /// same-named fragments are kept, so the anchor never picks a side.
+    fn named_locality_anchor(&self, toks: &[&str]) -> NamedLocality {
+        let Some(last_digit) = toks
+            .iter()
+            .rposition(|t| t.bytes().all(|b| b.is_ascii_digit()))
+        else {
+            return NamedLocality::default();
+        };
+        let tail = &toks[last_digit + 1..];
+        self.named_locality_runs(&tail[tail.len().saturating_sub(NAMED_LOCALITY_TAIL)..])
+    }
+
+    /// Every run of `tail` that is a commune name or its leading whole words.
+    fn named_locality_runs(&self, tail: &[&str]) -> NamedLocality {
+        let mut anchor = NamedLocality {
+            tail: tail.iter().map(|t| t.to_string()).collect(),
+            communes: Vec::new(),
+        };
+        for start in 0..tail.len() {
+            for end in start + 1..=tail.len() {
+                let run = tail[start..end].join(" ");
+                // exact name, and whole leading words of a longer official name: "Langenhagen,
+                // Stadt" next to a village "Langenhagen", "Oldenburg (Oldenb.), Stadt" — never
+                // "Oldenburger Land". A word that starts many names ("Sant", "Centro") is not
+                // one place.
+                let lead = format!("{run} ");
+                let mut found = self.communes_by_name_untraced(&run);
+                let longer: Vec<u32> = self
+                    .communes_by_prefix_untraced(&run)
+                    .into_iter()
+                    .filter(|&id| normalize(self.commune_name(id)).starts_with(&lead))
+                    .collect();
+                if longer.len() <= NAMED_LOCALITY_LEAD_MAX {
+                    found.extend(longer);
+                }
+                for id in found {
+                    if !anchor.communes.iter().any(|&(seen, _, _)| seen == id) {
+                        anchor.communes.push((id, start, end));
+                    }
+                }
+            }
+        }
+        anchor
+    }
+
+    /// A fallback answer stays only inside the locality the query names. Kept: the answer
+    /// matched the query's own commune or postcode; its commune starts with words the tail
+    /// names ("Oldenburg (Oldenb.), Stadt" for "Oldenburg"); or it lies within
+    /// NAMED_LOCALITY_RADIUS_KM of a named commune (city districts and fragments are separate
+    /// communes). A run that is part of a longer street of the answer names no place ("6 Place
+    /// de l'Iris"); a street that IS the city name is the defect itself ("Berlin 1" for
+    /// "Alexanderplatz 1, Berlin"). Without a named commune — no check.
+    fn near_named_locality(&self, hit: &Hit, anchor: &NamedLocality) -> bool {
+        if anchor.communes.is_empty()
+            || hit.flags.contains(&"commune_exact")
+            || hit.flags.contains(&"pc_exact")
+        {
+            return true;
+        }
+        let commune = normalize(&hit.commune);
+        let commune: Vec<&str> = commune.split(' ').filter(|t| !t.is_empty()).collect();
+        for start in 0..anchor.tail.len() {
+            for end in start + 1..=anchor.tail.len() {
+                let run = &anchor.tail[start..end];
+                if (run.len() > 1 || run[0].len() >= 4)
+                    && commune.len() >= run.len()
+                    && run.iter().zip(&commune).all(|(a, b)| a == b)
+                {
+                    return true;
+                }
+            }
+        }
+        let street = normalize(&hit.street);
+        let street: Vec<&str> = street.split(' ').filter(|t| !t.is_empty()).collect();
+        let mut named = anchor
+            .communes
+            .iter()
+            .filter(|&&(_, start, end)| {
+                street.len() <= end - start
+                    || !anchor.tail[start..end]
+                        .iter()
+                        .all(|t| street.contains(&t.as_str()))
+            })
+            .peekable();
+        if named.peek().is_none() {
+            return true;
+        }
+        named.any(|&(id, _, _)| {
+            let (lat, lon) = self.commune_coord(id);
+            Self::dist_km(lat, lon, hit.lat, hit.lon) <= NAMED_LOCALITY_RADIUS_KM
+        })
+    }
+
     /// Universal resolution of a bare place name (city/district/estate/arrondissement) -> point.
     /// (1) Exact commune name -> its centroid (among homonyms, the most prominent one).
     /// (2) Else the prefix commune group: "Lyon" -> "Lyon 1er...", i.e. an umbrella of
@@ -8992,6 +9107,10 @@ impl Index {
         // primary (commune-aware) path is ALREADY empty, so homonyms thousands of km away
         // never reach here (their primary path is non-empty).
         let toks: Vec<&str> = q.split(' ').filter(|t| !t.is_empty()).collect();
+        // The drops below search the street without the locality the query names. Their
+        // answers must stay in that locality: "Alexanderplatz 1, Berlin" must not become the
+        // street "Berlin 1" in a village, nor "Friedrichstraße 100, Berlin" the one in Dortmund.
+        let anchor = self.named_locality_anchor(&toks);
         // (c0) LEADING TYPE WORD ("street X 12", "estate Y 6"): strip up to 3 affixes
         // (place type/prefix) from the start and run the FULL ladder on the remainder
         // (including transliteration, which the junk drop below lacks). A bare name
@@ -9039,6 +9158,14 @@ impl Index {
                     )
                 });
             }
+            h.retain(|(hit, _)| self.near_named_locality(hit, &anchor));
+            let dropped_is_commune = !self.communes_by_name(&toks[..drop].join(" ")).is_empty();
+            if dropped_is_commune {
+                // the dropped head names the city ("Berlin, Friedrichstraße 100"): its
+                // settlements may answer, a same-named street in another town may not
+                let head = self.named_locality_runs(&toks[..drop]);
+                h.retain(|(hit, _)| self.near_named_locality(hit, &head));
+            }
             if h.is_empty() {
                 continue;
             }
@@ -9057,7 +9184,6 @@ impl Index {
             let street_after_type = is_street_type_word(toks[drop])
                 && h.iter()
                     .any(|(hit, f)| f[0] > 0.5 && hit.precision != "city");
-            let dropped_is_commune = !self.communes_by_name(&toks[..drop].join(" ")).is_empty();
             if crate::diagnosis::enabled() {
                 crate::diagnosis::guard(
                     "prefix_drop",
@@ -9146,16 +9272,38 @@ impl Index {
                 }
                 let shortened = toks[..toks.len() - drop].join(" ");
                 let dropped_tail = toks[toks.len() - drop..].join(" ");
-                let h = self.query_feats_prepared_with_retained_locality(
-                    &shortened,
-                    k,
-                    focus,
-                    de_retained_locality(
-                        de_original_postcode_tail,
-                        &dropped_tail,
-                        de_postal_tail_eligible,
-                    ),
+                let retained = de_retained_locality(
+                    de_original_postcode_tail,
+                    &dropped_tail,
+                    de_postal_tail_eligible,
                 );
+                let mut h = self
+                    .query_feats_prepared_with_retained_locality(&shortened, k, focus, retained);
+                h.retain(|(hit, _)| self.near_named_locality(hit, &anchor));
+                // Nothing left inside the named locality: the street may still be there under
+                // a district commune (Berlin "Mitte"). Search again focused on the locality's
+                // most prominent centroid; the same locality check applies to the answer.
+                if h.is_empty() && focus.is_none() {
+                    if let Some(&(id, _, _)) = anchor
+                        .communes
+                        .iter()
+                        .max_by_key(|&&(id, _, _)| self.commune_prominence(id))
+                    {
+                        let (lat, lon) = self.commune_coord(id);
+                        let local = QueryFocus {
+                            lat,
+                            lon,
+                            streets: self.streets_around(lat, lon),
+                        };
+                        h = self.query_feats_prepared_with_retained_locality(
+                            &shortened,
+                            k,
+                            Some(&local),
+                            retained,
+                        );
+                        h.retain(|(hit, _)| self.near_named_locality(hit, &anchor));
+                    }
+                }
                 if h.is_empty() {
                     continue;
                 }
@@ -12682,8 +12830,11 @@ mod tests {
 
         DE_POSTCODE_HOUSE_RESCUE_SCAN_ROWS.with(|rows| rows.set(0));
         DE_POSTCODE_HOUSE_RESCUE_HOUSE_DECODES.with(|calls| calls.set(0));
+        // The locality is not a commune name of this sheet: a named commune would let the
+        // focused fallback find the house first; this observer is about the
+        // postcode rescue itself.
         let top = idx
-            .query("Friedrichstraße 44, 10969 Berlin", 1)
+            .query("Friedrichstraße 44, 10969 Mitte", 1)
             .into_iter()
             .next()
             .expect("the unique exact house/postcode must survive the homonym cap");
@@ -12704,6 +12855,14 @@ mod tests {
         assert!(
             DE_POSTCODE_HOUSE_RESCUE_HOUSE_DECODES.with(|calls| calls.get()) <= 2,
             "hundreds of homonymous street postings must not trigger hundreds of house-block decodes"
+        );
+        // With the city named, the same house still answers (through the focused fallback).
+        let named = idx.query("Friedrichstraße 44, 10969 Berlin", 1);
+        assert_eq!(
+            named
+                .first()
+                .map(|hit| (hit.commune.as_str(), hit.postcode.as_str())),
+            Some(("Berlin Mitte", "10969"))
         );
     }
 
@@ -20716,5 +20875,535 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Berlin keeps its houses under district communes, as in the German sheet: the city name
+    /// itself is a small commune, the streets live in "Mitte" and "Charlottenburg".
+    fn named_locality_index(case: &str) -> Index {
+        let mut rows = [
+            (
+                "pariser platz",
+                "11000",
+                "Berlin",
+                "1",
+                13.3777,
+                52.5163,
+                "Pariser Platz",
+            ),
+            (
+                "rathausstrasse",
+                "11000",
+                "Berlin",
+                "15",
+                13.4088,
+                52.5186,
+                "Rathausstrasse",
+            ),
+            (
+                "friedrichstrasse",
+                "11001",
+                "Mitte",
+                "100",
+                13.3884,
+                52.5204,
+                "Friedrichstrasse",
+            ),
+            (
+                "alexanderplatz",
+                "11001",
+                "Mitte",
+                "1",
+                13.4127,
+                52.5213,
+                "Alexanderplatz",
+            ),
+            (
+                "kurfurstendamm",
+                "11002",
+                "Charlottenburg",
+                "21",
+                13.3300,
+                52.5043,
+                "Kurfurstendamm",
+            ),
+            (
+                "lindenweg",
+                "11003",
+                "Weststadt",
+                "5",
+                13.0700,
+                52.5175,
+                "Lindenweg",
+            ),
+            (
+                "birkenweg",
+                "11004",
+                "Fernstadt",
+                "5",
+                12.9650,
+                52.5175,
+                "Birkenweg",
+            ),
+            (
+                "friedrichstrasse",
+                "05913",
+                "Dortmund",
+                "100",
+                7.4538,
+                51.5075,
+                "Friedrichstrasse",
+            ),
+            (
+                "hansastrasse",
+                "05913",
+                "Dortmund",
+                "1",
+                7.4600,
+                51.5140,
+                "Hansastrasse",
+            ),
+            (
+                "hansastrasse",
+                "05913",
+                "Dortmund",
+                "2",
+                7.4601,
+                51.5141,
+                "Hansastrasse",
+            ),
+            (
+                "hansastrasse",
+                "05913",
+                "Dortmund",
+                "3",
+                7.4602,
+                51.5142,
+                "Hansastrasse",
+            ),
+            (
+                "hansastrasse",
+                "05913",
+                "Dortmund",
+                "4",
+                7.4603,
+                51.5143,
+                "Hansastrasse",
+            ),
+            (
+                "place de berlin",
+                "07000",
+                "Lyonnet",
+                "6",
+                4.8300,
+                45.7600,
+                "Place de Berlin",
+            ),
+            (
+                "lindenweg",
+                "05914",
+                "Hagen",
+                "5",
+                7.4700,
+                51.3600,
+                "Lindenweg",
+            ),
+            (
+                "birkenweg",
+                "05915",
+                "Iserlohn",
+                "5",
+                7.7000,
+                51.3800,
+                "Birkenweg",
+            ),
+            (
+                "berlin",
+                "01059",
+                "Klein Bennebek",
+                "1",
+                9.4229,
+                54.4040,
+                "Berlin",
+            ),
+            (
+                "ostweg",
+                "20000",
+                "Weitstadt",
+                "1",
+                10.0000,
+                50.0000,
+                "Ostweg",
+            ),
+            (
+                "westweg",
+                "20000",
+                "Weitstadt",
+                "7",
+                10.8400,
+                50.0000,
+                "Westweg",
+            ),
+            (
+                "neuer markt",
+                "30000",
+                "Hafenstadt, Hansestadt",
+                "1",
+                12.1400,
+                54.0900,
+                "Neuer Markt",
+            ),
+            (
+                "kaiserweg",
+                "40000",
+                "Anderswo",
+                "3",
+                9.8800,
+                53.3300,
+                "Kaiserweg",
+            ),
+            (
+                "torweg",
+                "50000",
+                "Moorstadter Heide",
+                "1",
+                11.0000,
+                53.0000,
+                "Torweg",
+            ),
+            (
+                "kaiserweg",
+                "60000",
+                "Irgendwo",
+                "9",
+                7.0000,
+                50.0000,
+                "Kaiserweg",
+            ),
+            (
+                "torweg",
+                "70001",
+                "Sant Adria",
+                "1",
+                2.2200,
+                41.4300,
+                "Torweg",
+            ),
+            (
+                "torweg", "70002", "Sant Boi", "1", 2.0400, 41.3400, "Torweg",
+            ),
+            (
+                "torweg",
+                "70003",
+                "Sant Cugat",
+                "1",
+                2.0800,
+                41.4700,
+                "Torweg",
+            ),
+            (
+                "torweg",
+                "70004",
+                "Sant Feliu",
+                "1",
+                2.0500,
+                41.3800,
+                "Torweg",
+            ),
+            (
+                "breitenweg",
+                "80001",
+                "Neustadt an der Weinstrasse",
+                "71",
+                8.1400,
+                49.3500,
+                "Breitenweg",
+            ),
+            (
+                "dorfweg", "80002", "Neustadt", "1", 11.0000, 52.0000, "Dorfweg",
+            ),
+            (
+                "dorfweg",
+                "80003",
+                "Neustadt am Rennsteig",
+                "1",
+                10.9000,
+                50.6000,
+                "Dorfweg",
+            ),
+            (
+                "dorfweg",
+                "80004",
+                "Neustadt bei Coburg",
+                "1",
+                11.1000,
+                50.3000,
+                "Dorfweg",
+            ),
+            (
+                "dorfweg",
+                "80005",
+                "Neustadt in Holstein",
+                "1",
+                10.8000,
+                54.1000,
+                "Dorfweg",
+            ),
+            (
+                "kaiserweg",
+                "40001",
+                "Bad Irgendwo",
+                "5",
+                7.5000,
+                50.5000,
+                "Kaiserweg",
+            ),
+            (
+                "calle uno",
+                "38001",
+                "San Cristobal de la Laguna",
+                "5",
+                -16.3100,
+                28.4800,
+                "Calle Uno",
+            ),
+            (
+                "calle uno",
+                "38002",
+                "Lejos",
+                "5",
+                -3.7000,
+                40.4000,
+                "Calle Uno",
+            ),
+            ("plaza", "38003", "Espana", "1", -4.0000, 40.0000, "Plaza"),
+            (
+                "dorfweg", "40002", "Bad Ems", "1", 7.7100, 50.3300, "Dorfweg",
+            ),
+            (
+                "dorfweg",
+                "40003",
+                "Bad Kreuznach",
+                "1",
+                7.8700,
+                49.8400,
+                "Dorfweg",
+            ),
+            (
+                "dorfweg", "40004", "Bad Tolz", "1", 11.5600, 47.7600, "Dorfweg",
+            ),
+        ];
+        // the builder takes rows sorted by (street, code, number)
+        rows.sort_by(|a, b| (a.0, a.1, a.3).cmp(&(b.0, b.1, b.3)));
+        let mut csv = String::new();
+        for (street, code, commune, number, lon, lat, display) in rows {
+            // one postcode: the query's own postcode evidence for a fallback answer
+            let postcode = if commune == "Anderswo" { "40000" } else { "" };
+            csv.push_str(&format!(
+                "{street},{code},{},{postcode},{number},,{lon:.4},{lat:.4},{display},\"{commune}\"\n",
+                normalize(commune)
+            ));
+        }
+        forward_housenumber_index(case, &csv)
+    }
+
+    fn named_locality_top(idx: &Index, query: &str) -> Option<(String, String)> {
+        idx.query(query, 1)
+            .first()
+            .map(|hit| (hit.street.clone(), hit.commune.clone()))
+    }
+
+    #[test]
+    fn named_locality_fallback_finds_the_street_in_a_district_of_the_named_city() {
+        let idx = named_locality_index("district");
+        for (query, street, district) in [
+            ("Friedrichstrasse 100, Berlin", "Friedrichstrasse", "Mitte"),
+            ("Alexanderplatz 1, Berlin", "Alexanderplatz", "Mitte"),
+            (
+                "Kurfurstendamm 21, Berlin",
+                "Kurfurstendamm",
+                "Charlottenburg",
+            ),
+        ] {
+            assert_eq!(
+                named_locality_top(&idx, query),
+                Some((street.to_string(), district.to_string())),
+                "{query}"
+            );
+            // no candidate from another town, at any rank
+            for hit in idx.query(query, 5) {
+                assert!(
+                    !["Dortmund", "Klein Bennebek"].contains(&hit.commune.as_str()),
+                    "{query} -> {} {}",
+                    hit.street,
+                    hit.commune
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn named_locality_fallback_is_silent_rather_than_another_town() {
+        let idx = named_locality_index("silent");
+        // Fernstadt is 29 km from the Berlin centroid, Iserlohn hundreds: both are other towns
+        assert_eq!(named_locality_top(&idx, "Birkenweg 5, Berlin"), None);
+        // the city named by the leading words of an official name ("Hafenstadt, Hansestadt")
+        assert_eq!(named_locality_top(&idx, "Kaiserweg 3, Hafenstadt"), None);
+    }
+
+    #[test]
+    fn named_locality_fallback_keeps_a_neighbour_within_the_radius() {
+        let idx = named_locality_index("radius");
+        // Weststadt is 22 km from the Berlin centroid; Hagen has the same street far away
+        assert_eq!(
+            named_locality_top(&idx, "Lindenweg 5, Berlin"),
+            Some(("Lindenweg".to_string(), "Weststadt".to_string()))
+        );
+    }
+
+    #[test]
+    fn named_locality_fallback_keeps_the_named_commune_beyond_the_radius() {
+        let idx = named_locality_index("same-name");
+        // Westweg lies 30 km from the Weitstadt centroid; the commune itself is the one named
+        assert_eq!(
+            named_locality_top(&idx, "Westweg 7 Weitstadt Xyzzy"),
+            Some(("Westweg".to_string(), "Weitstadt".to_string()))
+        );
+    }
+
+    #[test]
+    fn named_locality_needs_whole_leading_words_of_a_commune_name() {
+        let idx = named_locality_index("whole-words");
+        // "Moorstadt" only starts "Moorstadter Heide": no named locality, the fallback is as before
+        assert_eq!(
+            named_locality_top(&idx, "Kaiserweg 9, Moorstadt"),
+            Some(("Kaiserweg".to_string(), "Irgendwo".to_string()))
+        );
+    }
+
+    #[test]
+    fn named_locality_fallback_searches_again_focused_on_the_named_city() {
+        let idx = named_locality_index("focus");
+        // a single candidate: unfocused it is the more prominent Dortmund, which the locality
+        // check removes; the focused search finds the Berlin district
+        let hits = idx.query("Friedrichstrasse 100, Berlin", 1);
+        assert_eq!(hits.first().map(|hit| hit.commune.as_str()), Some("Mitte"));
+        assert_eq!(
+            idx.query("Friedrichstrasse 100", 1)
+                .first()
+                .map(|hit| hit.commune.as_str()),
+            Some("Dortmund"),
+            "the fixture must rank Dortmund first without a named city"
+        );
+    }
+
+    #[test]
+    fn named_locality_word_inside_a_longer_street_names_no_place() {
+        let idx = named_locality_index("street-word");
+        // "Berlin" is part of the street "Place de Berlin": the query names no other place
+        assert_eq!(
+            named_locality_top(&idx, "Hotel 6 Place de Berlin"),
+            Some(("Place de Berlin".to_string(), "Lyonnet".to_string()))
+        );
+    }
+
+    #[test]
+    fn named_locality_ignores_a_word_that_starts_many_commune_names() {
+        let idx = named_locality_index("generic-word");
+        // four communes start with "Sant": the word names no single place, the fallback is
+        // as before (the Catalan name of a Basque city must not anchor on Catalonia)
+        assert_eq!(
+            named_locality_top(&idx, "Kaiserweg 9, Sant Sebastia"),
+            Some(("Kaiserweg".to_string(), "Irgendwo".to_string()))
+        );
+    }
+
+    #[test]
+    fn named_locality_keeps_an_answer_matching_the_query_postcode_or_commune() {
+        let idx = named_locality_index("own-evidence");
+        // the fallback keeps the query's own postcode evidence over the named city
+        assert_eq!(
+            named_locality_top(&idx, "Kaiserweg 3, 40000 Hafenstadt"),
+            Some(("Kaiserweg".to_string(), "Anderswo".to_string()))
+        );
+        let anchor = idx.named_locality_anchor(&["kaiserweg", "3", "hafenstadt"]);
+        let mut hit = idx.query("Kaiserweg 3 40000", 1).remove(0);
+        assert_eq!(hit.commune, "Anderswo");
+        for (flags, kept) in [
+            (vec!["street_exact", "pc_exact"], true),
+            (vec!["street_exact", "commune_exact"], true),
+            (vec!["street_exact", "pc_dept"], false),
+            (vec!["street_exact", "commune_prefix"], false),
+            (vec!["street_exact"], false),
+        ] {
+            hit.flags = flags.clone();
+            assert_eq!(idx.near_named_locality(&hit, &anchor), kept, "{flags:?}");
+        }
+    }
+
+    #[test]
+    fn named_locality_keeps_a_commune_whose_name_starts_with_the_named_words() {
+        let idx = named_locality_index("leading-words");
+        // "Neustadt" alone is a far village, and four longer names start with it (too many to
+        // be one place): the answer's own commune starts with the named word. Likewise four
+        // names start with "Bad".
+        assert_eq!(
+            named_locality_top(&idx, "Breitenweg 71, Neustadt Weinstrasse"),
+            Some((
+                "Breitenweg".to_string(),
+                "Neustadt an der Weinstrasse".to_string()
+            ))
+        );
+        // a short leading word ("Bad") names no commune by itself
+        assert_eq!(
+            named_locality_top(&idx, "Kaiserweg 5, Bad Hafenstadt"),
+            None
+        );
+    }
+
+    #[test]
+    fn named_locality_reads_a_long_locality_tail() {
+        let idx = named_locality_index("long-tail");
+        // nine tokens after the last number, as in the Canary schools set; "Espana" is a far
+        // commune of its own, the named city starts seven tokens before the end
+        let toks = [
+            "calle",
+            "uno",
+            "5",
+            "38320",
+            "la",
+            "cuesta",
+            "san",
+            "cristobal",
+            "de",
+            "la",
+            "laguna",
+            "tenerife",
+            "espana",
+        ];
+        let anchor = idx.named_locality_anchor(&toks);
+        let hits = idx.query("Calle Uno 5", 5);
+        for (commune, kept) in [("San Cristobal de la Laguna", true), ("Lejos", false)] {
+            let mut hit = hits
+                .iter()
+                .find(|hit| hit.commune == commune)
+                .cloned()
+                .unwrap_or_else(|| panic!("fixture must hold Calle Uno 5 in {commune}"));
+            hit.flags = vec!["street_exact", "house_rep"];
+            assert_eq!(idx.near_named_locality(&hit, &anchor), kept, "{commune}");
+        }
+    }
+
+    #[test]
+    fn named_locality_holds_when_the_city_comes_first() {
+        let idx = named_locality_index("city-first");
+        // dropping the leading city must not let a same-named street in another town answer
+        for hit in idx.query("Berlin Friedrichstrasse 100", 5) {
+            assert_ne!(hit.commune, "Dortmund", "{} {}", hit.street, hit.commune);
+        }
+        // a settlement under the dropped city still answers
+        assert_eq!(
+            named_locality_top(&idx, "Berlin Kurfurstendamm 21"),
+            Some(("Kurfurstendamm".to_string(), "Charlottenburg".to_string()))
+        );
     }
 }

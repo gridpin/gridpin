@@ -1975,11 +1975,13 @@ fn guard_drop_rejects_fuzzy_street_with_exact_commune_and_department_postcode() 
 fn guard_drop_typefree_sheet(name: &str) -> Scratch {
     let dir = tmpdir(name);
     let csv = dir.join("in.csv");
+    // The umbrella and its settlement are neighbours: a dropped leading commune keeps the
+    // answer near it, a same-named street in a distant town is not its settlement.
     std::fs::write(
         &csv,
         format!(
             "{HDR}alpha beta,001,ville,10000,1,,2.35,48.86,Alpha Beta,Ville\n\
-             road,002,umbrella,20000,1,,4.35,45.86,Road,Umbrella\n"
+             road,002,umbrella,20000,1,,2.36,48.87,Road,Umbrella\n"
         ),
     )
     .unwrap();
