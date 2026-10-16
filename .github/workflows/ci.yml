@@ -172,3 +172,40 @@ jobs:
         run: |
           make mc
           GRIDPIN_TEST_SHEET="$PWD/data/mc.bin" python -m pytest duckdb-ext/test/test_extension.py -q
+
+  # The MCP server image as the Docker MCP Catalog builds it: from mcp/Dockerfile, for linux/amd64 and
+  # linux/arm64. It must build from this commit and, with no network and no configuration, answer MCP
+  # introspection with the server's five tools.
+  mcp-docker:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Build the image from mcp/
+        run: docker build -t gridpin-mcp mcp/
+      - name: The container answers MCP introspection with no network
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, sys
+          p = subprocess.Popen(["docker", "run", "-i", "--rm", "--network", "none", "gridpin-mcp"],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+          def call(message):
+              p.stdin.write(json.dumps(message) + "\n"); p.stdin.flush()
+              return json.loads(p.stdout.readline()) if "id" in message else None
+          init = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+              "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "ci", "version": "0"}}})
+          call({"jsonrpc": "2.0", "method": "notifications/initialized"})
+          tools = {t["name"] for t in call({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]}
+          listed = call({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                         "params": {"name": "list_countries", "arguments": {}}})["result"]
+          p.stdin.close(); p.wait(timeout=30)
+          want = {"list_countries", "download_sheet", "geocode", "reverse", "batch"}
+          if tools != want:
+              sys.exit(f"::error::tools {sorted(tools)} != {sorted(want)}")
+          if listed.get("isError"):
+              sys.exit(f"::error::list_countries failed: {listed}")
+          print("server", init["result"]["serverInfo"]["version"], "answers with", sorted(tools))
+          PY
