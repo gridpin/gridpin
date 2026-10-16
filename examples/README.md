@@ -7,6 +7,7 @@ For the quickest trial, open [`colab_quickstart.ipynb`](https://colab.research.g
 in Colab (nothing to install), or run `batch.py` against a downloaded `france.bin`.
 
 - `colab_quickstart.ipynb` — install, download the Serbia sheet, forward, reverse and batch geocoding; runs in Colab
+- `streamlit/` — the live demo app (Streamlit): address or point in, table and map out; `streamlit run streamlit/streamlit_app.py`
 - `batch.py` — geocode five French addresses with the Python binding: `python batch.py /path/to/france.bin`
 - `orders.sql` — geocode a table of addresses with the DuckDB extension: `duckdb -unsigned < orders.sql` (edit the country file path first)
 - `gridpin_http.py` — expose one sheet through a small Photon-compatible HTTP
