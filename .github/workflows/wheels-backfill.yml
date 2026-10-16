@@ -1,0 +1,228 @@
+# gridpin wheel backfill: for an ALREADY PUBLISHED engine release, build the Python wheels that
+# release.yml did not ship (Linux aarch64, Linux x86_64 for glibc 2.17+, macOS x86_64) and the source
+# distribution, from the release tag itself, and add them to that version on PyPI.
+#
+# Nothing that is already published changes: the GitHub release and its owner-signed attestation are
+# not touched (this workflow has no write access to the repository), and PyPI refuses a file name it
+# already has; the publish job also refuses any overlap before it starts. These files are covered by
+# PyPI's own provenance (Trusted Publishing from this workflow), not by the owner's release
+# attestation; the next regular release builds every platform in release.yml under that signature.
+#
+# Manual only: started by hand from main (workflow_dispatch) and published only after a manual
+# approval of the "pypi" environment.
+name: wheels-backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published engine release to complete, e.g. v0.4.0"
+        required: true
+
+# Read-only by default; `id-token: write` (OIDC) is granted ONLY to the publish job.
+permissions:
+  contents: read
+
+jobs:
+  # Fuse: started from main, the tag is vX.Y.Z, that version is already on PyPI (a backfill never
+  # creates a release), the tagged manifests carry that version, and the tagged commit passed CI on main.
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Started from main; the tag names a published release
+        id: version
+        env:
+          TAG: ${{ inputs.tag }}
+          REF: ${{ github.ref }}
+        run: |
+          [ "$REF" = "refs/heads/main" ] || { echo "::error::start this workflow from main, not $REF"; exit 1; }
+          echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::tag '$TAG' is not vX.Y.Z"; exit 1; }
+          v="${TAG#v}"
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/gridpin/$v/json")
+          [ "$code" = "200" ] || { echo "::error::gridpin $v is not on PyPI (HTTP $code); a backfill only completes a published version"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Tagged manifests carry the version; the tagged commit passed CI on main
+        env:
+          V: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          cargo_v=$(grep -m1 '^version' gridpin/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          py_v=$(grep -m1 '^version' gridpin/pyproject.toml | sed 's/.*"\(.*\)"/\1/')
+          [ "$cargo_v" = "$V" ] && [ "$py_v" = "$V" ] || { echo "::error::tag manifests say $cargo_v / $py_v, not $V"; exit 1; }
+          sha=$(git rev-parse HEAD)
+          n=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$sha&per_page=100" \
+                --jq '[.workflow_runs[]
+                       | select(.status=="completed" and .conclusion=="success"
+                                and .event=="push" and .head_branch=="main"
+                                and .head_repository.full_name==env.REPO)] | length')
+          echo "tagged commit $sha: ${n:-0} successful push-to-main ci.yml runs"
+          [ "${n:-0}" -ge 1 ] || { echo "::error::the tagged commit $sha never passed ci.yml on main"; exit 1; }
+
+  # Each wheel is built and accepted on its own platform: the exact file that will be published
+  # installs into a clean Python, opens a freshly built sheet and answers forward AND reverse.
+  wheels:
+    needs: [check]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2_17"
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            manylinux: "2_17"
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            manylinux: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.93.0"  # same pin as the wheels job in release.yml
+      - name: Build wheel (maturin)
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          working-directory: gridpin
+          command: build
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --features python
+          rust-toolchain: "1.93.0"
+          maturin-version: "1.14.0"
+      - name: Exactly one wheel, with LICENSE, for this platform
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+          wheels = glob.glob("gridpin/target/wheels/*.whl")
+          if len(wheels) != 1:
+              sys.exit(f"::error::expected one wheel, got {wheels}")
+          names = zipfile.ZipFile(wheels[0]).namelist()
+          if not any(n.rsplit("/", 1)[-1] == "LICENSE" for n in names):
+              sys.exit(f"::error::{wheels[0]} is missing a LICENSE file")
+          print("built", wheels[0])
+          PY
+      - name: Acceptance — the wheel answers a real query on a real sheet
+        shell: bash
+        run: |
+          python -m venv /tmp/accept
+          /tmp/accept/bin/pip install --quiet gridpin/target/wheels/*.whl duckdb==1.5.3
+          # A separate target dir: on Linux the wheel was built inside the manylinux container, which may
+          # leave gridpin/target owned by root.
+          CARGO_TARGET_DIR="$RUNNER_TEMP/cli" cargo build --release --manifest-path gridpin/Cargo.toml
+          mkdir -p data
+          cp eval/smoke/fixtures/monaco.osm.pbf data/monaco-latest.osm.pbf
+          /tmp/accept/bin/python -c "import hashlib,pathlib,sys; want='58c25f4f88ae1321bf4fe45b0baf2c67cd1c4fe0441f8fde794c1074db46819a'; got=hashlib.sha256(pathlib.Path('data/monaco-latest.osm.pbf').read_bytes()).hexdigest(); sys.exit(0 if got==want else f'::error::smoke fixture digest {got} != {want}')"
+          /tmp/accept/bin/python prep/osm.py MC data/monaco-latest.osm.pbf
+          /tmp/accept/bin/python prep/export_build.py data/mc_norm.parquet data/build_mc.csv.gz
+          GRIDPIN_REQUIRE_META=1 "$RUNNER_TEMP/cli/release/gridpin" build data/build_mc.csv.gz data/mc.bin --meta data/mc_manifest.json
+          /tmp/accept/bin/python - <<'PY'
+          import sys
+          import gridpin
+          g = gridpin.Geocoder("data/mc.bin")
+          hits = g.geocode("1 Avenue des Citronniers, Monaco", 1)
+          if not hits:
+              sys.exit("::error::forward query returned nothing — the wheel is not usable")
+          lat, lon = hits[0]["lat"], hits[0]["lon"]
+          if not (43.6 < lat < 43.8 and 7.3 < lon < 7.5):
+              sys.exit(f"::error::forward answer is outside Monaco: {lat},{lon}")
+          back = g.reverse(lat, lon, 1)
+          if not back:
+              sys.exit("::error::reverse query returned nothing — the wheel is not usable")
+          print("acceptance ok:", hits[0].get("street"), lat, lon, "->", back[0].get("street"))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wheel-${{ matrix.target }}
+          path: gridpin/target/wheels/*.whl
+          if-no-files-found: error
+
+  # The source distribution, proven by building and importing it from scratch.
+  sdist:
+    needs: [check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.93.0"
+      - name: Build sdist (maturin)
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          working-directory: gridpin
+          command: sdist
+          args: --out dist
+          maturin-version: "1.14.0"
+      - name: The sdist builds from source, installs and imports
+        shell: bash
+        run: |
+          ls gridpin/dist
+          python -m venv /tmp/sdist
+          /tmp/sdist/bin/pip install --quiet --no-binary gridpin gridpin/dist/*.tar.gz
+          /tmp/sdist/bin/python -c "import gridpin; gridpin.Geocoder; print('sdist ok')"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sdist
+          path: gridpin/dist/*.tar.gz
+          if-no-files-found: error
+
+  # Publishing needs a manual approval: the "pypi" environment has a required reviewer.
+  # One-time setup on PyPI: project "gridpin" -> Publishing -> add a GitHub publisher
+  # (owner gridpin, repo gridpin, workflow wheels-backfill.yml, environment pypi).
+  pypi:
+    needs: [check, wheels, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Only new files for this version, none already on PyPI
+        env:
+          V: ${{ needs.check.outputs.version }}
+        run: |
+          ls -l dist
+          python3 - <<'PY'
+          import json, os, pathlib, sys, urllib.request
+          version = os.environ["V"]
+          files = sorted(p.name for p in pathlib.Path("dist").iterdir())
+          if len(files) != 4 or sum(f.endswith(".whl") for f in files) != 3 or sum(f.endswith(".tar.gz") for f in files) != 1:
+              sys.exit(f"::error::expected 3 wheels and 1 sdist, got {files}")
+          if any(f"-{version}" not in f for f in files):
+              sys.exit(f"::error::a file is not version {version}: {files}")
+          with urllib.request.urlopen(f"https://pypi.org/pypi/gridpin/{version}/json") as r:
+              published = {u["filename"] for u in json.load(r)["urls"]}
+          overlap = sorted(set(files) & published)
+          if overlap:
+              sys.exit(f"::error::already on PyPI, refusing to touch them: {overlap}")
+          print("new files for", version, files)
+          PY
+      - name: Publish (Trusted Publishing / OIDC)
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          packages-dir: dist
