@@ -75,8 +75,10 @@ def main() -> None:
 
     st.title("GridPin — offline geocoding")
     st.write(
-        "One file per country, read locally: no API key, no rate limit, and your query is not sent to a "
-        "geocoding service. The first query for a country downloads its file once (32–677 MB)."
+        "One file per country: no API key, no rate limit, no geocoding service in the loop. In this demo the "
+        "country file and your query sit on Streamlit's server; installed on your own machine "
+        "(`pip install gridpin-mcp`), nothing leaves it. The first query for a country downloads its file once "
+        "(32–677 MB)."
     )
     country = st.selectbox("Country", list(sheets.SHEETS), index=list(sheets.SHEETS).index("rs"),
                            format_func=country_label)
