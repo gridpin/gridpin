@@ -31,7 +31,7 @@ g.geocode("1 rue de la Paix, Paris", 1)
 No install: [try it in Colab](https://colab.research.google.com/github/gridpin/gridpin/blob/main/examples/colab_quickstart.ipynb)
 — the Serbia sheet, forward, reverse and batch geocoding in five minutes.
 
-Countries: `br` `de` `es` `fr` `it` `nl` `rs` (`gridpin-fetch --list`). For AI agents there is an
+Countries: `us` `de` `fr` `it` `es` `nl` `br` `rs` (`gridpin-fetch --list`). For AI agents there is an
 MCP server — `claude mcp add gridpin -- uvx gridpin-mcp`, details in [mcp/README.md](mcp/README.md).
 Everything after the download runs offline.
 
@@ -48,11 +48,11 @@ macOS Apple Silicon (`aarch64-apple-darwin`) and Windows x86_64
 (Intel macOS, Linux arm64/musl, Windows arm) build from source:
 
 ```console
-$ base=https://github.com/gridpin/gridpin/releases/download/v0.4.0
+$ base=https://github.com/gridpin/gridpin/releases/download/v0.5.0
 $ curl -fsSLO "$base/gridpin-aarch64-apple-darwin.tar.gz"
 $ curl -fsSLO "$base/gridpin-release-signers"
-$ curl -fsSLO https://dl.gridpin.dev/v0.4.0/attestation.json
-$ curl -fsSLO https://dl.gridpin.dev/v0.4.0/attestation.json.sig
+$ curl -fsSLO https://dl.gridpin.dev/v0.5.0/attestation.json
+$ curl -fsSLO https://dl.gridpin.dev/v0.5.0/attestation.json.sig
 # the trust root comes from the OTHER channel — see "Verifying a release" for why
 $ ssh-keygen -Y verify -f gridpin-release-signers -I gridpin-release \
     -n gridpin-g02 -s attestation.json.sig < attestation.json \
@@ -145,14 +145,14 @@ A country in a file — most countries are a single file (a few regional dataset
 
 | Country     | File size | Addresses | Source              | Data license          | POI layer |
 |-------------|-----------|-----------|---------------------|-----------------------|-----------|
-| France      | 365 MB    | 26.1 M    | BAN (national registry) | Licence Ouverte   | ✓ (231 MB, optional) |
+| United States | 1.45 GB | 95.33M | Overture / NAD + Census TIGER/Line; 7 states by address ranges only | open data (per source) | — |
 | Germany     | 213 MB    | 19.27M    | Overture / OpenAddresses, 15 Länder; BNetzA postcode witness | dl-de/by-2-0 · dl-de/zero-2-0 · CC BY 4.0 (per source) | — |
+| France      | 365 MB    | 26.1 M    | BAN (national registry) | Licence Ouverte   | ✓ (231 MB, optional) |
 | Italy       | 247 MB    | 25.9 M    | Overture / ANNCSU   | CC BY 4.0             | — |
-| Netherlands | 103 MB    | 9.9 M     | Overture / NGR (BAG) | Public Domain Mark 1.0 | — |
-| Serbia      | 32 MB     | 2.6 M     | Overture / RGZ      | data.gov.rs Terms     | — |
 | Spain       | 185 MB    | 15.27M    | Overture / CartoCiudad (IGN/CNIG), all 52 postal provinces | CC BY 4.0 | — |
+| Netherlands | 103 MB    | 9.9 M     | Overture / NGR (BAG) | Public Domain Mark 1.0 | — |
 | Brazil | 677 MB | 67.19M | Overture / IBGE CNEFE 2022, nationwide | CC0 1.0 (IBGE public data) | — |
-| United States | 1.45 GB | 95.33M points + 34.52M range points | Overture (NAD, state and county open data) + Census TIGER/Line 2025 ranges; point addresses in 35 states, ranges elsewhere | mixed permissive: public domain, CC0, PDDL, CC BY 4.0, open-data terms (per source) | — |
+| Serbia      | 32 MB     | 2.6 M     | Overture / RGZ      | data.gov.rs Terms     | — |
 
 **Germany covers 15 of 16 Länder; Bavaria is not covered.** In local spot checks, Bavarian queries
 typically returned a distant same-named address with low confidence; less often, an empty answer.
@@ -183,18 +183,19 @@ canonical order. They can differ only when the fields you supply reorder the wor
 order-sensitive POI *name* (splitting "54 Studio" into `street:"studio", number:"54"` re-forms it as
 "Studio 54"); pass such a query as free-form to keep the original word order.
 
-Sizes are for v7 builds (August 2026; Germany repacked 2026-09-10; Spain added 2026-09-28; Brazil added 2026-10-11); the exact byte sizes are checked against a pinned source of truth in CI. A sheet is smaller than its own raw source: France's registry download is an 885 MB gzip that unpacks to 4.9 GB of CSV, while the finished sheet — the same 26.1M addresses plus every index (typo automata, spatial cells, ranking) — is 365 MB, ready to query.
+Sizes are for v7 builds (August 2026; Germany repacked 2026-09-10; Spain added 2026-09-28; Brazil added 2026-10-11; the United States added 2026-10-24); the exact byte sizes are checked against a pinned source of truth in CI. A sheet is smaller than its own raw source: France's registry download is an 885 MB gzip that unpacks to 4.9 GB of CSV, while the finished sheet — the same 26.1M addresses plus every index (typo automata, spatial cells, ranking) — is 365 MB, ready to query.
 
 **Download sheets.** Free builds of all available countries are served as individual files —
 there is no directory listing, so link straight to the object you want:
-[`france.bin`](https://dl.gridpin.dev/v0.4.0/france.bin) (365 MB),
-[`germany.bin`](https://dl.gridpin.dev/v0.4.0/germany.bin) (213 MB),
-[`italy.bin`](https://dl.gridpin.dev/v0.4.0/italy.bin) (247 MB),
-[`netherlands.bin`](https://dl.gridpin.dev/v0.4.0/netherlands.bin) (103 MB),
-[`serbia.bin`](https://dl.gridpin.dev/v0.4.0/serbia.bin) (32 MB),
-[`spain.bin`](https://dl.gridpin.dev/v0.4.0/spain.bin) (185 MB),
-[`brazil.bin`](https://dl.gridpin.dev/v0.4.0/brazil.bin) (677 MB), plus the optional France POI layer
-[`fr_poi.bin`](https://dl.gridpin.dev/v0.4.0/fr_poi.bin) (231 MB). The matching `SHA256SUMS` manifest (covering the
+[`usa.bin`](https://dl.gridpin.dev/v0.5.0/usa.bin) (1.45 GB),
+[`germany.bin`](https://dl.gridpin.dev/v0.5.0/germany.bin) (213 MB),
+[`france.bin`](https://dl.gridpin.dev/v0.5.0/france.bin) (365 MB),
+[`italy.bin`](https://dl.gridpin.dev/v0.5.0/italy.bin) (247 MB),
+[`spain.bin`](https://dl.gridpin.dev/v0.5.0/spain.bin) (185 MB),
+[`netherlands.bin`](https://dl.gridpin.dev/v0.5.0/netherlands.bin) (103 MB),
+[`brazil.bin`](https://dl.gridpin.dev/v0.5.0/brazil.bin) (677 MB),
+[`serbia.bin`](https://dl.gridpin.dev/v0.5.0/serbia.bin) (32 MB), plus the optional France POI layer
+[`fr_poi.bin`](https://dl.gridpin.dev/v0.5.0/fr_poi.bin) (231 MB). The matching `SHA256SUMS` manifest (covering the
 engine binary and every sheet) is on the [GitHub release](https://github.com/gridpin/gridpin/releases).
 Subscribers fetch fresh monthly builds from a keyed URL instead — see
 [gridpin.dev/docs](https://gridpin.dev/docs).
@@ -207,13 +208,13 @@ independent reference coordinate (empty answers count as misses):
 
 | Query set | Rows | GridPin | Photon | Nominatim |
 |---|---:|---:|---:|---:|
+| United States · distorted addresses | 3,655 | **32.7%** | 28.5% | 24.3% |
+| United States · historic-places register (as recorded) | 1,000 | **64.0%** | 38.9% | 52.3% |
 | Germany · distorted addresses | 2,000 | **82.1%** | 46.9% | 15.8% |
 | Germany · clean addresses | 2,000 | **82.8%** | 83.2% | 81.2% |
 | Spain · distorted addresses | 1,590 | **33.8%** | 29.6% | 20.8% |
 | Brazil · distorted addresses | 2,376 | **20.7%** | 19.8% | 9.6% |
 | Brazil · health-facility register (as typed) | 1,000 | **36.8%** | 28.2% | 20.7% |
-| United States · distorted addresses | 3,655 | **32.7%** | 28.5% | 24.3% |
-| United States · historic-places register (as recorded) | 1,000 | **64.0%** | 38.9% | 52.3% |
 
 *Distorted* means each real address was changed by one fixed mechanical rule, with the reference
 coordinate kept byte for byte. On German and Spanish distorted addresses GridPin leads both services;
@@ -262,18 +263,18 @@ untrusted download. Steps 3–5 below use only `ssh-keygen` and `shasum`, which 
 and only step 6 runs our code.
 
 ```bash
-mkdir gridpin-v0.4.0 && cd gridpin-v0.4.0
+mkdir gridpin-v0.5.0 && cd gridpin-v0.5.0
 mkdir trust data          # two directories on purpose: the checker never sits in what it checks
-gh_base=https://github.com/gridpin/gridpin/releases/download/v0.4.0
+gh_base=https://github.com/gridpin/gridpin/releases/download/v0.5.0
 
 # 1. TRUST ROOT — from GitHub, never from the download host
 curl -fsSL -o trust/gridpin-release-signers "$gh_base/gridpin-release-signers"
 curl -fsSL -o trust/verify_release.py       "$gh_base/verify_release.py"
 
 # 2. Data and proofs — from the download host
-for f in france.bin germany.bin italy.bin netherlands.bin serbia.bin fr_poi.bin spain.bin brazil.bin \
+for f in france.bin germany.bin italy.bin netherlands.bin serbia.bin fr_poi.bin spain.bin brazil.bin usa.bin \
          SHA256SUMS attestation.json attestation.json.sig; do
-  curl -fsSL -o "data/$f" "https://dl.gridpin.dev/v0.4.0/$f"
+  curl -fsSL -o "data/$f" "https://dl.gridpin.dev/v0.5.0/$f"
 done
 
 # 3. The key is the one published below — compare by eye, before anything else
@@ -313,11 +314,11 @@ contact@gridpin.dev.
 
 The engine is Apache-2.0. Each sheet carries the license of its source data:
 
+- **United States** — National Address Database (USDOT) and 19 state and county open datasets via Overture/OpenAddresses, each under its own permissive licence (U.S. Government work, CC0, PDDL, CC BY 4.0, open-data terms — listed per source in the sheet manifest); address ranges from U.S. Census Bureau TIGER/Line 2025 (U.S. Government work); postal codes from GeoNames (CC BY 4.0).
 - **France** — BAN, under [Licence Ouverte 2.0](https://www.etalab.gouv.fr/licence-ouverte-open-licence/).
 - **Italy** — ANNCSU via Overture/OpenAddresses, under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 - **Netherlands** — Nationaal Georegister (BAG) via Overture, under [Public Domain Mark 1.0](https://creativecommons.org/publicdomain/mark/1.0/).
 - **Serbia** — RGZ via Overture, under [data.gov.rs Terms of use](https://data.gov.rs/sr/terms/); settlement-name aliases from GeoNames (CC BY 4.0).
-- **United States** — National Address Database (USDOT) and 19 state and county open datasets via Overture/OpenAddresses, each under its own permissive licence (U.S. Government work, CC0, PDDL, CC BY 4.0, open-data terms — listed per source in the sheet manifest); address ranges from U.S. Census Bureau TIGER/Line 2025 (U.S. Government work); postal codes from GeoNames (CC BY 4.0).
 - **POI layer** — Overture places, mixed permissive: CDLA-Permissive-2.0 (Meta, Microsoft, …), Apache-2.0 (Foursquare), CC0-1.0 (AllThePlaces).
 
 Per the [Overture attribution page](https://docs.overturemaps.org/attribution/), addresses are not one blanket license — each national source carries its own. Consult your own counsel before commercial redistribution.
@@ -328,11 +329,11 @@ This also matters for GDPR: the addresses you geocode are often customer data, a
 
 ## Status & roadmap
 
+**v0.5.0: the United States added. Client update required.** One nationwide sheet (`usa.bin`, 1.45 GB): 95.33M point addresses from sources with an explicit right to redistribute (National Address Database, New York City, Los Angeles, Oakland County, MassGIS, MnGeo, Oregon and other state and county open data) plus 34.52M address-range points from Census TIGER/Line 2025 where no point addresses exist. Point addresses cover 35 states; in CO, FL, HI, MS, NH, NV and SC answers are interpolated from address ranges (tens to hundreds of metres). Older engines have no US rules (trailing street types, directions, ZIP+4, state tails). Use the 0.5.0 client with this release. All eight country sheets and the France POI layer use the new immutable `v0.5.0/` path and a new attestation; `v0.1.0/` to `v0.4.0/` are unchanged.
+
 **v0.4.0: Brazil added. Client update required.** Brazil is one nationwide sheet covering 26 states and the Federal District; the source counts describe source presence, not address completeness. Spain covers all 52 postal provinces (incl. Ceuta and Melilla). Germany covers 15 of 16 Länder; Bavaria is not covered. Use the 0.4.0 client with this release: older engines do not contain the Brazilian rules. All seven country sheets and the France POI layer use the new immutable `v0.4.0/` path and a new attestation; `v0.1.0/`, `v0.2.0/` and `v0.3.0/` are unchanged.
 
-**v0.5.0: the United States added. Client update required.** One nationwide sheet (`usa.bin`, 1.45 GB): 95.33M point addresses from sources with an explicit right to redistribute (National Address Database, New York City, Los Angeles, Oakland County, MassGIS, MnGeo, Oregon and other state and county open data) plus 34.52M address-range points from Census TIGER/Line 2025 where no point addresses exist. Point addresses cover 35 states; in CO, FL, HI, MS, NH, NV and SC answers are interpolated from address ranges (tens to hundreds of metres). Older engines have no US rules (trailing street types, directions, ZIP+4, state tails).
-
-For an existing Python installation, use `pip install --upgrade gridpin==0.4.0`, not a plain install that may keep an older version.
+For an existing Python installation, use `pip install --upgrade gridpin==0.5.0`, not a plain install that may keep an older version.
 
 Interfaces and file formats may still change before v1.0. Sheets are tied to the engine's format major version — keep the engine build that shipped alongside your sheets; before v1.0 a newer engine may require newer sheets.
 

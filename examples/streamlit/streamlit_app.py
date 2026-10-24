@@ -14,6 +14,7 @@ from typing import Callable, Dict, List, Optional
 from gridpin_mcp import sheets, tools
 
 EXAMPLES: Dict[str, str] = {
+    "us": "1600 Pennsylvania Avenue NW, Washington, DC 20500",
     "rs": "Knez Mihailova 5, Beograd",
     "nl": "Damrak 1, Amsterdam",
     "es": "Calle de Alcalá 50, Madrid",
@@ -24,6 +25,7 @@ EXAMPLES: Dict[str, str] = {
 }
 # A point for the reverse tab: where each example address resolves.
 POINTS: Dict[str, tuple] = {
+    "us": (38.8977, -77.0365),
     "rs": (44.8155, 20.4594), "nl": (52.3771, 4.8980), "es": (40.4194, -3.6916), "de": (50.1107, 8.6819),
     "fr": (49.8974, 2.2901), "it": (41.9056, 12.4785), "br": (-23.5620, -46.6557),
 }
