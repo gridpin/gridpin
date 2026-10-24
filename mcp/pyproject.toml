@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gridpin-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server for offline geocoding with GridPin: addresses to coordinates and back from one local file per country, no API key"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,7 +16,7 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Scientific/Engineering :: GIS",
 ]
-dependencies = ["gridpin>=0.4.0,<0.5", "mcp>=2.3,<3", "typing-extensions>=4.13"]
+dependencies = ["gridpin>=0.5.0,<0.6", "mcp>=2.3,<3", "typing-extensions>=4.13"]
 
 [project.urls]
 Homepage = "https://gridpin.dev"
