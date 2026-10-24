@@ -1,5 +1,14 @@
 # GridPin
 
+[![PyPI](https://img.shields.io/pypi/v/gridpin)](https://pypi.org/project/gridpin/)
+[![crates.io](https://img.shields.io/crates/v/gridpin)](https://crates.io/crates/gridpin)
+[![DuckDB community extension](https://img.shields.io/badge/DuckDB-community%20extension-fff000)](https://duckdb.org/community_extensions/extensions/gridpin_ext)
+[![MCP server](https://img.shields.io/badge/MCP-server-blue)](https://gridpin.dev/mcp-geocoding)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/gridpin/gridpin/blob/main/LICENSE)
+[![CI](https://github.com/gridpin/gridpin/actions/workflows/ci.yml/badge.svg)](https://github.com/gridpin/gridpin/actions/workflows/ci.yml)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gridpin/gridpin/blob/main/examples/colab_quickstart.ipynb)
+[![Live demo](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://gridpin.streamlit.app)
+
 Offline forward and reverse geocoding from a memory-mapped country file.
 *Off the grid. On the grid.*
 
@@ -8,11 +17,11 @@ stays on your machine. After you install the package and download a sheet,
 GridPin makes no network requests.
 
 ```bash
-pip install --upgrade gridpin==0.4.0
+pip install --upgrade gridpin==0.5.0
 ```
 
 The wheel contains the engine, not the data: **download a country sheet
-separately**. Free static sheets for France, Germany, Italy, the Netherlands, Serbia, Spain and Brazil
+separately**. Free static sheets for the United States, Germany, France, Italy, Spain, the Netherlands, Brazil and Serbia
 are listed at <https://gridpin.dev/docs#delivery> — no account, no key, no
 sign-up.
 
@@ -21,9 +30,10 @@ One command does the download and the check: `pip install gridpin-mcp`, then
 signed release; from Python, `gridpin_mcp.sheets.download("fr")` returns the same path. The
 same package is an MCP server for AI agents (`uvx gridpin-mcp`).
 
-Germany covers **15 of 16 Länder; Bavaria is not covered**. Spain covers all
+The United States is one nationwide sheet: point addresses in 35 states, Census address ranges
+elsewhere. Germany covers **15 of 16 Länder; Bavaria is not covered**. Spain covers all
 52 postal provinces; Brazil is one nationwide sheet. Client update required:
-use 0.4.0, because older engines have no Brazilian rules.
+use 0.5.0, because older engines have no US rules.
 
 ```python
 import gridpin
@@ -36,6 +46,8 @@ g.reverse(49.8945, 2.2949, 1)
 # POI only on weak results, exact addresses never overridden)
 g = gridpin.Geocoder("france.bin", poi="fr_poi.bin")
 ```
+
+If GridPin is useful to you, [a star on GitHub](https://github.com/gridpin/gridpin) helps other people find it.
 
 Three limits worth knowing before you build on this:
 

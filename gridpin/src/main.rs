@@ -157,7 +157,17 @@ fn main() -> anyhow::Result<()> {
     // The hook is SILENT (not exit) so the inner `panic_safe` boundaries can actually CATCH a
     // query-time panic — e.g. one corrupt line in a batch yields empty and the batch continues,
     // instead of the whole process dying. Uncaught panics hit the top-level catch below -> exit(1).
-    std::panic::set_hook(Box::new(|_| {}));
+    // GRIDPIN_PANIC_TRACE=1 names each caught panic on stderr (a diagnostic for engine work: a
+    // silent catch turns a defect into an empty answer that looks like honest silence).
+    let trace = std::env::var_os("GRIDPIN_PANIC_TRACE").is_some();
+    std::panic::set_hook(Box::new(move |info| {
+        if trace {
+            eprintln!(
+                "gridpin: panic caught: {info}\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+    }));
     let cli = Cli::parse();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(cli))) {
         Ok(r) => r,

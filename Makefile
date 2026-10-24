@@ -7,11 +7,12 @@ BIN=gridpin/target/release/gridpin
 RULES=$(if $(wildcard rules),--rules rules,)
 MODELS=--model ml/parser_v0.bin --rank ml/rank_v0.bin $(RULES)
 GEONAMES_RS=data/geonames_rs.txt
+GEONAMES_US=data/geonames_us.txt
 
 # All recipes are phony (not files). Without this, a file named like a target (e.g. `smoke`)
 # in the working dir makes `make` consider the target up to date and silently skip the recipe — which
 # let the release check skip its provenance verification.
-.PHONY: engine bindings duckdb-ext fr nl it rs es de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb http public-bench-contract public-bench
+.PHONY: engine bindings duckdb-ext third-party-licenses fr nl it rs es br us de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb http public-bench-contract public-bench
 
 engine:
 	cargo build --release --manifest-path gridpin/Cargo.toml
@@ -86,6 +87,17 @@ duckdb-ext:
 	cmake --build "$(DUCKDB_BUILD_DIR)" --target gridpin_ext_loadable_extension --parallel $(DUCKDB_BUILD_JOBS)
 	cp "$(DUCKDB_BUILD_DIR)/extension/gridpin_ext/gridpin_ext.duckdb_extension" duckdb-ext/gridpin_ext.duckdb_extension
 
+# License texts of the Rust libraries compiled into the wheel, the CLI archives (gridpin) and the
+# DuckDB extension (duckdb-ext). Regenerate and commit after every Cargo.lock change: the release
+# workflow refuses a THIRDPARTY.yml that no longer matches its lockfile. The generator must see the
+# same features as the build: pyo3 is optional behind `python` (the wheel's [tool.maturin]
+# features), and without it six compiled-in libraries go missing. The CLI links a subset of the
+# same list. Needs: cargo install cargo-bundle-licenses --version 4.2.0 --locked
+third-party-licenses:
+	cd gridpin && cargo bundle-licenses --features python --format yaml --output THIRDPARTY.yml
+	cd duckdb-ext && cargo bundle-licenses --format yaml --output THIRDPARTY.yml
+	python3 .github/thirdparty_licenses.py gridpin duckdb-ext
+
 fr: engine
 	nice -n 19 python3 prep/normalize.py
 	nice -n 19 python3 prep/export_build.py
@@ -117,6 +129,35 @@ br: engine
 	$(if $(wildcard rules),python3 prep/br_rules.py,)
 	GRIDPIN_MEM=8GB nice -n 19 python3 prep/export_build.py data/br_norm.parquet data/build_br.csv.gz
 	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_br.csv.gz data/br.bin $(MODELS) --meta data/br_manifest.json
+
+# United States (ANSWERS §140): Overture 2026-09-23.1, only the 20 datasets with an explicit right
+# to redistribute (prep/overture.py US_GREEN_DATASETS), 50 states + DC, one sheet marked as partial
+# coverage. Streamed from S3 like BR; verbatim repeats are merged locally (us_stats: rows_duplicate).
+# Rows without a city (about 4.7 M) get the nearest populated place of their state from GeoNames
+# (CC BY 4.0) in a zero pass (us_stats: rows_nocity_src, umbrella_filled, umbrella_cross_state).
+# Interpolation layer (ANSWERS §147): TIGER/Line ADDRFEAT address ranges of the Census Bureau
+# (public domain) become marked range points outside the ZIPs the point sources cover
+# (prep/us_tiger.py); the city of a range is the USPS place of its ZIP (GeoNames postal codes,
+# CC BY 4.0). `make tiger-fetch` downloads the 3 227 county files (2.7 GB) into TIGER_DIR.
+TIGER_YEAR?=2025
+TIGER_DIR?=data/tiger_addrfeat
+GEONAMES_POSTAL_US=data/geonames_postal_us.txt
+tiger-fetch:
+	mkdir -p $(TIGER_DIR)
+	curl -s https://www2.census.gov/geo/tiger/TIGER$(TIGER_YEAR)/ADDRFEAT/ \
+	  | grep -o 'tl_$(TIGER_YEAR)_[0-9]\{5\}_addrfeat\.zip' | sort -u \
+	  | xargs -P 4 -I{} sh -c 'test -s $(TIGER_DIR)/{} || curl -s -f -o $(TIGER_DIR)/{}.part https://www2.census.gov/geo/tiger/TIGER$(TIGER_YEAR)/ADDRFEAT/{} && mv $(TIGER_DIR)/{}.part $(TIGER_DIR)/{}'
+	ls $(TIGER_DIR)/tl_$(TIGER_YEAR)_*_addrfeat.zip | wc -l
+
+us: RULES=$(if $(wildcard rules),--rules rules/us,)
+us: engine
+	test -f $(GEONAMES_US) || python3 prep/fetch_zip.py https://download.geonames.org/export/dump/US.zip US.txt $(GEONAMES_US)
+	test -f $(GEONAMES_POSTAL_US) || python3 prep/fetch_zip.py https://download.geonames.org/export/zip/US.zip US.txt $(GEONAMES_POSTAL_US)
+	nice -n 19 python3 prep/overture.py US $(GEONAMES_US)
+	$(if $(wildcard rules),python3 prep/us_rules.py,)
+	GRIDPIN_MEM=8GB nice -n 19 python3 prep/us_tiger.py $(TIGER_DIR) $(GEONAMES_POSTAL_US) data/us_norm.parquet data/us_tiger.parquet --manifest data/us_manifest.json
+	GRIDPIN_MEM=8GB nice -n 19 python3 prep/export_build.py data/us_norm.parquet,data/us_tiger.parquet data/build_us.csv.gz
+	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_us.csv.gz data/us.bin $(MODELS) --meta data/us_manifest.json
 
 rs: engine
 	test -f $(GEONAMES_RS) || python3 prep/fetch_zip.py https://download.geonames.org/export/dump/RS.zip RS.txt $(GEONAMES_RS)

@@ -2,6 +2,7 @@
 """Generate the Spanish rule pack without duplicating maintained common rules."""
 import argparse
 import json
+import re
 from pathlib import Path
 
 
@@ -21,7 +22,7 @@ def expected_pack(common: Path, overlay: Path, marker: bytes = MARKER) -> dict[s
     if names != FAMILIES:
         raise ValueError(f"common rule families differ: {sorted(names ^ FAMILIES)}")
     additions = json.loads(overlay.read_text(encoding="utf-8"))
-    if not isinstance(additions, dict) or set(additions) - (TYPE_FAMILIES | {"city_tail", "abbrev2"}):
+    if not isinstance(additions, dict) or set(additions) - (TYPE_FAMILIES | {"city_tail", "abbrev2", "countries_tail"}):
         raise ValueError("overlay contains an unsupported rule family")
     pack = {}
     for name in sorted(FAMILIES):
@@ -52,8 +53,26 @@ def expected_pack(common: Path, overlay: Path, marker: bytes = MARKER) -> dict[s
     if "city_tail" in additions:
         config = additions["city_tail"]
         required = {"enabled", "regions", "forms", "postal_digits", "postal_split"}
-        if not isinstance(config, dict) or not required <= set(config) or set(config) - required - {"street_titles", "street_title_aliases"}:
+        optional = {"street_titles", "street_title_aliases", "postal_extension", "street_type_last", "region_names",
+                    "junk_tail", "homonym_prominence"}
+        if not isinstance(config, dict) or not required <= set(config) or set(config) - required - optional:
             raise ValueError("city_tail: expected complete tail grammar")
+        # homonym_prominence: "1" orders equal-score homonyms of a cityless query by commune size
+        # before distance to the sheet's anchor commune (query.rs homonym_prominence_first).
+        if "homonym_prominence" in config and str(config["homonym_prominence"]) != "1":
+            raise ValueError("city_tail: homonym_prominence must be \"1\" when present")
+        # postal_extension: digits of a postal-code extension joined by a hyphen ("62701-1234" -> 4);
+        # read by the engine's region_postal form only (query.rs split_region_postal).
+        if "postal_extension" in config and not re.fullmatch(r"[1-9]", str(config["postal_extension"])):
+            raise ValueError("city_tail: postal_extension must be a single digit 1-9")
+        # street_type_last: the street type trails the name ("Main Street"), so type and direction rewrites
+        # from abbrev2 also apply to the last word and compose with the leading one (US, 21.10.2026).
+        if "street_type_last" in config and str(config["street_type_last"]) not in {"0", "1"}:
+            raise ValueError("city_tail: street_type_last must be 0 or 1")
+        # junk_tail: words that open a trailing segment the tail grammar ignores ("near the mall", "tel …");
+        # read by the engine's city tail only (query.rs junk_tail_segment).
+        if "junk_tail" in config and not re.fullmatch(r"[a-z]+( [a-z]+)*", str(config["junk_tail"])):
+            raise ValueError("city_tail: junk_tail must be lowercase words separated by single spaces")
         title_keys = {"street_titles", "street_title_aliases"}
         if set(config) & title_keys and not title_keys <= set(config):
             raise ValueError("city_tail: title configuration must be paired")

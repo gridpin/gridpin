@@ -109,6 +109,10 @@ def main() -> None:
         "Data: Overture Maps and national registries, "
         "[attributions](https://github.com/gridpin/gridpin/blob/main/ATTRIBUTIONS.md)."
     )
+    st.caption(
+        "If GridPin is useful to you, [a star on GitHub](https://github.com/gridpin/gridpin) "
+        "helps other people find it."
+    )
 
 
 if __name__ == "__main__":

@@ -31,6 +31,11 @@ jobs:
           if [ -n "$py_v" ]; then
             [ "$tag" = "$py_v" ] || { echo "::error::tag v$tag != gridpin/pyproject.toml $py_v"; exit 1; }
           fi
+      - name: THIRDPARTY.yml names every library in Cargo.lock
+        # The license texts of the statically linked Rust libraries travel inside the wheel, the CLI
+        # archives and the DuckDB extension ZIP (checked byte for byte in those jobs). A lockfile
+        # change without `make third-party-licenses` stops the release here, before any build.
+        run: python3 .github/thirdparty_licenses.py gridpin duckdb-ext
 
   ci-passed:
     # a matching version string is NOT proof the code was tested, and a
@@ -87,18 +92,20 @@ jobs:
       - name: Package (tar.gz / zip)
         shell: bash
         # The Apache LICENSE (and NOTICE, if the repo ever adds one) travels INSIDE every archive,
-        # not just next to the download.
+        # not just next to the download, together with THIRDPARTY.yml: the license texts of the
+        # Rust libraries linked into the binary (the wheel's list; the CLI links a subset of it).
         run: |
           cd gridpin/target/${{ matrix.target }}/release
           cp "$GITHUB_WORKSPACE/LICENSE" .
-          legal="LICENSE"
+          cp "$GITHUB_WORKSPACE/gridpin/THIRDPARTY.yml" .
+          legal="LICENSE THIRDPARTY.yml"
           if [[ -f "$GITHUB_WORKSPACE/NOTICE" ]]; then cp "$GITHUB_WORKSPACE/NOTICE" .; legal="$legal NOTICE"; fi
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             7z a gridpin-${{ matrix.target }}.zip gridpin.exe $legal
           else
             tar czf gridpin-${{ matrix.target }}.tar.gz gridpin $legal
           fi
-      - name: Smoke — the packaged binary runs, reports the tag version, and ships LICENSE
+      - name: Smoke — the packaged binary runs, reports the tag version, and ships LICENSE and THIRDPARTY.yml
         shell: bash
         run: |
           cd gridpin/target/${{ matrix.target }}/release
@@ -114,6 +121,9 @@ jobs:
           [[ "$v" == *"${GITHUB_REF_NAME#v}"* ]] || { echo "::error::binary reports '$v', tag is $GITHUB_REF_NAME"; exit 1; }
           # artifact-content check: the unpacked archive MUST carry the license file
           [[ -f LICENSE ]] || { echo "::error::packaged archive is missing LICENSE"; exit 1; }
+          # ... and the third-party license texts, byte for byte the committed (checked) file
+          cmp -s THIRDPARTY.yml "$GITHUB_WORKSPACE/gridpin/THIRDPARTY.yml" \
+            || { echo "::error::packaged archive lacks gridpin/THIRDPARTY.yml or carries another copy"; exit 1; }
       - name: Attach to release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -149,21 +159,17 @@ jobs:
           # pinned: the wheel job must not float while the CLI/DuckDB jobs are pinned
           rust-toolchain: "1.93.0"
           maturin-version: "1.14.0"
-      - name: Smoke — the built wheel installs, imports, and ships LICENSE
+      - name: Smoke — the built wheel installs, imports, and ships its license files
         shell: bash
         run: |
           pip install --quiet gridpin/target/wheels/*.whl
           python -c "import gridpin; gridpin.Geocoder"
-          # artifact-content check: the wheel is a zip — it MUST contain a LICENSE entry
-          # (bundled via [tool.maturin] include from the committed gridpin/LICENSE).
-          python - <<'PY'
-          import glob, sys, zipfile
-          whl = glob.glob("gridpin/target/wheels/*.whl")[0]
-          names = zipfile.ZipFile(whl).namelist()
-          if not any(n.rsplit("/", 1)[-1] == "LICENSE" for n in names):
-              sys.exit(f"::error::wheel {whl} is missing a LICENSE file; entries={names}")
-          print("wheel bundles LICENSE:", [n for n in names if "LICENSE" in n.upper()])
-          PY
+          # artifact-content check: the wheel's license files (pyproject `license-files`) sit in
+          # .dist-info/licenses/ byte for byte as gridpin/LICENSE and gridpin/THIRDPARTY.yml, and nothing
+          # lands at the top of site-packages (an earlier include rule put LICENSE there). maturin skips a
+          # missing license file without an error, so only this check sees it. wheels-backfill.yml runs
+          # the same script on its wheels and sdist.
+          python .github/thirdparty_licenses.py --artifacts gridpin gridpin/target/wheels/*.whl
       - name: Acceptance — the published wheel answers a real query on a real sheet
         # The steps above prove the wheel INSTALLS and IMPORTS. That is not a customer scenario:
         # a buyer installs the package, points it at a country file and expects coordinates back.
@@ -289,7 +295,8 @@ jobs:
         shell: bash
         # asset name carries the platform; the file INSIDE stays gridpin_ext.duckdb_extension.
         # Zip via Python (installed on every runner) — `zip` is absent on Windows bash.
-        # The Apache LICENSE (and NOTICE, if present) is added to the ZIP too.
+        # The Apache LICENSE (and NOTICE, if present) is added to the ZIP too, and so is
+        # duckdb-ext/THIRDPARTY.yml: the license texts of the Rust libraries linked into the extension.
         env:
           PLATFORM: ${{ matrix.platform }}
         run: |
@@ -300,12 +307,13 @@ jobs:
           plat = os.environ["PLATFORM"]
           with zipfile.ZipFile(f"gridpin_ext-{plat}.zip", "w", zipfile.ZIP_DEFLATED) as z:
               z.write("gridpin_ext.duckdb_extension", "gridpin_ext.duckdb_extension")
+              z.write("THIRDPARTY.yml", "THIRDPARTY.yml")
               for name in ("LICENSE", "NOTICE"):
                   p = os.path.join(root, name)
                   if os.path.exists(p):
                       z.write(p, name)
           PY
-      - name: Artifact-content check — the ZIP ships the extension AND LICENSE
+      - name: Artifact-content check — the ZIP ships the extension, LICENSE and THIRDPARTY.yml
         shell: bash
         env:
           PLATFORM: ${{ matrix.platform }}
@@ -314,10 +322,14 @@ jobs:
           python3 - <<'PY'
           import os, sys, zipfile
           plat = os.environ["PLATFORM"]
-          names = zipfile.ZipFile(f"gridpin_ext-{plat}.zip").namelist()
-          for required in ("gridpin_ext.duckdb_extension", "LICENSE"):
+          z = zipfile.ZipFile(f"gridpin_ext-{plat}.zip")
+          names = z.namelist()
+          for required in ("gridpin_ext.duckdb_extension", "LICENSE", "THIRDPARTY.yml"):
               if required not in names:
                   sys.exit(f"::error::gridpin_ext-{plat}.zip is missing {required}; entries={names}")
+          with open("THIRDPARTY.yml", "rb") as f:
+              if z.read("THIRDPARTY.yml") != f.read():
+                  sys.exit(f"::error::gridpin_ext-{plat}.zip carries a THIRDPARTY.yml other than duckdb-ext/THIRDPARTY.yml")
           print("extension zip content:", names)
           PY
       - name: Attach to release

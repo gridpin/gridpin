@@ -75,6 +75,35 @@ jobs:
           python -m pip install --quiet build==1.3.0 twine==6.2.0  # pinned build inputs
           python -m build --outdir dist mcp
           python -m twine check --strict dist/*
+      - name: The wheel and the sdist ship LICENSE
+        # setuptools only warns when a `license-files` entry matches nothing ("Pattern 'LICENSE' did
+        # not match any files") and still builds both archives without it, and `twine check --strict`
+        # passes them. So the archives themselves are checked: the wheel carries
+        # .dist-info/licenses/LICENSE byte for byte the committed mcp/LICENSE and installs nothing at
+        # the top of site-packages; the sdist carries the same LICENSE at its root.
+        run: |
+          python - <<'PY'
+          import glob, re, sys, tarfile, zipfile
+          with open("mcp/LICENSE", "rb") as f:
+              committed = f.read()
+          wheels, sdists = glob.glob("dist/*.whl"), glob.glob("dist/*.tar.gz")
+          if len(wheels) != 1 or len(sdists) != 1:
+              sys.exit(f"::error::expected one wheel and one sdist in dist/, got {wheels + sdists}")
+          z = zipfile.ZipFile(wheels[0])
+          names = z.namelist()
+          lic = [n for n in names if re.fullmatch(r"gridpin_mcp-[^/]+\.dist-info/licenses/LICENSE", n)]
+          if len(lic) != 1 or z.read(lic[0]) != committed:
+              sys.exit(f"::error::{wheels[0]} lacks .dist-info/licenses/LICENSE equal to mcp/LICENSE; entries={names}")
+          top = [n for n in names if "/" not in n]
+          if top:
+              sys.exit(f"::error::{wheels[0]} installs files at the top of site-packages: {top}")
+          with tarfile.open(sdists[0]) as t:
+              members = {m.name: m for m in t.getmembers() if m.isfile()}
+              src = [n for n in members if re.fullmatch(r"gridpin_mcp-[^/]+/LICENSE", n)]
+              if len(src) != 1 or t.extractfile(members[src[0]]).read() != committed:
+                  sys.exit(f"::error::{sdists[0]} lacks a root LICENSE equal to mcp/LICENSE")
+          print("license files:", lic[0], src[0])
+          PY
       # Sheet download and verification tests run here; the engine and MCP tests need the Monaco
       # smoke sheet and run in ci.yml (make test-py), which ci-passed already requires.
       - name: Test the built wheel

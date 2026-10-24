@@ -1,5 +1,14 @@
 # GridPin
 
+[![PyPI](https://img.shields.io/pypi/v/gridpin)](https://pypi.org/project/gridpin/)
+[![crates.io](https://img.shields.io/crates/v/gridpin)](https://crates.io/crates/gridpin)
+[![DuckDB community extension](https://img.shields.io/badge/DuckDB-community%20extension-fff000)](https://duckdb.org/community_extensions/extensions/gridpin_ext)
+[![MCP server](https://img.shields.io/badge/MCP-server-blue)](https://gridpin.dev/mcp-geocoding)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![CI](https://github.com/gridpin/gridpin/actions/workflows/ci.yml/badge.svg)](https://github.com/gridpin/gridpin/actions/workflows/ci.yml)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gridpin/gridpin/blob/main/examples/colab_quickstart.ipynb)
+[![Live demo](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://gridpin.streamlit.app)
+
 **A country in a file — offline forward and reverse geocoding.**
 
 ![GridPin demo: typo-tolerant forward and reverse geocoding in the terminal](docs-public/demo.gif)
@@ -25,6 +34,8 @@ No install: [try it in Colab](https://colab.research.google.com/github/gridpin/g
 Countries: `br` `de` `es` `fr` `it` `nl` `rs` (`gridpin-fetch --list`). For AI agents there is an
 MCP server — `claude mcp add gridpin -- uvx gridpin-mcp`, details in [mcp/README.md](mcp/README.md).
 Everything after the download runs offline.
+
+If GridPin is useful to you, [a star on GitHub](https://github.com/gridpin/gridpin) helps other people find it.
 
 [GridPin](https://gridpin.dev) is an offline geocoder: a country in a data file, memory-mapped and ready in milliseconds, with no server, no database import, and no network. It resolves addresses to coordinates (forward) and coordinates to the nearest indexed address (reverse — approximate: streets are indexed by centroid, so each result carries its `distance_m`). On a single arm64 laptop core, measured on the France sheet: exact address lookups run at ~3,000/s, reverse geocoding at ~1,800/s, and typo-tolerant fuzzy matching much slower — tens of milliseconds per query, so batch it across cores when you feed it messy input. The engine and every query run fully offline — not a byte of what you geocode leaves your machine; the only network step is you downloading a sheet yourself, and a downloaded sheet carries no query data. Because you compute results locally from openly licensed data, you may store them forever, which hosted geocoding APIs typically forbid. If you have considered self-hosting Nominatim (a beefy server, days of import) or an on-prem geocoder license, the alternative here is: download one file, open it on any laptop.
 
@@ -64,9 +75,12 @@ publish ourselves. If you need the signed chain, take the wheel from the GitHub 
 it the same way as the CLI archive.
 
 **DuckDB** — `INSTALL gridpin_ext FROM community;` then `LOAD gridpin_ext;`. The community
-catalog builds and signs the extension itself, so that trust root is DuckDB's rather than ours;
-it needs **DuckDB 1.5.5 or newer**. On an older DuckDB, or when the catalog is unreachable,
-download `gridpin_ext-<platform>.zip` from the releases page. It is a loadable
+catalog builds and signs the extension itself, so that trust root is DuckDB's rather than ours.
+It builds the current release only for the current DuckDB: that takes **DuckDB 1.5.6 or newer**;
+older DuckDB versions install an older build. Check what you got with
+`SELECT extension_version FROM duckdb_extensions() WHERE extension_name = 'gridpin_ext';`.
+When the catalog is unreachable, or for the current release on DuckDB 1.5.5, download
+`gridpin_ext-<platform>.zip` from the releases page: it is built for DuckDB 1.5.5 only. It is a loadable
 extension, so authenticate it before you load it — same three lines as the CLI archive above,
 with `gridpin_ext-<platform>.zip` as the asset name:
 
@@ -138,6 +152,7 @@ A country in a file — most countries are a single file (a few regional dataset
 | Serbia      | 32 MB     | 2.6 M     | Overture / RGZ      | data.gov.rs Terms     | — |
 | Spain       | 185 MB    | 15.27M    | Overture / CartoCiudad (IGN/CNIG), all 52 postal provinces | CC BY 4.0 | — |
 | Brazil | 677 MB | 67.19M | Overture / IBGE CNEFE 2022, nationwide | CC0 1.0 (IBGE public data) | — |
+| United States | 1.45 GB | 95.33M points + 34.52M range points | Overture (NAD, state and county open data) + Census TIGER/Line 2025 ranges; point addresses in 35 states, ranges elsewhere | mixed permissive: public domain, CC0, PDDL, CC BY 4.0, open-data terms (per source) | — |
 
 **Germany covers 15 of 16 Länder; Bavaria is not covered.** In local spot checks, Bavarian queries
 typically returned a distant same-named address with low confidence; less often, an empty answer.
@@ -196,7 +211,9 @@ independent reference coordinate (empty answers count as misses):
 | Germany · clean addresses | 2,000 | **82.8%** | 83.2% | 81.2% |
 | Spain · distorted addresses | 1,590 | **33.8%** | 29.6% | 20.8% |
 | Brazil · distorted addresses | 2,376 | **20.7%** | 19.8% | 9.6% |
-| Brazil · health-facility register (as typed) | 1,000 | **36.2%** | 28.2% | 20.7% |
+| Brazil · health-facility register (as typed) | 1,000 | **36.8%** | 28.2% | 20.7% |
+| United States · distorted addresses | 3,655 | **32.7%** | 28.5% | 24.3% |
+| United States · historic-places register (as recorded) | 1,000 | **64.0%** | 38.9% | 52.3% |
 
 *Distorted* means each real address was changed by one fixed mechanical rule, with the reference
 coordinate kept byte for byte. On German and Spanish distorted addresses GridPin leads both services;
@@ -300,6 +317,7 @@ The engine is Apache-2.0. Each sheet carries the license of its source data:
 - **Italy** — ANNCSU via Overture/OpenAddresses, under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 - **Netherlands** — Nationaal Georegister (BAG) via Overture, under [Public Domain Mark 1.0](https://creativecommons.org/publicdomain/mark/1.0/).
 - **Serbia** — RGZ via Overture, under [data.gov.rs Terms of use](https://data.gov.rs/sr/terms/); settlement-name aliases from GeoNames (CC BY 4.0).
+- **United States** — National Address Database (USDOT) and 19 state and county open datasets via Overture/OpenAddresses, each under its own permissive licence (U.S. Government work, CC0, PDDL, CC BY 4.0, open-data terms — listed per source in the sheet manifest); address ranges from U.S. Census Bureau TIGER/Line 2025 (U.S. Government work); postal codes from GeoNames (CC BY 4.0).
 - **POI layer** — Overture places, mixed permissive: CDLA-Permissive-2.0 (Meta, Microsoft, …), Apache-2.0 (Foursquare), CC0-1.0 (AllThePlaces).
 
 Per the [Overture attribution page](https://docs.overturemaps.org/attribution/), addresses are not one blanket license — each national source carries its own. Consult your own counsel before commercial redistribution.
@@ -311,6 +329,8 @@ This also matters for GDPR: the addresses you geocode are often customer data, a
 ## Status & roadmap
 
 **v0.4.0: Brazil added. Client update required.** Brazil is one nationwide sheet covering 26 states and the Federal District; the source counts describe source presence, not address completeness. Spain covers all 52 postal provinces (incl. Ceuta and Melilla). Germany covers 15 of 16 Länder; Bavaria is not covered. Use the 0.4.0 client with this release: older engines do not contain the Brazilian rules. All seven country sheets and the France POI layer use the new immutable `v0.4.0/` path and a new attestation; `v0.1.0/`, `v0.2.0/` and `v0.3.0/` are unchanged.
+
+**v0.5.0: the United States added. Client update required.** One nationwide sheet (`usa.bin`, 1.45 GB): 95.33M point addresses from sources with an explicit right to redistribute (National Address Database, New York City, Los Angeles, Oakland County, MassGIS, MnGeo, Oregon and other state and county open data) plus 34.52M address-range points from Census TIGER/Line 2025 where no point addresses exist. Point addresses cover 35 states; in CO, FL, HI, MS, NH, NV and SC answers are interpolated from address ranges (tens to hundreds of metres). Older engines have no US rules (trailing street types, directions, ZIP+4, state tails).
 
 For an existing Python installation, use `pip install --upgrade gridpin==0.4.0`, not a plain install that may keep an older version.
 

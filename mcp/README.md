@@ -7,7 +7,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets an agent geocode addr
 No API key, no rate limit, and no query leaves the machine. The only network step is
 downloading a country sheet once, verified against the signed GridPin release.
 
-Countries (release v0.4.0): Brazil, France, Germany, Italy, Netherlands, Serbia, Spain.
+Countries (release v0.5.0): United States, Germany, France, Italy, Spain, Netherlands, Brazil, Serbia.
 
 ## Add it to an agent
 
@@ -23,7 +23,30 @@ Any client that reads an `mcpServers` config (Claude Desktop, Cursor, ...):
 { "mcpServers": { "gridpin": { "command": "uvx", "args": ["gridpin-mcp"] } } }
 ```
 
+To keep sheets in another directory, pass `GRIDPIN_HOME` in the server's own environment:
+
+```json
+{ "mcpServers": { "gridpin": { "command": "uvx", "args": ["gridpin-mcp"],
+                               "env": { "GRIDPIN_HOME": "/path/to/sheets" } } } }
+```
+
+Exporting it in your shell is not enough. Some MCP clients start the server with only a few
+environment variables (clients built on the MCP Python SDK pass `HOME`, `LOGNAME`, `PATH`,
+`SHELL`, `TERM` and `USER` on macOS and Linux), so `GRIDPIN_HOME` and `XDG_CACHE_HOME` from
+your shell never reach it and sheets go to `~/.cache/gridpin`.
+
+`download_sheet` fetches a whole sheet in one tool call, and the larger sheets can take longer
+than a client allows for one call (mcp-haystack's `MCPToolset`, for example, stops after 30 s
+by default). Raise the client's tool timeout, or download the sheet beforehand in a terminal,
+with the same `GRIDPIN_HOME` as the server; the tool then returns at once:
+
+```console
+$ uvx --from gridpin-mcp gridpin-fetch fr
+```
+
 Step-by-step setup for agents (requirements, settings, verification): [llms-install.md](llms-install.md).
+
+If GridPin is useful to you, [a star on GitHub](https://github.com/gridpin/gridpin) helps other people find it.
 
 ## Tools
 

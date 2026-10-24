@@ -66,6 +66,10 @@ jobs:
                                 and .head_repository.full_name==env.REPO)] | length')
           echo "tagged commit $sha: ${n:-0} successful push-to-main ci.yml runs"
           [ "${n:-0}" -ge 1 ] || { echo "::error::the tagged commit $sha never passed ci.yml on main"; exit 1; }
+      - name: THIRDPARTY.yml of the tag names every library in its Cargo.lock
+        # The same fuse as in release.yml: the license texts packed into the wheels and the sdist match
+        # the lockfile they are built from. A tag without the script predates the license files.
+        run: python3 .github/thirdparty_licenses.py gridpin
 
   # Each wheel is built and accepted on its own platform: the exact file that will be published
   # installs into a clean Python, opens a freshly built sheet and answers forward AND reverse.
@@ -105,19 +109,19 @@ jobs:
           args: --release --features python
           rust-toolchain: "1.93.0"
           maturin-version: "1.14.0"
-      - name: Exactly one wheel, with LICENSE, for this platform
+      - name: Exactly one wheel, with its license files, for this platform
         shell: bash
         run: |
           python - <<'PY'
-          import glob, sys, zipfile
+          import glob, sys
           wheels = glob.glob("gridpin/target/wheels/*.whl")
           if len(wheels) != 1:
               sys.exit(f"::error::expected one wheel, got {wheels}")
-          names = zipfile.ZipFile(wheels[0]).namelist()
-          if not any(n.rsplit("/", 1)[-1] == "LICENSE" for n in names):
-              sys.exit(f"::error::{wheels[0]} is missing a LICENSE file")
           print("built", wheels[0])
           PY
+          # the same check as the wheels job of release.yml: LICENSE and THIRDPARTY.yml in
+          # .dist-info/licenses/ byte for byte as committed, nothing at the top of site-packages
+          python .github/thirdparty_licenses.py --artifacts gridpin gridpin/target/wheels/*.whl
       - name: Acceptance — the wheel answers a real query on a real sheet
         shell: bash
         run: |
@@ -181,6 +185,9 @@ jobs:
           python -m venv /tmp/sdist
           /tmp/sdist/bin/pip install --quiet --no-binary gridpin gridpin/dist/*.tar.gz
           /tmp/sdist/bin/python -c "import gridpin; gridpin.Geocoder; print('sdist ok')"
+      - name: The sdist ships LICENSE and THIRDPARTY.yml
+        # maturin puts the pyproject `license-files` at the sdist root, and skips a missing one silently.
+        run: python .github/thirdparty_licenses.py --artifacts gridpin gridpin/dist/*.tar.gz
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sdist

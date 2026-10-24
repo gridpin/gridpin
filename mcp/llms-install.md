@@ -32,14 +32,18 @@ With `uv` installed, add this entry to the MCP settings file (for Cline: `cline_
 Without `uv`: run `pip install gridpin-mcp`, then use `"command": "gridpin-mcp"` and `"args": []`.
 
 Optional: set `"env": {"GRIDPIN_HOME": "/path/to/dir"}` to choose where sheets are stored
-(default `~/.cache/gridpin`).
+(default `~/.cache/gridpin`). Set it in this server entry: some MCP clients start the server with
+only a few environment variables, so a `GRIDPIN_HOME` exported in the user's shell does not reach it.
 
 ## 3. Verify
 
 1. Call `list_countries`. It returns seven countries (`br`, `de`, `es`, `fr`, `it`, `nl`, `rs`), each
    with its size and whether it is downloaded.
 2. Ask the user which countries they need, then call `download_sheet` once per country. The download is
-   checked against the signed release; a mismatch is discarded.
+   checked against the signed release; a mismatch is discarded. A large sheet can take longer than the
+   client allows for one tool call; if the call times out, ask the user to run
+   `uvx --from gridpin-mcp gridpin-fetch <code>` (or `gridpin-fetch <code>` after `pip install gridpin-mcp`)
+   in a terminal with the same `GRIDPIN_HOME` as the server, then call `list_countries` again.
 3. Call `geocode` with an address in that country, e.g. `{"query": "Knez Mihailova 5, Beograd",
    "country": "rs"}`. A good result has `"precision": "house"`.
 

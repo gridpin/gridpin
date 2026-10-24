@@ -18,28 +18,32 @@ use std::sync::OnceLock;
 pub const CLASSES: &[(u8, &str)] = &[
     (26, "municipality_guard"), // optional municipality/region vocabulary
     (23, "city_tail"),          // optional tail grammar and exact-city guard
-    (1, "commune_alias"),       // key → value
-    (2, "city_alias"),          // key → value
-    (3, "abbrev2"),             // key="a b" → full word
-    (4, "capitals"),            // list
-    (5, "street_types_cyr"),    // list (type padding/rotation — Cyrillic)
+    (27, "commune_regions"), // optional city -> "REGION lat lon;…" (homonyms held by the tail's region)
+    (1, "commune_alias"),    // key → value
+    (2, "city_alias"),       // key → value
+    (3, "abbrev2"),          // key="a b" → full word
+    (4, "capitals"),         // list
+    (5, "street_types_cyr"), // list (type padding/rotation — Cyrillic)
     (16, "street_types_latin"), // list (type padding — Latin)
     (17, "street_types_extra"), // list (type recognition only: nl/rs/uz…)
-    (6, "affix_extra"),         // list
-    (7, "noise"),               // list
-    (8, "noise_after"),         // list
-    (9, "region_markers"),      // list
-    (10, "countries_mid"),      // list
-    (11, "countries_tail"),     // list
-    (12, "place_junk"),         // list
-    (13, "place_prefix"),       // list
-    (14, "fr_ord_cities"),      // list
-    (15, "place_type_strip"),   // list
+    (6, "affix_extra"),      // list
+    (7, "noise"),            // list
+    (8, "noise_after"),      // list
+    (9, "region_markers"),   // list
+    (10, "countries_mid"),   // list
+    (11, "countries_tail"),  // list
+    (12, "place_junk"),      // list
+    (13, "place_prefix"),    // list
+    (14, "fr_ord_cities"),   // list
+    (15, "place_type_strip"), // list
 ];
 
 pub struct Rules {
     pub municipality_guard: HashMap<String, String>,
     pub city_tail: HashMap<String, String>,
+    /// Normalized city name -> "REGION lat lon;REGION lat lon…": where a city of that name lies in
+    /// each region, so a tail naming the region can hold its homonyms (US, 21.10.2026).
+    pub commune_regions: HashMap<String, String>,
     pub recipient_prefixes: HashSet<String>,
     pub commune_alias: HashMap<String, String>,
     pub city_alias: Vec<(String, String)>,
@@ -89,6 +93,9 @@ impl Rules {
             }
             23 => {
                 self.city_tail.insert(key, val);
+            }
+            27 => {
+                self.commune_regions.insert(key, val);
             }
             1 => {
                 self.commune_alias.insert(key, val);
@@ -411,6 +418,7 @@ fn defaults() -> Rules {
     let mut r = Rules {
         municipality_guard: HashMap::new(),
         city_tail: HashMap::new(),
+        commune_regions: HashMap::new(),
         recipient_prefixes: HashSet::new(),
         commune_alias: HashMap::new(),
         city_alias: Vec::new(),

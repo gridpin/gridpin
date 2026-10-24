@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use GridPin in your work, please cite it using the metadata from this file."
+type: software
+title: GridPin
+abstract: >-
+  Offline geocoder: a country in a file. Forward and reverse geocoding with
+  Python, CLI, DuckDB and an MCP server for AI agents. No server, no API key.
+authors:
+  - name: GridPin
+repository-code: "https://github.com/gridpin/gridpin"
+url: "https://gridpin.dev"
+license: Apache-2.0
+keywords:
+  - geocoding
+  - reverse-geocoding
+  - offline
+  - gis
+  - overture-maps
+  - mcp
