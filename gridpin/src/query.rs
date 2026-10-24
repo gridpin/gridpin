@@ -20701,12 +20701,26 @@ mod tests {
 
     #[test]
     fn region_postal_live_us_pack_parses_city_state_zip_tail() {
-        // The generated pack rules/us/city_tail.tsv as the sheet carries it (class 23).
-        let tsv = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../rules/us/city_tail.tsv"
-        ))
-        .unwrap();
+        // The generated pack rules/us/city_tail.tsv as the sheet carries it (class 23). The rules tree is
+        // not part of the public export, so the pack is inlined; where the file exists it must match.
+        let tsv: String = [
+            "# Generated United States additions from us_overlay.json.\n",
+            "enabled\t1\n",
+            "forms\tcomma region_postal\n",
+            "homonym_prominence\t1\n",
+            "junk_tail\tnear next behind opposite across beside tel phone fax suite ste apt unit floor room rm bldg basement\n",
+            "postal_digits\t5\n",
+            "postal_extension\t4\n",
+            "postal_split\t5\n",
+            "region_names\talabama=AL;alaska=AK;arizona=AZ;arkansas=AR;california=CA;colorado=CO;connecticut=CT;delaware=DE;florida=FL;georgia=GA;hawaii=HI;idaho=ID;illinois=IL;indiana=IN;iowa=IA;kansas=KS;kentucky=KY;louisiana=LA;maine=ME;maryland=MD;massachusetts=MA;michigan=MI;minnesota=MN;mississippi=MS;missouri=MO;montana=MT;nebraska=NE;nevada=NV;new hampshire=NH;new jersey=NJ;new mexico=NM;new york=NY;north carolina=NC;north dakota=ND;ohio=OH;oklahoma=OK;oregon=OR;pennsylvania=PA;rhode island=RI;south carolina=SC;south dakota=SD;tennessee=TN;texas=TX;utah=UT;vermont=VT;virginia=VA;washington=WA;west virginia=WV;wisconsin=WI;wyoming=WY;district of columbia=DC\n",
+            "regions\tAK AL AR AZ CA CO CT DC DE FL GA HI IA ID IL IN KS KY LA MA MD ME MI MN MO MS MT NC ND NE NH NJ NM NV NY OH OK OR PA RI SC SD TN TX UT VA VT WA WI WV WY\n",
+            "street_type_last\t1\n",
+        ]
+        .concat();
+        let pack = concat!(env!("CARGO_MANIFEST_DIR"), "/../rules/us/city_tail.tsv");
+        if let Ok(file) = std::fs::read_to_string(pack) {
+            assert_eq!(file, tsv, "inline copy of rules/us/city_tail.tsv is stale");
+        }
         let entries: Vec<(u8, String, String)> = tsv
             .lines()
             .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
