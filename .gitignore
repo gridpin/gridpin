@@ -18,3 +18,4 @@ duckdb-ext/duckdb/
 duckdb-ext/*.duckdb_extension
 .wrangler/
 public-bench-work/
+.venv-langchain/

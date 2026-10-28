@@ -135,6 +135,9 @@ jobs:
         run: make mc
       - name: Python bindings and DuckDB extension tests
         run: make test-py
+      - name: LangChain integration package tests (integrations/langchain)
+        # Its own venv: langchain-tests brings pytest plugins that must not load into .venv-py.
+        run: make langchain-venv test-langchain
 
   duckdb-cpp:
     runs-on: ubuntu-latest

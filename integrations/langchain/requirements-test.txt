@@ -1,0 +1,6 @@
+# Test environment for this package (make langchain-venv). Pinned: a new langchain-tests can add
+# standard tests, and a floating input can change the result between runs.
+langchain-core==1.7.0
+langchain-tests==1.1.9
+pytest==9.1.1
+gridpin==0.5.0

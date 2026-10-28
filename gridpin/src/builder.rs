@@ -1055,9 +1055,28 @@ mod tests {
         N.fetch_add(1, Ordering::Relaxed)
     }
 
+    // One fresh directory per test process. Keyed by pid alone, a later run that got a reused pid wrote into a
+    // directory still holding an earlier run's files (62 such directories, 154 files each, on 24.10.2026); one
+    // fixture failed once inside prepublish and passed on rerun. The start time makes the name unique per run.
+    fn builder_test_dir() -> std::path::PathBuf {
+        static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let dir = std::env::temp_dir().join(format!(
+                "gridpin-builder-test-{}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&dir).expect("fresh builder test directory");
+            dir
+        })
+        .clone()
+    }
+
     fn build_csv(rows: &str) -> Result<std::path::PathBuf> {
-        let dir = std::env::temp_dir().join(format!("gridpin-builder-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir)?;
+        let dir = builder_test_dir();
         let tag = tag_of(rows);
         let src = dir.join(format!("in-{tag}.csv"));
         let out = dir.join(format!("out-{tag}.bin"));
@@ -1984,8 +2003,7 @@ mod tests {
     }
 
     fn build_csv_meta(rows: &str, country: &str, layer: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("gridpin-builder-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = builder_test_dir();
         let tag = format!("{country}-{layer}-{}", tag_of(rows));
         let src = dir.join(format!("in-{tag}.csv"));
         let out = dir.join(format!("out-{tag}.bin"));

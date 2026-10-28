@@ -12,7 +12,7 @@ GEONAMES_US=data/geonames_us.txt
 # All recipes are phony (not files). Without this, a file named like a target (e.g. `smoke`)
 # in the working dir makes `make` consider the target up to date and silently skip the recipe — which
 # let the release check skip its provenance verification.
-.PHONY: engine bindings duckdb-ext third-party-licenses fr nl it rs es br us de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb http public-bench-contract public-bench
+.PHONY: engine bindings duckdb-ext third-party-licenses fr nl it rs es br us de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb langchain-venv test-langchain http public-bench-contract public-bench
 
 engine:
 	cargo build --release --manifest-path gridpin/Cargo.toml
@@ -46,6 +46,19 @@ test-py: bindings mc
 	.venv-py/bin/python -m pytest gridpin/tests/ -q
 	# gridpin-mcp: sheet downloads and agent tools; the MCP wiring tests skip without the mcp SDK
 	.venv-py/bin/python -m pytest mcp/tests/ -q
+
+# langchain-gridpin (integrations/langchain) against the Monaco smoke sheet, in its own venv:
+# langchain-tests brings pytest plugins (asyncio, socket, recording) that must not load into
+# .venv-py. The venv uses the published gridpin engine wheel, as the package's users do.
+# -p no:benchmark: pytest-benchmark would leave a .benchmarks/ folder in code/ on every run.
+LANGCHAIN_PY := .venv-langchain/bin/python
+langchain-venv:
+	python3 -m venv .venv-langchain
+	$(LANGCHAIN_PY) -m pip install --quiet -r integrations/langchain/requirements-test.txt
+
+test-langchain: mc
+	test -x $(LANGCHAIN_PY) || { echo 'Run make langchain-venv first'; exit 1; }
+	GRIDPIN_TEST_SHEET=$$PWD/data/mc.bin $(LANGCHAIN_PY) -m pytest integrations/langchain/tests -q -p no:cacheprovider -p no:benchmark
 
 # DuckDB extension against the Monaco smoke sheet
 test-duckdb: bindings mc

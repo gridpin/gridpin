@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "langchain-gridpin"
+version = "0.1.0"
+description = "LangChain tools for offline geocoding with GridPin: addresses to coordinates and back from one local file per country, no API key"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["langchain", "geocoding", "geocoder", "offline", "reverse-geocoding", "gis", "tools", "ai-agents"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: GIS",
+]
+# gridpin-mcp brings the engine (gridpin) and the verified sheet downloader (gridpin-fetch).
+dependencies = ["langchain-core>=1.0,<2", "gridpin-mcp>=0.2,<0.3"]
+
+[project.urls]
+Homepage = "https://gridpin.dev"
+Documentation = "https://gridpin.dev/docs"
+Repository = "https://github.com/gridpin/gridpin"
+Issues = "https://github.com/gridpin/gridpin/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# The LangChain standard tests include async ones (pytest-asyncio comes with langchain-tests).
+asyncio_mode = "auto"
+
+[tool.setuptools.package-data]
+langchain_gridpin = ["py.typed"]
