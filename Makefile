@@ -12,7 +12,7 @@ GEONAMES_US=data/geonames_us.txt
 # All recipes are phony (not files). Without this, a file named like a target (e.g. `smoke`)
 # in the working dir makes `make` consider the target up to date and silently skip the recipe — which
 # let the release check skip its provenance verification.
-.PHONY: engine bindings duckdb-ext third-party-licenses fr nl it rs es br us de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb langchain-venv test-langchain http public-bench-contract public-bench
+.PHONY: engine bindings duckdb-ext third-party-licenses fr nl it rs es br us de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb langchain-venv test-langchain test-qgis qgis-plugin-zip http public-bench-contract public-bench
 
 engine:
 	cargo build --release --manifest-path gridpin/Cargo.toml
@@ -59,6 +59,16 @@ langchain-venv:
 test-langchain: mc
 	test -x $(LANGCHAIN_PY) || { echo 'Run make langchain-venv first'; exit 1; }
 	GRIDPIN_TEST_SHEET=$$PWD/data/mc.bin $(LANGCHAIN_PY) -m pytest integrations/langchain/tests -q -p no:cacheprovider -p no:benchmark
+
+# GridPin Geocoder for QGIS (integrations/qgis): tests inside the official QGIS images
+# (LTR and current release, pinned tags in the script), against the Monaco smoke sheet.
+test-qgis: mc
+	bash integrations/qgis/tests/run_in_docker.sh
+
+# The archive uploaded to plugins.qgis.org: the plugin folder only, no caches.
+qgis-plugin-zip:
+	cd integrations/qgis && zip -qrX -FS gridpin_geocoder.zip gridpin_geocoder -x '*/__pycache__/*' '*.pyc' '*/.DS_Store'
+	@ls -l integrations/qgis/gridpin_geocoder.zip
 
 # DuckDB extension against the Monaco smoke sheet
 test-duckdb: bindings mc

@@ -138,6 +138,8 @@ jobs:
       - name: LangChain integration package tests (integrations/langchain)
         # Its own venv: langchain-tests brings pytest plugins that must not load into .venv-py.
         run: make langchain-venv test-langchain
+      - name: QGIS plugin tests (integrations/qgis, QGIS LTR and current release in Docker)
+        run: make test-qgis
 
   duckdb-cpp:
     runs-on: ubuntu-latest

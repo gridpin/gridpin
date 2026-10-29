@@ -1,0 +1,2 @@
+gridpin==0.5.0
+pytest==9.1.1

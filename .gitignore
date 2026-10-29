@@ -19,3 +19,4 @@ duckdb-ext/*.duckdb_extension
 .wrangler/
 public-bench-work/
 .venv-langchain/
+integrations/qgis/gridpin_geocoder.zip
