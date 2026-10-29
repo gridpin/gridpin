@@ -1,9 +1,10 @@
 [general]
 name=GridPin Geocoder
 qgisMinimumVersion=3.44
+qgisMaximumVersion=4.99
 supportsQt6=True
 description=Offline geocoding: turn addresses into points with one local file per country, no API key.
-version=0.1.0
+version=0.1.1
 author=GridPin
 email=contact@gridpin.dev
 about=Geocodes an address field of any layer or table into points (Processing > GridPin), and finds an address from the locator bar with the prefix "gp". Everything runs on your machine from a country sheet downloaded once from dl.gridpin.dev and checked against the signed release; no query leaves the computer. Coverage is limited to the countries listed at https://gridpin.dev; addresses elsewhere get no result. Requires the gridpin Python package (Apache-2.0), which the QPIP plugin installs from requirements.txt; without QPIP run pip install "gridpin>=0.5,<0.6" in the QGIS Python. Sheet data: OpenStreetMap contributors (ODbL), Overture Maps and national open address sources, see https://gridpin.dev.
