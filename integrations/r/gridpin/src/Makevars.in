@@ -1,0 +1,22 @@
+# Generated into Makevars by ../configure. The Rust crate in rust/ builds the static library
+# libgridpin_ffi.a; gridpin.c is the .Call glue over its C interface (gridpin.h).
+TARGET_DIR = ./rust/target
+LIBDIR = $(TARGET_DIR)/@LIBSUBDIR@
+STATLIB = $(LIBDIR)/libgridpin_ffi.a
+PKG_LIBS = -L$(LIBDIR) -lgridpin_ffi @NATIVE_LIBS@
+
+all: $(SHLIB) rust_clean
+
+$(SHLIB): $(STATLIB)
+
+$(STATLIB):
+	if [ -f ./rust/vendor.tar.xz ]; then tar -xf ./rust/vendor.tar.xz -C ./rust && mkdir -p ./rust/.cargo && cp ./rust/vendor-config.toml ./rust/.cargo/config.toml; fi
+	# cargo reads .cargo/config.toml (the vendored sources) from the directory it runs in, so it runs in rust/.
+	cd ./rust && CARGO_HOME="$(CURDIR)/rust/.cargo-home" @CARGO@ build -j 2 --release @OFFLINE@ --lib @TARGET@ \
+		--target-dir target
+
+# The build tree is not installed and not kept in the package directory.
+rust_clean: $(SHLIB)
+	rm -Rf $(TARGET_DIR) ./rust/vendor ./rust/.cargo ./rust/.cargo-home
+
+.PHONY: all rust_clean

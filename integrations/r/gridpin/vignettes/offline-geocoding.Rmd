@@ -1,0 +1,89 @@
+---
+title: "Geocode an address file without the data leaving your machine"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Geocode an address file without the data leaving your machine}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+Patient addresses, customer lists and case files often cannot be sent to an online geocoding
+service. gridpin geocodes them on your computer: the address text is matched against a country
+file stored locally, and nothing about the addresses goes over the network.
+
+## What goes over the network, and when
+
+Exactly one thing: the country file, downloaded once by `gp_download()`. It is the same file
+for everyone, so the download says nothing about your data. You can fetch it in advance, on
+another machine, and copy it over; with `GRIDPIN_OFFLINE=1` set, gridpin refuses any download.
+Geocoding and reverse geocoding never use the network.
+
+```{r, eval = FALSE}
+library(gridpin)
+gp_sheets()          # countries, file sizes, what is already here
+gp_download("us")    # once; checked against the release checksums
+```
+
+The examples below use `tiny.bin`, a 1 KB file of six made-up addresses that ships with the
+package, so they run anywhere. With a real country, pass its code (`"us"`) instead.
+
+```{r}
+library(gridpin)
+sheet <- system.file("extdata", "tiny.bin", package = "gridpin")
+```
+
+## From a file of addresses to coordinates
+
+```{r}
+addresses <- data.frame(
+  id = 1:4,
+  address = c("3 Main Street, Springfield", "10 Oak Avenue, Springfield",
+              "Main Street, Shelbyville", "99 Nowhere Road")
+)
+geocoded <- gp_geocode_df(addresses, "address", sheet)
+geocoded[, c("id", "gp_precision", "gp_lat", "gp_lon", "gp_street", "gp_weak")]
+```
+
+Every input row stays, in order. An address that is not found keeps `NA` coordinates instead of
+a guess, so it can be counted and reviewed.
+
+## How good is each answer
+
+`gp_precision` says what was matched: `house` (the door), `interp` (placed between known
+numbers of the same street), `near`, `street` or `city`. `gp_weak` is `TRUE` when the answer
+should be checked before use: a town-level answer, a low confidence score, or a fuzzy street
+match. `weak` is about certainty, not about level: an exact street match is not weak, but it is
+still a street, not a door. When the analysis needs the door, keep answers that are at house
+level and not weak, and send the rest to manual review:
+
+```{r}
+keep <- geocoded$gp_precision %in% c("house", "interp") & !geocoded$gp_weak
+review <- geocoded[!keep, c("id", "address", "gp_precision", "gp_weak")]
+review
+```
+
+How often each level lands within a given distance depends on the country and on how the
+addresses are written; check a sample of your own addresses against points you trust before
+relying on a threshold.
+
+## A map with sf
+
+```{r, eval = requireNamespace("sf", quietly = TRUE)}
+points <- gp_geocode(addresses$address, sheet, sf = TRUE)
+points[, c("query", "precision")]
+```
+
+Rows without coordinates become empty points, so the table keeps its length.
+
+## For the methods section
+
+```{r}
+gp_version(sheet)
+```
+
+Report the package version, the sheet release and, for a real country, the file size; the
+release names the exact files, and their checksums are published with it.

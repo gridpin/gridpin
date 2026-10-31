@@ -13,6 +13,20 @@ __pycache__/
 eval/control/*.csv
 data/wof/
 duckdb-ext/target/
+gridpin-ffi/target/
+.r-lib
+.r-lib-src/
+# R package: the 1 KB test sheet ships with it; build leftovers do not
+!integrations/r/gridpin/inst/extdata/tiny.bin
+integrations/r/gridpin/src/Makevars
+integrations/r/gridpin/src/Makevars.win
+integrations/r/gridpin/src/*.o
+integrations/r/gridpin/src/*.so
+integrations/r/gridpin/src/*.dll
+integrations/r/gridpin/src/rust/target/
+integrations/r/gridpin/src/rust/vendor/
+integrations/r/gridpin/src/rust/vendor.tar.xz
+integrations/r/gridpin/inst/AUTHORS
 duckdb-ext/build/
 duckdb-ext/duckdb/
 duckdb-ext/*.duckdb_extension

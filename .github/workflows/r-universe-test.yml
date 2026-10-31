@@ -1,0 +1,25 @@
+name: R-universe test
+
+# Builds and checks the R package in integrations/r/gridpin with the workflow R-universe itself runs:
+# source package and vignettes, then binaries and R CMD check on Linux, Windows and macOS for several R
+# versions. A green run here is the evidence that the universe will build the package.
+on:
+  push:
+    paths:
+      - "integrations/r/**"
+      - "gridpin-ffi/**"
+      - ".github/workflows/r-universe-test.yml"
+  pull_request:
+    paths:
+      - "integrations/r/**"
+      - "gridpin-ffi/**"
+      - ".github/workflows/r-universe-test.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: R-universe testing
+    uses: r-universe-org/workflows/.github/workflows/build.yml@9b6b259067f8fccb8e79c2109799a45f24b3e74f # v3, 2026-10-29
+    with:
+      universe: ${{ github.repository_owner }}
+      subdir: integrations/r/gridpin

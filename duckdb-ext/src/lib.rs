@@ -1,9 +1,13 @@
-//! Rust engine and state behind the DuckDB C++ registration layer.
+//! The narrow C interface to the GridPin engine: one state, batch calls, JSON answers.
+//!
+//! One interface serves every host that is not Rust or Python: the DuckDB extension
+//! (`duckdb-ext`) and the R package link this crate as a static library. Panics never cross
+//! the boundary; errors come back as text in the response.
 use std::error::Error;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
-mod ffi;
+pub mod ffi;
 
 #[derive(Default)]
 struct Indexes {
@@ -36,7 +40,7 @@ fn single_path(
 }
 
 #[derive(Clone)]
-pub(crate) struct Shared(Arc<RwLock<Indexes>>);
+pub struct Shared(Arc<RwLock<Indexes>>);
 
 impl Shared {
     // A poisoned lock only means another thread panicked mid-update; the state is
@@ -143,9 +147,12 @@ fn reset(shared: &Shared, len: usize) -> Result<Vec<Option<String>>, Box<dyn Err
     Ok(vec![Some("index unloaded".into()); len.max(1)])
 }
 
+/// `k = None` is the SQL form: the best hit as one JSON object, `{}` when nothing matches.
+/// `k = Some(n)` returns a JSON array of up to `n` hits for every row (`[]` when nothing matches).
 fn geocode(
     shared: &Shared,
     queries: &[Option<String>],
+    k: Option<usize>,
 ) -> Result<Vec<Option<String>>, Box<dyn Error>> {
     let guard = shared.read();
     let idx = guard
@@ -157,11 +164,9 @@ fn geocode(
         .map(|q| {
             q.as_ref()
                 .map(|q| {
-                    let hits = gridpin::query::query_cascade(idx, guard.poi.as_ref(), q, 1);
-                    match hits.first() {
-                        Some(h) => serde_json::to_string(h).map_err(Into::into),
-                        None => Ok("{}".into()),
-                    }
+                    let hits =
+                        gridpin::query::query_cascade(idx, guard.poi.as_ref(), q, k.unwrap_or(1));
+                    answer(&hits, k)
                 })
                 .transpose()
         })
@@ -171,6 +176,7 @@ fn geocode(
 fn reverse(
     shared: &Shared,
     coordinates: &[Option<(f64, f64)>],
+    k: Option<usize>,
 ) -> Result<Vec<Option<String>>, Box<dyn Error>> {
     let guard = shared.read();
     let idx = guard
@@ -182,15 +188,36 @@ fn reverse(
         .map(|point| {
             point
                 .map(|(lat, lon)| {
-                    let hits = idx.try_reverse(lat, lon, 1)?;
-                    match hits.first() {
-                        Some(h) => serde_json::to_string(h).map_err(Into::into),
-                        None => Ok("{}".into()),
-                    }
+                    let hits = idx.try_reverse(lat, lon, k.unwrap_or(1))?;
+                    answer(&hits, k)
                 })
                 .transpose()
         })
         .collect()
+}
+
+fn answer(hits: &[gridpin::query::Hit], k: Option<usize>) -> Result<String, Box<dyn Error>> {
+    match k {
+        // The k form carries `weak`: the engine's own verdict that an answer needs a check before
+        // use (`hit_is_weak`, the rule of the POI cascade). The SQL form stays as it shipped.
+        Some(_) => {
+            let rows = hits
+                .iter()
+                .map(|h| {
+                    let mut row = serde_json::to_value(h)?;
+                    if let Some(fields) = row.as_object_mut() {
+                        fields.insert("weak".into(), gridpin::query::hit_is_weak(h).into());
+                    }
+                    Ok(row)
+                })
+                .collect::<Result<Vec<_>, serde_json::Error>>()?;
+            serde_json::to_string(&rows).map_err(Into::into)
+        }
+        None => match hits.first() {
+            Some(h) => serde_json::to_string(h).map_err(Into::into),
+            None => Ok("{}".into()),
+        },
+    }
 }
 
 #[cfg(test)]

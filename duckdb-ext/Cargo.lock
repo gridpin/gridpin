@@ -267,6 +267,7 @@ name = "gridpin_ext"
 version = "0.6.0"
 dependencies = [
  "gridpin",
+ "serde",
  "serde_json",
 ]
 

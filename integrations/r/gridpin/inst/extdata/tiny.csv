@@ -1,0 +1,7 @@
+nom_voie_norm,code_insee,nom_commune_norm,code_postal,numero,rep,lon,lat,nom_voie,nom_commune
+main street,001,springfield,10001,1,,-73.990,40.750,Main Street,Springfield
+main street,001,springfield,10001,3,,-73.9902,40.7502,Main Street,Springfield
+main street,001,springfield,10001,5,,-73.9904,40.7504,Main Street,Springfield
+main street,002,shelbyville,10002,1,,-74.100,40.650,Main Street,Shelbyville
+main street,002,shelbyville,10002,3,,-74.1002,40.6502,Main Street,Shelbyville
+oak avenue,001,springfield,10001,10,,-73.980,40.760,Oak Avenue,Springfield

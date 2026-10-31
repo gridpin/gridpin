@@ -1,7 +1,7 @@
 -- Geocode a table of order addresses with the gridpin DuckDB extension.
 -- Run: duckdb < orders.sql   (adjust the country file path below first)
 
--- From DuckDB's community catalog. It serves the current release on DuckDB 1.5.6 or newer;
+-- From DuckDB's community catalog. It serves the current release on DuckDB 2.0.0 or newer;
 -- older DuckDB versions install an older build. Check what you got with
 -- SELECT extension_version FROM duckdb_extensions() WHERE extension_name = 'gridpin_ext';
 INSTALL gridpin_ext FROM community;

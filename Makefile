@@ -26,13 +26,16 @@ engine:
 RUST_LINT_TARGET_DIR ?= $(CURDIR)/gridpin/target/ci-lint
 lint-fmt:
 	cargo fmt --check --manifest-path gridpin/Cargo.toml && \
-	cargo fmt --check --manifest-path duckdb-ext/Cargo.toml
+	cargo fmt --check --manifest-path duckdb-ext/Cargo.toml && \
+	cargo fmt --check --manifest-path gridpin-ffi/Cargo.toml
 
 lint-clippy:
 	CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$(RUST_LINT_TARGET_DIR)" \
 		cargo clippy --manifest-path gridpin/Cargo.toml --all-targets --all-features -- -D warnings && \
 	CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$(RUST_LINT_TARGET_DIR)" \
-		cargo clippy --manifest-path duckdb-ext/Cargo.toml --all-targets -- -D warnings
+		cargo clippy --manifest-path duckdb-ext/Cargo.toml --all-targets -- -D warnings && \
+	CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$(RUST_LINT_TARGET_DIR)" \
+		cargo clippy --manifest-path gridpin-ffi/Cargo.toml --all-targets -- -D warnings
 
 # Everything runnable without private data: Rust unit tests, worker tests, Python
 # bindings and DuckDB extension (against the Monaco smoke sheet). The full quality
@@ -40,6 +43,7 @@ lint-clippy:
 test: engine
 	cargo test --release --manifest-path gridpin/Cargo.toml
 	cargo test --release --manifest-path duckdb-ext/Cargo.toml
+	cargo test --release --manifest-path gridpin-ffi/Cargo.toml
 	$(MAKE) test-py test-duckdb
 
 # Python bindings against the Monaco smoke sheet (build it first: make mc)

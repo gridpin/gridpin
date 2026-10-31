@@ -77,7 +77,7 @@ it the same way as the CLI archive.
 
 **DuckDB** — `INSTALL gridpin_ext FROM community;` then `LOAD gridpin_ext;`. The community
 catalog builds and signs the extension itself, so that trust root is DuckDB's rather than ours.
-It builds the current release only for the current DuckDB: that takes **DuckDB 1.5.6 or newer**;
+It builds the current release only for the current DuckDB: that takes **DuckDB 2.0.0 or newer**;
 older DuckDB versions install an older build. Check what you got with
 `SELECT extension_version FROM duckdb_extensions() WHERE extension_name = 'gridpin_ext';`.
 When the catalog is unreachable, or for the current release on DuckDB 1.5.5, download

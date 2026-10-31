@@ -1,0 +1,3 @@
+#!/bin/sh
+# Windows (Rtools): the same checks as ./configure, then src/Makevars.win for the GNU target.
+exec sh ./configure --windows

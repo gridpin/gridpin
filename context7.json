@@ -8,7 +8,7 @@
     "One sheet holds one country: open `gridpin.Geocoder(path)` for the country of the address; other countries are not covered, and Germany has no Bavaria.",
     "Check `precision` in every result: `house` is a door-level match, `street` and `city` are approximate; reverse geocoding returns `distance_m` and is approximate.",
     "For many addresses use `Geocoder.geocode_many(queries, k)` in Python or `gridpin batch` in the CLI instead of a loop of single calls.",
-    "In DuckDB 1.5.6+ (older DuckDB versions install an older build): `INSTALL gridpin_ext FROM community; LOAD gridpin_ext;`, then `SELECT gridpin_load(path)` once per session; one country per session, `SELECT gridpin_reset()` to switch.",
+    "In DuckDB 2.0.0+ (older DuckDB versions install an older build): `INSTALL gridpin_ext FROM community; LOAD gridpin_ext;`, then `SELECT gridpin_load(path)` once per session; one country per session, `SELECT gridpin_reset()` to switch.",
     "Geocoding never uses the network; only downloading a sheet does."
   ]
 }

@@ -1,0 +1,51 @@
+#!/bin/sh
+# Finds cargo and rustc (on PATH or in ~/.cargo/bin), reports their versions and writes
+# src/Makevars. The package is built from the Rust sources in src/rust; nothing is downloaded
+# when src/rust/vendor.tar.xz is present (the CRAN source package carries it).
+RUST_MIN=1.87
+
+CARGO=$(command -v cargo 2>/dev/null)
+RUSTC=$(command -v rustc 2>/dev/null)
+if [ -z "$CARGO" ] && [ -x "$HOME/.cargo/bin/cargo" ]; then CARGO="$HOME/.cargo/bin/cargo"; fi
+if [ -z "$RUSTC" ] && [ -x "$HOME/.cargo/bin/rustc" ]; then RUSTC="$HOME/.cargo/bin/rustc"; fi
+if [ -z "$CARGO" ] || [ -z "$RUSTC" ]; then
+  cat >&2 <<MSG
+-------------------------------------------------------------------
+gridpin is built from Rust sources and needs cargo and rustc >= $RUST_MIN.
+Install them with your package manager, for example
+    apt-get install cargo rustc        dnf install cargo
+or from https://rustup.rs/ , then install gridpin again.
+Binary packages that need no Rust: https://gridpin.r-universe.dev
+-------------------------------------------------------------------
+MSG
+  exit 1
+fi
+
+RUST_VERSION=$("$RUSTC" --version | sed -n 's/^rustc \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
+echo "using $("$CARGO" --version) and $("$RUSTC" --version)"
+OLDEST=$(printf '%s\n%s\n' "$RUST_MIN" "$RUST_VERSION" | sort -t. -k1,1n -k2,2n | head -n 1)
+if [ "$OLDEST" != "$RUST_MIN" ]; then
+  echo "gridpin needs rustc >= $RUST_MIN, found $RUST_VERSION; update with rustup or your package manager" >&2
+  exit 1
+fi
+
+if [ -f src/rust/vendor.tar.xz ]; then OFFLINE="--offline"; else OFFLINE=""; fi
+# configure.win runs this script with --windows: Rtools links with the GNU toolchain, so the Rust target is
+# x86_64-pc-windows-gnu, the library lands in its own target folder, and R reads src/Makevars.win.
+if [ "$1" = "--windows" ]; then
+  TARGET="--target x86_64-pc-windows-gnu"
+  LIBSUBDIR="x86_64-pc-windows-gnu/release"
+  NATIVE_LIBS="-lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll"
+  OUT=src/Makevars.win
+else
+  TARGET=""
+  LIBSUBDIR="release"
+  case "$(uname -s)" in
+    Darwin) NATIVE_LIBS="-liconv" ;;
+    *) NATIVE_LIBS="-lpthread -ldl -lm" ;;
+  esac
+  OUT=src/Makevars
+fi
+
+sed -e "s|@CARGO@|$CARGO|" -e "s|@OFFLINE@|$OFFLINE|" -e "s|@NATIVE_LIBS@|$NATIVE_LIBS|" \
+  -e "s|@TARGET@|$TARGET|" -e "s|@LIBSUBDIR@|$LIBSUBDIR|" src/Makevars.in > "$OUT"

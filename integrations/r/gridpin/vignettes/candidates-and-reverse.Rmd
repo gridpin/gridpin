@@ -1,0 +1,50 @@
+---
+title: "Several candidates, and reverse geocoding"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Several candidates, and reverse geocoding}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(gridpin)
+sheet <- system.file("extdata", "tiny.bin", package = "gridpin")
+```
+
+## When the address is ambiguous
+
+An address without a town can match the same street in several places. With `k` greater than
+one, `gp_geocode()` returns a long table: one row per candidate, numbered by `rank`.
+
+```{r}
+gp_geocode("1 Main Street", sheet, k = 3)[, c("query", "rank", "commune", "precision", "weak")]
+```
+
+With `k = 1` (the default) you get the best candidate only, one row per address. The best
+candidate of a `k = 3` call is not always the same as the single answer of a `k = 1` call:
+keep `k = 1` when you want one answer per address, and use `k > 1` to show alternatives to a
+person who chooses.
+
+## From coordinates to the nearest address
+
+```{r}
+gp_reverse(c(40.7504, 40.7601), c(-73.9904, -73.9801), sheet)[,
+  c("point", "housenumber", "street", "distance_m")]
+```
+
+Streets without house points are indexed by their centre, so the nearest answer can be some
+distance away: `distance_m` says how far. Missing coordinates (`NA`) give a row without an
+answer.
+
+## Opening and closing
+
+`gp_open()` maps the file into memory once; later calls with the same file reuse it, and several
+R sessions share the pages. `gp_close()` releases it.
+
+```{r}
+g <- gp_open(sheet)
+g
+gp_close(g)
+```
