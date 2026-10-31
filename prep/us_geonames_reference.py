@@ -69,7 +69,9 @@ def latin_alternates(field, name, asciiname):
     return (related + other)[:MAX_ALTERNATES]
 
 
-def build(dump=DUMP):
+def build(dump=DUMP, regions=REGIONS, admin1_map=None):
+    """`regions`: the admin1 codes of the contour; `admin1_map` translates the dump's codes first
+    (Canada: "08" -> "ON"), so the reference carries the sheet's region codes."""
     states, places = {}, []
     rows, newest = 0, ""
     with open(dump, encoding="utf-8") as handle:
@@ -80,7 +82,8 @@ def build(dump=DUMP):
                 raise ValueError(f"{dump.name}:{rows}: expected 19 columns, got {len(cols)}")
             newest = max(newest, cols[18])
             fclass, fcode, admin1 = cols[6], cols[7], cols[10]
-            if admin1 not in REGIONS:
+            admin1 = (admin1_map or {}).get(admin1, admin1)
+            if admin1 not in regions:
                 continue
             if fcode == "ADM1":
                 states[admin1] = cols[1]
@@ -99,8 +102,8 @@ def build(dump=DUMP):
                 "lon": float(cols[5]),
                 "alternates": latin_alternates(cols[3], cols[1], cols[2]),
             })
-    if set(states) != REGIONS:
-        raise ValueError(f"ADM1 rows missing for: {sorted(REGIONS - set(states))}")
+    if set(states) != regions:
+        raise ValueError(f"ADM1 rows missing for: {sorted(regions - set(states))}")
     places.sort(key=lambda p: (p["admin1"], p["asciiname"], p["id"]))
     return {
         "source": {

@@ -184,7 +184,7 @@ def attestation_problems(directory: pathlib.Path, listed: dict[str, str],
     return problems
 
 
-CURRENT_RELEASE = "v0.5.0"
+CURRENT_RELEASE = "v0.6.0"
 # Changed only by the publication step, together with the site country row.
 PUBLISHED_RELEASE = "v0.5.0"
 # One catalogue for the standalone verifier and the private release tools.
@@ -208,6 +208,9 @@ RELEASE_COMPOSITIONS["v0.4.0"] = RELEASE_COMPOSITIONS["v0.3.0"] + (
 )
 RELEASE_COMPOSITIONS["v0.5.0"] = RELEASE_COMPOSITIONS["v0.4.0"] + (
     ("usa.bin", "us.bin", "us", "addresses", "us"),
+)
+RELEASE_COMPOSITIONS["v0.6.0"] = RELEASE_COMPOSITIONS["v0.5.0"] + (
+    ("canada.bin", "ca.bin", "ca", "addresses", "ca"),
 )
 LEGACY_RELEASE_BINDINGS = {
     "inputs-2026-08-15.manifest.json": "v0.1.0",

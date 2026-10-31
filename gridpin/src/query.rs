@@ -422,6 +422,9 @@ struct CityTail {
     /// The region the tail names, as the code the sheet lists in `regions` (None when the tail
     /// names a region the sheet knows only by name, without "name=CODE").
     region: Option<String>,
+    /// The region segment as written, normalized ("quebec" for "(Québec)"): a region word that
+    /// also names a commune (Québec City) is told from the city named in front of it.
+    region_word: String,
 }
 
 /// The segment without the country words that close it ("NV 89146 USA", "MD 20852 U.S."):
@@ -443,11 +446,18 @@ fn strip_trailing_country_words(segment: &str) -> &str {
 /// A tail segment names the region: a code from `regions` (whitespace-separated) or, when the
 /// sheet lists `region_names` (semicolon-separated, any case, e.g. "new york;washington"), a
 /// full name — compared word by word, case-insensitively.
-fn region_matches(cfg: &HashMap<String, String>, segment: &str) -> bool {
-    let words: Vec<String> = segment
+/// The words of a tail segment as `region_names` spells them: lowercase, accents and hyphens
+/// gone ("Québec", "Île-du-Prince-Édouard" -> "quebec", "ile du prince edouard"; Canada, 29.10.2026:
+/// an ASCII-only lowercase never matched an accented name).
+fn region_segment_words(segment: &str) -> Vec<String> {
+    normalize(segment)
         .split_whitespace()
-        .map(|w| w.to_ascii_lowercase())
-        .collect();
+        .map(str::to_owned)
+        .collect()
+}
+
+fn region_matches(cfg: &HashMap<String, String>, segment: &str) -> bool {
+    let words = region_segment_words(segment);
     if words.is_empty() {
         return false;
     }
@@ -551,6 +561,38 @@ fn postal_segment<'a>(cfg: &HashMap<String, String>, segment: &'a str) -> Option
     }
 }
 
+/// A postal code of the sheet's `postal_pattern` (city_tail): `A` a letter, `9` a digit, a space
+/// optional in the query ("A9A 9A9": Canada "K1A 0B1", "k1a0b1"). Data-driven like `postal_digits`;
+/// a sheet without the key has no such codes. Such a code is recognised and set aside only: the
+/// sheet keeps no numeric postcode for it (prep/overture.py POSTAL_DIGITS_SQL, Canada 28.10.2026).
+fn pattern_postal(cfg: &HashMap<String, String>, text: &str) -> bool {
+    let Some(pattern) = cfg.get("postal_pattern") else {
+        return false;
+    };
+    let shape: Vec<u8> = pattern.bytes().filter(|b| *b != b' ').collect();
+    let given: Vec<u8> = text.bytes().filter(|b| *b != b' ').collect();
+    !shape.is_empty()
+        && shape.len() == given.len()
+        && shape.iter().zip(&given).all(|(want, got)| match want {
+            b'A' => got.is_ascii_alphabetic(),
+            b'9' => got.is_ascii_digit(),
+            _ => false,
+        })
+}
+
+/// How many trailing words of `words` spell a `postal_pattern` code: two ("M5X 1A9"), one
+/// ("M5X1A9"), or none.
+fn pattern_postal_tail(cfg: &HashMap<String, String>, words: &[&str]) -> usize {
+    let n = words.len();
+    if n >= 2 && pattern_postal(cfg, &format!("{} {}", words[n - 2], words[n - 1])) {
+        2
+    } else if n >= 1 && pattern_postal(cfg, words[n - 1]) {
+        1
+    } else {
+        0
+    }
+}
+
 /// One `region_names` entry is "name" or "name=CODE"; these are the lowercase words of the name.
 fn region_name_words(entry: &str) -> Vec<String> {
     entry
@@ -575,10 +617,7 @@ fn region_code(cfg: &HashMap<String, String>, segment: &str) -> Option<String> {
     {
         return Some(trimmed.to_ascii_uppercase());
     }
-    let words: Vec<String> = trimmed
-        .split_whitespace()
-        .map(str::to_ascii_lowercase)
-        .collect();
+    let words = region_segment_words(trimmed);
     cfg.get("region_names")?.split(';').find_map(|entry| {
         let (_, code) = entry.split_once('=')?;
         (region_name_words(entry) == words).then(|| code.trim().to_ascii_uppercase())
@@ -588,8 +627,29 @@ fn region_code(cfg: &HashMap<String, String>, segment: &str) -> Option<String> {
 /// Where the sheet puts a city of this name inside this region: every "REGION lat lon" entry of
 /// `commune_regions` for the normalized city whose REGION is the code. Empty when the sheet
 /// carries no table, no such city, or no such city in that region — then nothing is held.
+/// The answer stands outside the region the query names, by the sheet's `commune_regions` table:
+/// the table knows the town only in other regions ("st pascal, ON": Saint-Pascal is in Québec),
+/// or the answer is farther than COMMUNE_REGION_RADIUS_KM from every point of the town in the
+/// named region. False when the table does not know the town at all.
+fn town_outside_region(hit: &Hit, city: &str, region: &str) -> bool {
+    let table = &crate::rules::rules().commune_regions;
+    if !table.contains_key(city)
+        && !saint_commune_name(city).is_some_and(|full| table.contains_key(&full))
+    {
+        return false;
+    }
+    !commune_region_points(city, region)
+        .iter()
+        .any(|&(lat, lon)| Index::dist_km(lat, lon, hit.lat, hit.lon) <= COMMUNE_REGION_RADIUS_KM)
+}
+
 fn commune_region_points(city: &str, region: &str) -> Vec<(f64, f64)> {
-    let Some(entries) = crate::rules::rules().commune_regions.get(city) else {
+    let table = &crate::rules::rules().commune_regions;
+    // "st leonard, QC": the table names the town as the sheet does (see `saint_commune_name`)
+    let Some(entries) = table
+        .get(city)
+        .or_else(|| saint_commune_name(city).and_then(|full| table.get(&full)))
+    else {
         return Vec::new();
     };
     entries
@@ -718,6 +778,16 @@ fn split_region_postal<'a>(
     };
     let _ = regions;
     let trimmed = segment.trim();
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    let pattern_words = pattern_postal_tail(cfg, &words);
+    if pattern_words > 0 && pattern_words < words.len() {
+        // "ON M5X 1A9": the code is recognised and set aside; it is no key of the sheet.
+        let mut region = trimmed;
+        for _ in 0..pattern_words {
+            region = region.rsplit_once(' ')?.0.trim_end();
+        }
+        return region_matches(cfg, region).then_some((region, None));
+    }
     let looks_postal = |w: &str| w.chars().next().is_some_and(|c| c.is_ascii_digit());
     let (region, postal) = match trimmed.rsplit_once(' ') {
         Some((head, last)) if looks_postal(last) => (head.trim(), Some(last)),
@@ -761,7 +831,12 @@ fn glued_city_region(
         return None;
     }
     let looks_postal = |w: &str| w.chars().next().is_some_and(|c| c.is_ascii_digit());
-    let (tail_len, region_postal) = if looks_postal(words[words.len() - 1]) && words.len() >= 3 {
+    let pattern_words = pattern_postal_tail(cfg, &words);
+    let (tail_len, region_postal) = if pattern_words > 0 && words.len() >= pattern_words + 2 {
+        // "Toronto ON M5X 1A9": region word plus the one- or two-word code
+        let take = pattern_words + 1;
+        (take, words[words.len() - take..].join(" "))
+    } else if looks_postal(words[words.len() - 1]) && words.len() >= 3 {
         (2, words[words.len() - 2..].join(" "))
     } else {
         (1, words[words.len() - 1].to_owned())
@@ -828,6 +903,220 @@ fn numbered_word(tok: &str) -> bool {
         && matches!(&w[digits.len()..], "" | "st" | "nd" | "rd" | "th")
 }
 
+/// The query with the place written first moved behind the address, on a sheet with city_tail
+/// `city_first` = 1. Three forms, tried in order, each only when the query opens with no digit:
+/// "<place> (<address>) <rest>" with the address opening with a digit, "<place> - <address>",
+/// and "<place>[,] <number> <words>" where the place is letters only. The result is
+/// "<address>, <place>[, <rest>]". None for any other query.
+fn city_first_reordered(raw: &str) -> Option<String> {
+    if crate::rules::rules()
+        .city_tail
+        .get("city_first")
+        .map(String::as_str)
+        != Some("1")
+    {
+        return None;
+    }
+    let raw = raw.trim();
+    if raw.chars().next().is_none_or(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let clean = |s: &str| {
+        s.trim_matches(|c: char| c == ',' || c.is_whitespace())
+            .to_owned()
+    };
+    let join = |parts: [String; 3]| {
+        parts
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    // "<place> (<address>) <rest>"
+    if let Some(open) = raw.find('(') {
+        if let Some(close) = raw[open..].find(')').map(|c| open + c) {
+            let inner = raw[open + 1..close].trim();
+            if inner.starts_with(|c: char| c.is_ascii_digit()) && !raw[..open].contains('(') {
+                return Some(join([
+                    clean(inner),
+                    clean(&raw[..open]),
+                    clean(&raw[close + 1..]),
+                ]));
+            }
+        }
+    }
+    let letters_only = |s: &str| {
+        !s.trim().is_empty()
+            && s.chars().all(|c| {
+                c.is_alphabetic() || c.is_whitespace() || matches!(c, ',' | '.' | '\'' | '-')
+            })
+    };
+    // "<place> - <address>"
+    if let Some(dash) = raw.find(" - ") {
+        let (head, addr) = (&raw[..dash], raw[dash + 3..].trim());
+        if !head.chars().any(|c| c.is_ascii_digit())
+            && addr.starts_with(|c: char| c.is_ascii_digit())
+        {
+            return Some(join([clean(addr), clean(head), String::new()]));
+        }
+    }
+    // "<place>[,] <number> <words>"; "<number> - <words>" is the same number ("Surrey, BC 19540 - 94
+    // Avenue"), and a postal code of the sheet's pattern closing the address goes behind the place
+    // ("Calgary AB 5111 47 St NE T3J 0V4"), where the tail grammar sets it aside.
+    let start = raw.find(|c: char| c.is_ascii_digit())?;
+    let (head, addr) = (&raw[..start], &raw[start..]);
+    let mut words: Vec<&str> = addr.split_whitespace().collect();
+    // ... but not after a street type ("Highway 7 - 1200 Airport Blvd" names two roads)
+    let head_is_street = head
+        .split_whitespace()
+        .last()
+        .is_some_and(|w| is_street_type_word(&normalize(w)));
+    if words.len() >= 3
+        && words[1] == "-"
+        && !head_is_street
+        && words[2].starts_with(|c: char| c.is_ascii_alphanumeric())
+    {
+        words.remove(1);
+    }
+    let cfg = &crate::rules::rules().city_tail;
+    let postal_words = pattern_postal_tail(cfg, &words);
+    let postal = if postal_words == 0 {
+        String::new()
+    } else if postal_words + 2 <= words.len() {
+        words.split_off(words.len() - postal_words).join(" ")
+    } else {
+        return None; // a number and a postal code, no street
+    };
+    let addr = words.join(" ");
+    if !letters_only(head)
+        || addr.contains(" - ")
+        || addr.contains('(')
+        || words.len() < 2
+        || words[1] == "-"
+        || !words[0].chars().all(|c| c.is_ascii_alphanumeric())
+        || !head.ends_with([' ', ','])
+    {
+        return None;
+    }
+    Some(join([clean(&addr), clean(head), postal]))
+}
+
+/// How far, in house numbers, a neighbour may stand from the number written and still settle the
+/// city's own reading.
+const NEIGHBOUR_NUMBER_SPAN: u64 = 100;
+
+/// A neighbour (`near`) answer whose number differs from the query's leading house number by more
+/// than `NEIGHBOUR_NUMBER_SPAN`. False for any other precision, or when either number is missing.
+fn neighbour_far_from_written(hit: &Hit, raw: &str) -> bool {
+    let leading = |s: &str| -> Option<u64> {
+        let digits: String = s
+            .trim_start()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits.parse().ok()
+    };
+    if hit.precision != "near" {
+        return false;
+    }
+    match (leading(raw), hit.housenumber.as_deref().and_then(leading)) {
+        (Some(written), Some(got)) => written.abs_diff(got) > NEIGHBOUR_NUMBER_SPAN,
+        _ => false,
+    }
+}
+
+/// A city-first answer keeps the place written: an exact commune, or an exact street at a house, an
+/// interpolation or a neighbour within `CITY_FIRST_MERGED_KM` of one of the named city's points.
+fn city_first_keeps_place(hit: &Hit, city_points: &[(f64, f64)]) -> bool {
+    hit.flags.contains(&"commune_exact")
+        || (hit.flags.contains(&"street_exact")
+            && matches!(hit.precision, "house" | "interp" | "near")
+            && city_points.iter().any(|&(lat, lon)| {
+                Index::dist_km(lat, lon, hit.lat, hit.lon) <= CITY_FIRST_MERGED_KM
+            }))
+}
+
+/// How far from the named city's own point a city-first answer in another commune may stand
+/// (a merged city: Toronto's former municipalities reach about 25 km from its point).
+const CITY_FIRST_MERGED_KM: f64 = 30.0;
+
+/// How wide a bracket of two stored house numbers may be and still be interpolated: at most this
+/// many numbers apart and closer than this many kilometres. 12 numbers and 0.3 km by default
+/// (dense numbering); a sheet with sparser numbering widens both through city_tail
+/// `interp_max_gap` and `interp_max_km` (Canada, rural numbering: 400 and 2.0; 29.10.2026).
+fn interp_limits() -> (u32, f64) {
+    let cfg = &crate::rules::rules().city_tail;
+    let gap = cfg
+        .get("interp_max_gap")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(12);
+    let km = cfg
+        .get("interp_max_km")
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|km| km.is_finite() && *km > 0.0)
+        .unwrap_or(0.3);
+    (gap, km)
+}
+
+/// An answer on the street written, in the commune named, at a house, an interpolation or the
+/// nearest house.
+fn street_in_commune(hit: &Hit) -> bool {
+    hit.flags.contains(&"street_exact")
+        && hit.flags.contains(&"commune_exact")
+        && matches!(hit.precision, "house" | "interp" | "near")
+}
+
+/// The one quadrant answer to keep: of the readings whose top is the street in the named commune,
+/// the only one at a house; with no house, the only one at all. Two such readings are no answer.
+fn pick_quadrant(readings: Vec<Vec<(Hit, [f32; N_FEATS])>>) -> Option<Vec<(Hit, [f32; N_FEATS])>> {
+    let found: Vec<Vec<(Hit, [f32; N_FEATS])>> = readings
+        .into_iter()
+        .filter(|hits| hits.first().is_some_and(|(hit, _)| street_in_commune(hit)))
+        .collect();
+    let houses = found
+        .iter()
+        .filter(|hits| hits[0].0.precision == "house")
+        .count();
+    match (houses, found.len()) {
+        (1, _) => found
+            .into_iter()
+            .find(|hits| hits[0].0.precision == "house"),
+        (0, 1) => found.into_iter().next(),
+        _ => None,
+    }
+}
+
+/// The query once per quadrant of the sheet's city_tail `quadrant_suffixes`, the quadrant
+/// appended to the street segment. None when the sheet has no such key, the tail names no city,
+/// the street is not its own segment, or the street already carries a direction word.
+fn quadrant_variants(raw: &str) -> Vec<String> {
+    let cfg = &crate::rules::rules().city_tail;
+    let Some(quadrants) = cfg.get("quadrant_suffixes") else {
+        return Vec::new();
+    };
+    let Some(tail) = city_tail(raw) else {
+        return Vec::new();
+    };
+    let Some((street, rest)) = raw.split_once(',') else {
+        return Vec::new();
+    };
+    let words = normalize(street);
+    let words: Vec<&str> = words.split_whitespace().collect();
+    let directions = [
+        "n", "s", "e", "w", "ne", "nw", "se", "sw", "north", "south", "east", "west",
+    ];
+    if words.len() < 2
+        || words.iter().any(|w| directions.contains(w))
+        || words.ends_with(&tail.city.split_whitespace().collect::<Vec<_>>())
+    {
+        return Vec::new();
+    }
+    quadrants
+        .split_whitespace()
+        .map(|q| format!("{} {q},{rest}", street.trim_end()))
+        .collect()
+}
+
 /// "St. George", "St Paul": the sheet names the place "Saint …" while people shorten it the
 /// way a street type is shortened; the same query with the city spelled out, read only when
 /// the written form reaches nothing (US, 23.10.2026).
@@ -856,6 +1145,216 @@ fn saint_city_variant(raw: &str) -> Option<String> {
     };
     segments[pos] = format!("{}Saint {}", &segments[pos][..lead], &seg[cut..]);
     Some(segments.join(","))
+}
+
+/// "ste julie", "st georges": a town name opening with the short Saint/Sainte the way people write
+/// it ("STE-JULIE, QC", "ST-GEORGES,QC"), spelled out as the sheet names the town ("sainte julie",
+/// "saint georges"), on a sheet with city_tail `saint_communes` = 1. Read only after the name as
+/// written finds no town, so a town named "St …" (St. Catharines) keeps its own spelling. None
+/// otherwise (Canada, 30.10.2026).
+fn saint_commune_name(name: &str) -> Option<String> {
+    if crate::rules::rules()
+        .city_tail
+        .get("saint_communes")
+        .map(String::as_str)
+        != Some("1")
+    {
+        return None;
+    }
+    let (first, rest) = name.split_once(' ')?;
+    let full = match first {
+        "st" => "saint",
+        "ste" => "sainte",
+        _ => return None,
+    };
+    Some(format!("{full} {rest}"))
+}
+
+/// "9-2755 Denison St": on a sheet with city_tail `unit_hyphen` = 1 the leading "<unit>-<civic>" is
+/// a unit number and the house number (Canada Post form), not the range the engine reads elsewhere
+/// ("15-17": the first number). Read as a unit only when the second number is over 20 and over three
+/// times the first, so "1300-1308" and "1-3" stay ranges; the unit is dropped (Canada, 29.10.2026).
+fn unit_hyphen_civic(raw: &str) -> Option<String> {
+    if crate::rules::rules()
+        .city_tail
+        .get("unit_hyphen")
+        .map(String::as_str)
+        != Some("1")
+    {
+        return None;
+    }
+    let body = raw.trim_start();
+    let lead = &raw[..raw.len() - body.len()];
+    let body = body.strip_prefix('#').map_or(body, str::trim_start);
+    let digits = |s: &str| s.bytes().take_while(u8::is_ascii_digit).count();
+    let unit_len = digits(body);
+    if !(1..=5).contains(&unit_len) {
+        return None;
+    }
+    let unit: u64 = body[..unit_len].parse().ok()?;
+    // one letter may follow the unit number ("12B-450 Main St")
+    let mut after_unit = &body[unit_len..];
+    if after_unit.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        after_unit = &after_unit[1..];
+    }
+    let civic_part = after_unit.trim_start().strip_prefix('-')?.trim_start();
+    let civic_len = digits(civic_part);
+    if !(1..=6).contains(&civic_len) {
+        return None;
+    }
+    let civic: u64 = civic_part[..civic_len].parse().ok()?;
+    let rest = &civic_part[civic_len..];
+    // at most one letter of suffix on the civic number ("450B Main St"), then a word boundary
+    let rest = rest
+        .strip_prefix(|c: char| c.is_ascii_alphabetic())
+        .unwrap_or(rest);
+    let rest_ok = rest.starts_with([' ', ',']);
+    if civic <= 20 || civic <= 3 * unit || !rest_ok {
+        return None;
+    }
+    Some(format!("{lead}{civic_part}"))
+}
+
+/// "5300 No. 3 Road", "5515 47 A Avenue": on a sheet with city_tail `glue_road_numbers` = 1 a road
+/// named by a number keeps its number in the name — "No3", "47A" — instead of the parser taking it
+/// for the house number ("No. 3": 3) or splitting the letter off. Only in the street segment, only
+/// right after the house number and right before a street type word, and not for a type the sheet
+/// keys number first (`number_first_types`: "No 2 Highway" is "2 hwy"). Canada, 29.10.2026.
+fn glue_road_numbers(raw: &str) -> Option<String> {
+    let cfg = &crate::rules::rules().city_tail;
+    if cfg.get("glue_road_numbers").map(String::as_str) != Some("1") {
+        return None;
+    }
+    let (street, rest) = raw.split_once(',').unwrap_or((raw, ""));
+    let words: Vec<&str> = street.split_whitespace().collect();
+    if words.len() < 4 {
+        return None;
+    }
+    let digits = |w: &str, max: usize| {
+        !w.is_empty() && w.len() <= max && w.bytes().all(|b| b.is_ascii_digit())
+    };
+    let house = |w: &str| {
+        let d = w.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+        digits(d, 6) && w.len() - d.len() <= 1
+    };
+    let number_first: Vec<&str> = cfg
+        .get("number_first_types")
+        .map(|v| v.split_whitespace().collect())
+        .unwrap_or_default();
+    let type_word = |w: &str| {
+        let w = normalize(w);
+        is_street_type_word(&w)
+            && !number_first
+                .iter()
+                .any(|t| sheet_short_form(&w, &|_, _| true) == *t)
+    };
+    if !house(words[0]) || !type_word(words[3]) {
+        return None;
+    }
+    let glued =
+        if matches!(words[1].to_ascii_lowercase().as_str(), "no" | "no.") && digits(words[2], 2) {
+            ["No", words[2]].concat()
+        } else if digits(words[1], 3)
+            && words[2].len() == 1
+            && words[2].chars().all(|c| c.is_ascii_alphabetic())
+        {
+            [words[1], words[2]].concat()
+        } else {
+            return None;
+        };
+    let mut out = vec![words[0].to_owned(), glued];
+    out.extend(words[3..].iter().map(|w| (*w).to_owned()));
+    let street = out.join(" ");
+    Some(if rest.is_empty() && !raw.contains(',') {
+        street
+    } else {
+        [street.as_str(), rest].join(",")
+    })
+}
+
+/// The first group of a `postal_pattern` code alone ("B3J" of "A9A 9A9"): the forward sortation
+/// area people write when they know no more.
+fn pattern_postal_head(cfg: &HashMap<String, String>, word: &str) -> bool {
+    let Some((head, _)) = cfg.get("postal_pattern").and_then(|p| p.split_once(' ')) else {
+        return false;
+    };
+    let mut head_cfg = HashMap::new();
+    head_cfg.insert("postal_pattern".to_owned(), head.to_owned());
+    pattern_postal(&head_cfg, word)
+}
+
+/// "…, Toronto, ON M6S 1M7", "…, Montréal, Canada H3J 1N5", "…, Halifax, Nova Scotia, B3J":
+/// the sheet keeps no postcode for a `postal_pattern` code (it is only set aside), yet its digits
+/// read as a house number ("1M7" -> 1) and its place in a segment breaks the tail forms. Every
+/// segment after the street loses such codes — the whole code, spaced or glued, or its first
+/// group as the last word — and segments left empty go (Canada, 29.10.2026). None when nothing
+/// is removed or the sheet declares no pattern.
+fn strip_pattern_postals(raw: &str) -> Option<String> {
+    let cfg = &crate::rules::rules().city_tail;
+    cfg.get("postal_pattern")?;
+    let segments: Vec<&str> = raw.split(',').collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    let mut kept = vec![segments[0].to_owned()];
+    let mut changed = false;
+    for segment in &segments[1..] {
+        let words: Vec<&str> = segment.split_whitespace().collect();
+        let mut out: Vec<&str> = Vec::new();
+        let mut i = 0;
+        while i < words.len() {
+            if i + 1 < words.len() && pattern_postal(cfg, &format!("{} {}", words[i], words[i + 1]))
+            {
+                i += 2;
+                changed = true;
+            } else if pattern_postal(cfg, words[i])
+                || (i + 1 == words.len() && pattern_postal_head(cfg, words[i]))
+            {
+                i += 1;
+                changed = true;
+            } else {
+                out.push(words[i]);
+                i += 1;
+            }
+        }
+        if !out.is_empty() {
+            kept.push(format!(" {}", out.join(" ")));
+        }
+    }
+    changed.then(|| kept.join(","))
+}
+
+/// "1150 Station St Vancouver BC V6A 4C7", "12 rue Donnacona Québec (Québec) G1R 3Y7": written
+/// with no comma, the closing `postal_pattern` code ("4C7" reads as a house number) and the region
+/// before it ("Québec" reads as the city of Québec) leave no tail the grammar can split. The
+/// query without them — and without country words around the code — is the street and the city
+/// alone, which the main parser reads (Canada, 30.10.2026: 121 rows of the distorted set). None
+/// when the query has a comma, closes with no such code (none on a sheet without the pattern),
+/// or keeps fewer than three words.
+fn commaless_postal_tail(raw: &str) -> Option<String> {
+    let cfg = &crate::rules::rules().city_tail;
+    if raw.contains(',') {
+        return None;
+    }
+    let mut words: Vec<&str> = strip_trailing_country_words(raw)
+        .split_whitespace()
+        .collect();
+    let postal = pattern_postal_tail(cfg, &words);
+    if postal == 0 {
+        return None;
+    }
+    words.truncate(words.len() - postal);
+    let joined = words.join(" ");
+    let mut words: Vec<&str> = strip_trailing_country_words(&joined)
+        .split_whitespace()
+        .collect();
+    // A region of up to three words ("Prince Edward Island").
+    if let Some(take) = (1..=3).rev().find(|&take| {
+        words.len() > take + 2 && region_matches(cfg, &words[words.len() - take..].join(" "))
+    }) {
+        words.truncate(words.len() - take);
+    }
+    (words.len() >= 3).then(|| words.join(" "))
 }
 
 fn strip_unit_designators(raw: &str) -> Option<String> {
@@ -1036,6 +1535,9 @@ fn city_tail(raw: &str) -> Option<CityTail> {
     if let Some(core) = postal_segment(cfg, last) {
         end = end.checked_sub(1)?;
         stripped_postal = Some(core);
+    } else if pattern_postal(cfg, last.trim()) {
+        // "…, Toronto, ON, M5X 1A9": the code goes; the sheet keeps no numeric postcode for it.
+        end = end.checked_sub(1)?;
     }
     let _ = (postal_digits, postal_split);
     let _ = regions;
@@ -1137,6 +1639,7 @@ fn city_tail(raw: &str) -> Option<CityTail> {
         city: normalize(city),
         retry,
         region: region_code(cfg, region_segment),
+        region_word: normalize(region_segment),
         without_region,
         without_city,
     })
@@ -1526,6 +2029,26 @@ fn hits_quality(hits: &[(Hit, [f32; N_FEATS])]) -> (u8, bool, bool) {
     })
 }
 
+/// The order of two readings of a place-first query: an exact street with a house, an
+/// interpolation or a neighbour near the number written comes before any fuzzy one, then
+/// `hits_quality`. "Ottawa, ON, 230
+/// Queen Street" read as written lands on a house of Queen Mary ST (one edit away); read address
+/// first it is an interpolation on Queen ST itself (Canada, 30.10.2026).
+/// `address_first` is the reordered query: its leading number is the one written.
+fn city_first_quality(
+    hits: &[(Hit, [f32; N_FEATS])],
+    address_first: &str,
+) -> (bool, (u8, bool, bool)) {
+    (
+        strong_first(hits)
+            && hits.first().is_some_and(|(hit, _)| {
+                hit.flags.contains(&"street_exact")
+                    && !neighbour_far_from_written(hit, address_first)
+            }),
+        hits_quality(hits),
+    )
+}
+
 fn strong_first(hits: &[(Hit, [f32; N_FEATS])]) -> bool {
     hits.first()
         .is_some_and(|(hit, _)| matches!(hit.precision, "house" | "interp" | "near"))
@@ -1594,6 +2117,32 @@ fn city_tail_choose(
         return original;
     }
     Vec::new()
+}
+
+/// "63, chemin des Pionniers Est, L'Islet (Québec)": the province word is also a commune
+/// (Québec City), and a fuzzy street there is a strong first answer that outranks the named
+/// town. When the strong answer sits in the commune the region word names, and not in the named
+/// city, the retry without the region is read, and its answer in the named city wins; otherwise
+/// the choice is `city_tail_choose`'s (Canada, 29.10.2026).
+fn city_tail_choose_region(
+    original: Vec<(Hit, [f32; N_FEATS])>,
+    city: &str,
+    region_word: &str,
+    retry: impl FnOnce() -> Vec<(Hit, [f32; N_FEATS])>,
+) -> Vec<(Hit, [f32; N_FEATS])> {
+    let in_commune = |hits: &Vec<(Hit, [f32; N_FEATS])>, name: &str| {
+        hits.first()
+            .is_some_and(|(hit, _)| normalize(&hit.commune) == name)
+    };
+    if strong_first(&original) && city != region_word && in_commune(&original, region_word) {
+        let alternate = retry();
+        return if in_commune(&alternate, city) {
+            alternate
+        } else {
+            original
+        };
+    }
+    city_tail_choose(original, city, retry)
 }
 
 #[derive(Serialize, Clone)]
@@ -3542,6 +4091,29 @@ fn type_padded_variants(phrase: &str) -> Vec<String> {
     out
 }
 
+/// The type padding for rewritten bare-name variants that close with a direction, on a sheet with city_tail
+/// `direction_trailing`: "6890 Notre-Dame Est" pads as written ("rue notre dame est") but the sheet
+/// keys "rue notre dame e", the padded form of the variant "notre dame e" (Canada, 30.10.2026).
+fn type_padded_direction_variants(variants: &[String]) -> Vec<String> {
+    let cfg = &crate::rules::rules().city_tail;
+    let Some(directions) = cfg.get("direction_trailing") else {
+        return Vec::new();
+    };
+    let directions: Vec<&str> = directions.split_whitespace().collect();
+    variants
+        .iter()
+        .filter(|v| {
+            v.rsplit(' ')
+                .next()
+                .is_some_and(|w| directions.contains(&w))
+        })
+        // a variant that already names a type ("st w" once "Dundas" is read as the town) is no
+        // bare name: padded, it is "park st w", another street
+        .filter(|v| !v.split(' ').any(is_street_type_word))
+        .flat_map(|v| type_padded_variants(v))
+        .collect()
+}
+
 /// Short form of a secondary house-number designator (Cyrillic korpus/stroenie/vladenie
 /// markers), else None; the standalone "house" marker word is handled separately (dropped).
 fn unit_designator(tok: &str) -> Option<&'static str> {
@@ -3797,6 +4369,178 @@ fn street_rewrite_word(token: &str) -> bool {
             .any(|(from, _)| from == token)
 }
 
+/// The longest short form a one-word rewrite of the sheet gives `word` ("highway" -> "hwy"), or the
+/// word itself.
+fn sheet_short_form(word: &str, one_word: &impl Fn(&str, &str) -> bool) -> String {
+    crate::rules::rules()
+        .street_rewrites
+        .iter()
+        .filter(|(from, to)| {
+            to == word && one_word(from, to) && from.len() < to.len() && !from.contains(' ')
+        })
+        .map(|(from, _)| from)
+        .max_by_key(|from| from.len())
+        .cloned()
+        .unwrap_or_else(|| word.to_owned())
+}
+
+/// The sheet's key for a numbered road on a sheet with city_tail `number_first_types` (the short
+/// type words it keys number first: "7 hwy"): a phrase that is only a road number, its type and
+/// an optional "no" in any order ("highway 7", "highway no 3", "no 2 highway") becomes
+/// "<number> <type>". None otherwise (Canada, 29.10.2026).
+fn number_first_key(phrase: &str, one_word: impl Fn(&str, &str) -> bool) -> Option<String> {
+    let types = crate::rules::rules()
+        .city_tail
+        .get("number_first_types")?
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let words: Vec<&str> = phrase.split(' ').filter(|w| *w != "no").collect();
+    if words.len() != 2 {
+        return None;
+    }
+    let is_number =
+        |w: &str| !w.is_empty() && w.len() <= 4 && w.bytes().all(|b| b.is_ascii_digit());
+    let (number, kind) = if is_number(words[0]) {
+        (words[0], words[1])
+    } else if is_number(words[1]) {
+        (words[1], words[0])
+    } else {
+        return None;
+    };
+    let kind = sheet_short_form(kind, &one_word);
+    types
+        .contains(&kind)
+        .then(|| [number, kind.as_str()].join(" "))
+}
+
+/// The sheet's own key for a street phrase on a sheet with city_tail `direction_trailing`: a
+/// leading "st"/"ste" before a name spelled Saint/Sainte, a leading direction moved to the end,
+/// and every other word shortened to the longest short form a one-word rewrite of the sheet gives
+/// it. None on a sheet without the key, for a phrase of fewer than three words, or for one that
+/// opens with neither a direction nor "st"/"ste".
+fn direction_trailing_key(phrase: &str, one_word: impl Fn(&str, &str) -> bool) -> Option<String> {
+    let directions = crate::rules::rules()
+        .city_tail
+        .get("direction_trailing")?
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let short = |w: &str| sheet_short_form(w, &one_word);
+    let mut words: Vec<String> = phrase.split(' ').map(str::to_owned).collect();
+    if words.len() < 3 {
+        return None;
+    }
+    let saint = match words[0].as_str() {
+        "st" => Some("saint"),
+        "ste" => Some("sainte"),
+        _ => None,
+    };
+    if let Some(full) = saint {
+        words[0] = full.to_owned();
+    } else if directions.contains(&short(&words[0])) {
+        let direction = words.remove(0);
+        words.push(direction);
+    } else {
+        return None;
+    }
+    Some(
+        words
+            .iter()
+            .map(|w| {
+                if matches!(w.as_str(), "saint" | "sainte") {
+                    w.clone()
+                } else {
+                    short(w)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// The sheet's keys for a street phrase opening with a type word, on a sheet with city_tail
+/// `type_first_siblings` = 1: the sheet keeps a type written in front by one short form ("boul.
+/// Manseau", "av. des Pins O") while the writer used another of the same type ("Blvd Manseau",
+/// "Ave des Pins Ouest"). Reaching it takes two rewrites of one kind (blvd -> boulevard -> boul),
+/// and the staged rounds apply each kind once. Every other short form of the type's full word is
+/// put in front, with the rest as written and with each word at its sheet short form
+/// ("ouest" -> "o"). Empty without the key or when the first word is no short type word
+/// (Canada, 30.10.2026).
+fn type_first_sibling_keys(phrase: &str, one_word: impl Fn(&str, &str) -> bool) -> Vec<String> {
+    let rules = crate::rules::rules();
+    if rules
+        .city_tail
+        .get("type_first_siblings")
+        .map(String::as_str)
+        != Some("1")
+    {
+        return Vec::new();
+    }
+    let Some((first, rest)) = phrase.split_once(' ') else {
+        return Vec::new();
+    };
+    let short_rest = rest
+        .split(' ')
+        .map(|w| sheet_short_form(w, &one_word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let shorter =
+        |from: &str, to: &str| one_word(from, to) && from.len() < to.len() && !from.contains(' ');
+    let mut keys: Vec<String> = Vec::new();
+    for (_, full) in rules
+        .street_rewrites
+        .iter()
+        .filter(|(from, to)| from == first && shorter(from, to) && is_street_type_word(to))
+    {
+        for (sibling, _) in rules
+            .street_rewrites
+            .iter()
+            .filter(|(from, to)| to == full && from != first && shorter(from, to))
+        {
+            for tail in [rest, short_rest.as_str()] {
+                let key = format!("{sibling} {tail}");
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+        }
+    }
+    keys
+}
+
+/// The words of a fuzzy lookup with street types and direction words at the sheet's short form,
+/// on a sheet with city_tail `fuzzy_short_forms` = 1 ("ratchfrod street" -> "ratchfrod st",
+/// "sherrbooke ouest" -> "sherrbooke o"). The sheet keys every street with its short type and
+/// direction ("ratchford st"), so a typo in the name plus a type written out is two edits and a
+/// rewrite — past the one edit the fuzzy search allows a short name. Directions are the sheet's
+/// `direction_trailing` words. None without the key or when no word changes (Canada, 30.10.2026).
+fn fuzzy_short_rest(rest: &[&str]) -> Option<Vec<String>> {
+    let cfg = &crate::rules::rules().city_tail;
+    if cfg.get("fuzzy_short_forms").map(String::as_str) != Some("1") {
+        return None;
+    }
+    let directions: Vec<&str> = cfg
+        .get("direction_trailing")
+        .map(|d| d.split_whitespace().collect())
+        .unwrap_or_default();
+    let one_word = |from: &str, to: &str| !from.contains(' ') && !to.contains(' ');
+    let mut changed = false;
+    let short: Vec<String> = rest
+        .iter()
+        .map(|w| {
+            let s = sheet_short_form(w, &one_word);
+            if s != *w && (is_street_type_word(w) || directions.contains(&s.as_str())) {
+                changed = true;
+                s
+            } else {
+                (*w).to_owned()
+            }
+        })
+        .collect();
+    changed.then_some(short)
+}
+
 /// Rule alternatives for a street lookup key after house-number extraction.
 /// Two snapshot rounds compose a type with a numeral or linker rewrite.
 fn street_data_variants(phrase: &str) -> Vec<String> {
@@ -3838,6 +4582,32 @@ fn street_data_variants(phrase: &str) -> Vec<String> {
         })
     };
     let mut variants = vec![phrase.to_owned()];
+    // A sheet that keeps the direction after the type, every word abbreviated ("10th ave e",
+    // "hastings st w"; city_tail `direction_trailing` lists the sheet's direction words): the
+    // writer's "East 10th Avenue" or "West Hastings Street" reaches that key only with the
+    // direction moved and three words rewritten at once, past the variant cap of the staged
+    // rounds; and "St George Street" is Saint George. That one key comes after every staged
+    // variant, so it takes no slot of theirs (Canada, 29.10.2026).
+    let sheet_keys: Vec<String> = [
+        direction_trailing_key(phrase, |from, to| kind(from, to) == 1),
+        number_first_key(phrase, |from, to| kind(from, to) == 1),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(type_first_sibling_keys(phrase, |from, to| {
+        kind(from, to) == 1
+    }))
+    .filter(|key| key != phrase)
+    .collect();
+    let finish = |variants: Vec<String>| -> Vec<String> {
+        let mut out: Vec<String> = variants.into_iter().skip(1).collect();
+        for key in &sheet_keys {
+            if !out.contains(key) {
+                out.push(key.clone());
+            }
+        }
+        out
+    };
     // Ordinal street numbers on a sheet whose type trails the name ("104th Street", "5th
     // Avenue"): the sheet keys some with the suffix and some without ("E 104 St", "South 37th
     // Street"), so the key is tried both ways. Composes with the rounds below; the house
@@ -3951,14 +4721,14 @@ fn street_data_variants(phrase: &str) -> Vec<String> {
                 };
                 if !doubled(&candidate) && !variants.contains(&candidate) {
                     if variants.len() > MAX_VARIANTS {
-                        return variants.into_iter().skip(1).collect();
+                        return finish(variants);
                     }
                     variants.push(candidate);
                 }
             }
         }
     }
-    variants.into_iter().skip(1).collect()
+    finish(variants)
 }
 
 /// Serbian genitive street names: the registry stores "Kneza Mihaila" (genitive) while
@@ -4980,7 +5750,9 @@ impl Index {
                                 "{path:?}: street record {i} house-postcode dictionary is not UTF-8 — corrupt"
                             );
                         };
-                        if !plausible_house_postcode(postcode)
+                        // the sheet's own code shape passes too ("V9Z 1K2"; builder plausible_display_pc)
+                        if !(plausible_house_postcode(postcode)
+                            || pattern_postal(&rules.city_tail, postcode))
                             || previous_postcode.is_some_and(|previous| previous >= postcode)
                         {
                             anyhow::bail!(
@@ -6309,6 +7081,12 @@ impl Index {
         if !ids.is_empty() {
             return ids;
         }
+        if let Some(full) = saint_commune_name(name) {
+            let ids = self.communes_by_name_raw(&full);
+            if !ids.is_empty() {
+                return ids;
+            }
+        }
         // ARTICLE ELISION (FR): users commonly drop "L'/La/Le/Les" ("Ile Rousse" for
         // "L'Île-Rousse") or glue the article onto the name ("Lhay").
         for art in ["l", "la", "le", "les"] {
@@ -6516,8 +7294,9 @@ impl Index {
             .or(lower.zip(upper));
         if let Some(((ln, lrid, la, lo, lpc), (un, urid, ua, uo, upc))) = bracket {
             let between_ranges = is_range(lrid) && is_range(urid);
-            let linear = un - ln <= 12 || between_ranges;
-            let tight = linear && Self::dist_km(la, lo, ua, uo) < 0.3;
+            let (max_gap, max_km) = interp_limits();
+            let linear = un - ln <= max_gap || between_ranges;
+            let tight = linear && Self::dist_km(la, lo, ua, uo) < max_km;
             if tight && un > ln {
                 let frac = (numero - ln) as f64 / (un - ln) as f64;
                 // Interpolation does not represent either neighbor. Its postcode is known only
@@ -6748,6 +7527,11 @@ impl Index {
                 // bare name without a street type: pad with type-word variants
                 let mut ph = phrases.clone();
                 ph.extend(type_padded_variants(&phrases[0]));
+                for padded in type_padded_direction_variants(&phrases[1..]) {
+                    if !ph.contains(&padded) {
+                        ph.push(padded);
+                    }
+                }
                 // last-two-words swap and unglue variants — cheap extra keys (one FST read each)
                 for extra in phrases
                     .iter()
@@ -7076,9 +7860,43 @@ impl Index {
         out
     }
 
+    /// Fuzzy candidate collection over the words as written and, when that finds nothing on a
+    /// sheet with city_tail `fuzzy_short_forms`, over the words at the sheet's short form (see
+    /// `fuzzy_short_rest`).
+    fn collect_fuzzy(
+        &self,
+        rest: &[&str],
+        postcode: Option<u32>,
+        from_ml: bool,
+    ) -> HashMap<u32, Feats> {
+        let cand = self.collect_fuzzy_written(rest, postcode, from_ml);
+        if !cand.is_empty() {
+            return cand;
+        }
+        let Some(short) = fuzzy_short_rest(rest) else {
+            return cand;
+        };
+        // The edit budget is for the name: a street whose type or direction differs from the
+        // one written ("Diefenbaker Place" -> "Diefenbaker DR", "Whitehall Avenue" ->
+        // "Whitehall CRES") is another street, not a typo of this one.
+        let fixed: Vec<&str> = short
+            .iter()
+            .zip(rest)
+            .filter(|(s, w)| s.as_str() != **w)
+            .map(|(s, _)| s.as_str())
+            .collect();
+        let words: Vec<&str> = short.iter().map(String::as_str).collect();
+        let mut cand = self.collect_fuzzy_written(&words, postcode, from_ml);
+        cand.retain(|&sid, _| {
+            let name = normalize(self.name(self.street_meta(sid).name_off));
+            fixed.iter().all(|f| name.split(' ').any(|w| w == *f))
+        });
+        cand
+    }
+
     /// Fuzzy candidate collection: single-edit variants via exact keys
     /// + a Levenshtein automaton (1 edit for 5-11 chars, 2 for 12+).
-    fn collect_fuzzy(
+    fn collect_fuzzy_written(
         &self,
         rest: &[&str],
         postcode: Option<u32>,
@@ -9992,7 +10810,82 @@ impl Index {
                 return self.query_feats_city_tail_read(&alt, k, focus);
             }
         }
+        // A neighbour far from the number written settles nothing either ("9828 101A Avenue,
+        // Edmonton" -> 1680 on a 101A Avenue without the quadrant, 8 km off).
+        if !hits
+            .first()
+            .is_some_and(|(hit, _)| street_in_commune(hit) && !neighbour_far_from_written(hit, raw))
+        {
+            if let Some(found) = self.quadrant_retry(raw, k, focus) {
+                return found;
+            }
+        }
+        // "WINDSOR ONT (1453 PRINCE RD)", "OSHAWA, ON - 1200 AIRPORT BLVD.", "Burnaby BC, 7348
+        // Edmonds St": the place written before the address. The address-first form is read as
+        // well, and its answer replaces the written form's only when it keeps the place (exact
+        // commune: a reading that dropped the place finds a road of that name in another town)
+        // and is strictly better by `hits_quality` (Canada, 29.10.2026: ISED station locations).
+        let reordered = city_first_reordered(raw);
+        // Read as written the place has no region anchor: a bare town of that name in another
+        // province ("ST-LEONARD, QC." -> Saint-Léonard, New Brunswick) is no answer.
+        let hits = match reordered.as_deref().and_then(city_tail) {
+            Some(tail)
+                if !strong_first(&hits)
+                    && hits.first().is_some_and(|(hit, _)| {
+                        tail.region
+                            .as_deref()
+                            .is_some_and(|region| town_outside_region(hit, &tail.city, region))
+                    }) =>
+            {
+                Vec::new()
+            }
+            _ => hits,
+        };
+        if let Some(reordered) = reordered {
+            let alternate = self.query_feats_city_tail_read(&reordered, k, focus);
+            // The place is kept by an exact commune, or — a merged city the sheet splits into its
+            // former municipalities ("TORONTO (100 WINGARDEN CRT) ON" stands in Scarborough) —
+            // by an exact street with a house near a point the sheet's table gives for the named
+            // city in the named region (Canada, 29.10.2026).
+            let near_points = city_tail(&reordered).map_or_else(Vec::new, |tail| {
+                tail.region
+                    .as_deref()
+                    .map(|region| commune_region_points(&tail.city, region))
+                    .unwrap_or_default()
+            });
+            if alternate
+                .first()
+                .is_some_and(|(hit, _)| city_first_keeps_place(hit, &near_points))
+                && city_first_quality(&alternate, &reordered)
+                    > city_first_quality(&hits, &reordered)
+            {
+                return alternate;
+            }
+        }
         hits
+    }
+
+    /// "10025 105 Street, Edmonton": the sheet names every street of the city with its quadrant
+    /// ("105 St Nw") and the writer left it out. Each quadrant of the sheet's `quadrant_suffixes`
+    /// is appended to the street; the answer is taken only when exactly one quadrant reaches the
+    /// street in the named commune, a house before an interpolation or a neighbour — two
+    /// quadrants with the street ("14 Ave NW", "14 Ave SW") are no answer (Canada, 29.10.2026).
+    fn quadrant_retry(
+        &self,
+        raw: &str,
+        k: usize,
+        focus: Option<&QueryFocus>,
+    ) -> Option<Vec<(Hit, [f32; N_FEATS])>> {
+        let variants = quadrant_variants(raw);
+        if variants.is_empty() {
+            return None;
+        }
+        pick_quadrant(
+            variants
+                .iter()
+                .map(|alt| self.query_feats_city_tail_read(alt, k, focus))
+                .collect(),
+        )
     }
 
     fn query_feats_city_tail_read(
@@ -10005,6 +10898,26 @@ impl Index {
         // street segment is read past before anything else.
         if let Some(cleaned) = strip_unit_designators(raw) {
             return self.query_feats_city_tail(&cleaned, k, focus);
+        }
+        if let Some(cleaned) = strip_pattern_postals(raw) {
+            return self.query_feats_city_tail(&cleaned, k, focus);
+        }
+        // The commaless form is read without its code and region; the answer stands only in an
+        // exact commune — the region it no longer carries cannot hold a homonym elsewhere.
+        if let Some(bare) = commaless_postal_tail(raw) {
+            let hits = self.query_feats_city_tail(&bare, k, focus);
+            if hits
+                .first()
+                .is_some_and(|(hit, _)| hit.flags.contains(&"commune_exact"))
+            {
+                return hits;
+            }
+        }
+        if let Some(civic) = unit_hyphen_civic(raw) {
+            return self.query_feats_city_tail(&civic, k, focus);
+        }
+        if let Some(glued) = glue_road_numbers(raw) {
+            return self.query_feats_city_tail(&glued, k, focus);
         }
         let Some(tail) = city_tail(raw) else {
             return self.query_feats_country_variants(raw, k, focus);
@@ -10081,9 +10994,15 @@ impl Index {
             // kept over a house in the next town.
             // An answer read off range points (`range`) does not settle the city either: the
             // umbrella may hold the real house.
+            // Nor does a neighbour whose number is far from the one written ("3400 Eglinton Ave
+            // E, Toronto" -> 600 on the Toronto stretch; 3400 stands in Scarborough): the
+            // umbrella is read, and only a strictly better answer replaces it (Canada, 29.10.2026).
             let accepted = |hits: &Vec<(Hit, [f32; N_FEATS])>| {
-                hits.first()
-                    .is_some_and(|(hit, _)| acceptable(hit) && !hit.flags.contains(&"range"))
+                hits.first().is_some_and(|(hit, _)| {
+                    acceptable(hit)
+                        && !hit.flags.contains(&"range")
+                        && !neighbour_far_from_written(hit, raw)
+                })
             };
             if umbrella && best.is_empty() {
                 // The city is no commune of the sheet under the anchor and nothing read: the
@@ -10107,15 +11026,20 @@ impl Index {
             };
         }
         let original = self.query_feats_country_variants(raw, k, focus);
-        let chosen = city_tail_choose(within_commune_region(original, &points), &tail.city, || {
-            within_commune_region(
-                tail.retry
-                    .as_deref()
-                    .map(|q| self.query_feats_country_variants(q, k, focus))
-                    .unwrap_or_default(),
-                &points,
-            )
-        });
+        let chosen = city_tail_choose_region(
+            within_commune_region(original, &points),
+            &tail.city,
+            &tail.region_word,
+            || {
+                within_commune_region(
+                    tail.retry
+                        .as_deref()
+                        .map(|q| self.query_feats_country_variants(q, k, focus))
+                        .unwrap_or_default(),
+                    &points,
+                )
+            },
+        );
         if chosen.is_empty() && self.communes_by_name(&tail.city).is_empty() {
             return self.city_tail_postal_only(&tail, k, focus, &points);
         }
@@ -16218,6 +17142,313 @@ mod tests {
     }
 
     #[test]
+    fn a_sheet_widens_the_interpolation_bracket() {
+        // 12 between 2 and 24: 22 numbers apart, too wide for the default (12) but not for a
+        // sheet with city_tail interp_max_gap 400 / interp_max_km 2.0 (Canada, 29.10.2026)
+        let rows = "rue test,001,ville,10000,2,,7.4200,43.7300,Rue Test,Ville\n\
+                    rue test,001,ville,10000,24,,7.4220,43.7300,Rue Test,Ville\n";
+        let build = |rules: Option<&str>| {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "gridpin-interp-limits-{}-{serial}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let _scratch = Scratch::keep(&dir);
+            let csv = dir.join("addresses.csv");
+            std::fs::write(
+                &csv,
+                format!(
+                    "nom_voie_norm,code_insee,nom_commune_norm,code_postal,numero,rep,lon,lat,nom_voie,nom_commune\n{rows}"
+                ),
+            )
+            .unwrap();
+            let rules_dir = rules.map(|tsv| {
+                let d = dir.join("rules");
+                std::fs::create_dir_all(&d).unwrap();
+                std::fs::write(d.join("city_tail.tsv"), tsv).unwrap();
+                d
+            });
+            let bin = dir.join("addresses.bin");
+            crate::builder::build(&csv, &bin, None, None, rules_dir.as_deref(), None, None)
+                .unwrap();
+            Index::open(&bin).unwrap()
+        };
+        let answer = |idx: &Index| {
+            idx.query_structured("rue test", Some("12"), "ville", Some("10000"), 1)
+                .remove(0)
+                .0
+        };
+        assert_eq!(answer(&build(None)).precision, "near");
+        let wide = answer(&build(Some("interp_max_gap\t400\ninterp_max_km\t2.0\n")));
+        assert_eq!(wide.precision, "interp");
+        assert!(
+            (wide.lon - (7.4200 + 0.0020 * 10.0 / 22.0)).abs() < 1e-6,
+            "{}",
+            wide.lon
+        );
+        // the gap widened but not the distance (the neighbours stand ~160 m apart): nearest house
+        let gap_only = answer(&build(Some("interp_max_gap\t400\ninterp_max_km\t0.1\n")));
+        assert_eq!(gap_only.precision, "near");
+    }
+
+    #[test]
+    fn fuzzy_search_reads_a_typo_with_the_type_at_the_sheet_short_form() {
+        // "Ratchfrod Street": the sheet keys "ratchford st"; the swap is one edit only once
+        // "street" is "st". The type itself is no edit: "Diefenbaker Place" is not the
+        // Diefenbaker DR two edits away (Canada, 30.10.2026).
+        let rows = "diefenbaker dr,001,amherst,0,10,,-64.2200,45.8300,Diefenbaker DR,Amherst\n\
+                    ratchford st,001,amherst,0,10,,-64.2100,45.8300,Ratchford ST,Amherst\n\
+                    thornbury st e,001,amherst,0,10,,-64.2300,45.8300,Thornbury ST E,Amherst\n";
+        let build = |key: bool| {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "gridpin-fuzzy-short-{}-{serial}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let _scratch = Scratch::keep(&dir);
+            let csv = dir.join("addresses.csv");
+            std::fs::write(
+                &csv,
+                format!(
+                    "nom_voie_norm,code_insee,nom_commune_norm,code_postal,numero,rep,lon,lat,nom_voie,nom_commune\n{rows}"
+                ),
+            )
+            .unwrap();
+            let d = dir.join("rules");
+            std::fs::create_dir_all(&d).unwrap();
+            let tail = if key {
+                "direction_trailing\tn s e w\nfuzzy_short_forms\t1\n"
+            } else {
+                "direction_trailing\tn s e w\n"
+            };
+            std::fs::write(d.join("city_tail.tsv"), tail).unwrap();
+            std::fs::write(
+                d.join("abbrev2.tsv"),
+                "street\tst\tstreet\nstreet\tstreet\tst\nstreet\tpl\tplace\nstreet\tplace\tpl\n\
+                 street\tdr\tdrive\nstreet\tdrive\tdr\nstreet\te\teast\nstreet\teast\te\n\
+                 street\tw\twest\nstreet\twest\tw\n",
+            )
+            .unwrap();
+            std::fs::write(d.join("street_types_latin.tsv"), "street\nplace\ndrive\n").unwrap();
+            let bin = dir.join("addresses.bin");
+            crate::builder::build(&csv, &bin, None, None, Some(&d), None, None).unwrap();
+            Index::open(&bin).unwrap()
+        };
+        let street = |idx: &Index, name: &str| {
+            idx.query_structured(name, Some("10"), "amherst", None, 1)
+                .first()
+                .map(|(hit, _)| hit.street.clone())
+        };
+        let fuzzy = |idx: &Index, rest: &[&str]| {
+            let _rules = crate::rules::scope(idx.rules);
+            idx.collect_fuzzy(rest, None, false).len()
+        };
+        let on = build(true);
+        assert_eq!(
+            street(&on, "ratchfrod street").as_deref(),
+            Some("Ratchford ST")
+        );
+        // the fuzzy search itself: another fallback may still read the name words alone
+        assert_eq!(fuzzy(&on, &["ratchfrod", "street"]), 1);
+        assert_eq!(fuzzy(&on, &["diefenbaker", "place"]), 0);
+        // every word set to its short form must stand in the street, the direction too
+        assert_eq!(fuzzy(&on, &["thornbry", "street", "east"]), 1);
+        assert_eq!(fuzzy(&on, &["thornbry", "street", "west"]), 0);
+        // the short form as written needs no key; the written-out type does
+        let off = build(false);
+        assert_eq!(fuzzy(&off, &["ratchfrod", "st"]), 1);
+        assert_eq!(fuzzy(&off, &["ratchfrod", "street"]), 0);
+    }
+
+    #[test]
+    fn fuzzy_short_rest_shortens_only_types_and_directions() {
+        let entries = vec![
+            (23, "enabled".to_owned(), "1".to_owned()),
+            (23, "fuzzy_short_forms".to_owned(), "1".to_owned()),
+            (23, "direction_trailing".to_owned(), "n s e w o".to_owned()),
+            (24, "st".to_owned(), "street".to_owned()),
+            (24, "street".to_owned(), "st".to_owned()),
+            (24, "o".to_owned(), "ouest".to_owned()),
+            (24, "ouest".to_owned(), "o".to_owned()),
+            (24, "mt".to_owned(), "mount".to_owned()),
+            (24, "mount".to_owned(), "mt".to_owned()),
+            (24, "1".to_owned(), "premier".to_owned()),
+            (24, "premier".to_owned(), "1".to_owned()),
+            (16, "street".to_owned(), String::new()),
+        ];
+        let _scope = crate::rules::scope(crate::rules::from_section(
+            &crate::rules::serialize_entries(&entries),
+        ));
+        let short = |rest: &[&str]| fuzzy_short_rest(rest);
+        assert_eq!(
+            short(&["ratchfrod", "street", "amherst"]),
+            Some(vec![
+                "ratchfrod".to_owned(),
+                "st".to_owned(),
+                "amherst".to_owned()
+            ])
+        );
+        assert_eq!(
+            short(&["sherrbooke", "ouest"]),
+            Some(vec!["sherrbooke".to_owned(), "o".to_owned()])
+        );
+        // near-misses: a name word with a rewrite ("mount"), a number word, nothing to shorten
+        assert_eq!(short(&["mount", "pleasatn"]), None);
+        assert_eq!(short(&["premier", "avneue"]), None);
+        assert_eq!(short(&["ratchfrod", "st"]), None);
+    }
+
+    #[test]
+    fn fuzzy_short_rest_needs_the_sheet_key() {
+        let entries = vec![
+            (23, "enabled".to_owned(), "1".to_owned()),
+            (24, "st".to_owned(), "street".to_owned()),
+            (24, "street".to_owned(), "st".to_owned()),
+            (16, "street".to_owned(), String::new()),
+        ];
+        let _scope = crate::rules::scope(crate::rules::from_section(
+            &crate::rules::serialize_entries(&entries),
+        ));
+        assert_eq!(fuzzy_short_rest(&["ratchfrod", "street"]), None);
+    }
+
+    #[test]
+    fn a_short_saint_town_is_found_under_its_full_name_only_with_the_sheet_key() {
+        // "2050 Bombardier, Ste-Julie": the sheet names the town "Sainte-Julie"; a town the sheet
+        // itself spells "St …" keeps that spelling (Canada, 30.10.2026).
+        let rows = "rue bombardier,001,sainte julie,0,2050,,-73.3400,45.5800,rue Bombardier,Sainte-Julie\n\
+                    st paul st,002,st catharines,0,10,,-79.2400,43.1600,St. Paul ST,St Catharines\n";
+        let build = |key: bool| {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "gridpin-saint-town-{}-{serial}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let _scratch = Scratch::keep(&dir);
+            let csv = dir.join("addresses.csv");
+            std::fs::write(
+                &csv,
+                format!(
+                    "nom_voie_norm,code_insee,nom_commune_norm,code_postal,numero,rep,lon,lat,nom_voie,nom_commune\n{rows}"
+                ),
+            )
+            .unwrap();
+            let d = dir.join("rules");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join("city_tail.tsv"),
+                if key { "saint_communes\t1\n" } else { "" },
+            )
+            .unwrap();
+            let bin = dir.join("addresses.bin");
+            crate::builder::build(&csv, &bin, None, None, Some(&d), None, None).unwrap();
+            Index::open(&bin).unwrap()
+        };
+        let towns = |idx: &Index, name: &str| {
+            let _rules = crate::rules::scope(idx.rules);
+            idx.communes_by_name_unheld(name).len()
+        };
+        let on = build(true);
+        assert_eq!(towns(&on, "ste julie"), 1);
+        assert_eq!(towns(&on, "sainte julie"), 1);
+        assert_eq!(towns(&on, "st catharines"), 1);
+        // near-misses: "st" is not "ste", no town after it
+        assert_eq!(towns(&on, "st julie"), 0);
+        let off = build(false);
+        assert_eq!(towns(&off, "ste julie"), 0);
+    }
+
+    #[test]
+    fn saint_commune_name_spells_out_st_and_ste() {
+        let on = vec![(23, "saint_communes".to_owned(), "1".to_owned())];
+        let _scope = crate::rules::scope(crate::rules::from_section(
+            &crate::rules::serialize_entries(&on),
+        ));
+        assert_eq!(
+            saint_commune_name("ste julie").as_deref(),
+            Some("sainte julie")
+        );
+        assert_eq!(
+            saint_commune_name("st georges").as_deref(),
+            Some("saint georges")
+        );
+        assert_eq!(saint_commune_name("saint georges"), None);
+        assert_eq!(saint_commune_name("stella"), None);
+        assert_eq!(saint_commune_name("st"), None);
+        let _off = crate::rules::scope(crate::rules::from_section(
+            &crate::rules::serialize_entries(&[]),
+        ));
+        assert_eq!(saint_commune_name("ste julie"), None);
+    }
+
+    #[test]
+    fn town_outside_region_reads_the_table() {
+        let entries = vec![
+            (23, "saint_communes".to_owned(), "1".to_owned()),
+            (
+                27,
+                "saint leonard".to_owned(),
+                "NB 47.1632 -67.9246;QC 45.5877 -73.5950".to_owned(),
+            ),
+            (
+                27,
+                "saint pascal".to_owned(),
+                "QC 47.5181 -69.8030".to_owned(),
+            ),
+        ];
+        let _scope = crate::rules::scope(crate::rules::from_section(
+            &crate::rules::serialize_entries(&entries),
+        ));
+        let at = |lat: f64, lon: f64| {
+            let (mut hit, _) = quadrant_hit("city", vec!["place_exact"], "");
+            hit.lat = lat;
+            hit.lon = lon;
+            hit
+        };
+        // the New Brunswick town for "ST-LEONARD, QC": outside; the Montréal one: inside
+        assert!(town_outside_region(&at(47.17, -67.92), "st leonard", "QC"));
+        assert!(!town_outside_region(&at(45.59, -73.60), "st leonard", "QC"));
+        // known only in Québec, asked in Ontario: outside
+        assert!(town_outside_region(&at(47.52, -69.80), "st pascal", "ON"));
+        // a town the table does not know is never judged
+        assert!(!town_outside_region(&at(47.52, -69.80), "nowhere", "ON"));
+    }
+
+    #[test]
+    fn rewritten_bare_names_closing_with_a_direction_get_the_type_padding() {
+        let rules = |on: bool| {
+            let mut entries = vec![(23, "enabled".to_owned(), "1".to_owned())];
+            if on {
+                entries.push((23, "direction_trailing".to_owned(), "n s e w o".to_owned()));
+            }
+            entries.push((16, "rue".to_owned(), String::new()));
+            entries.push((16, "park".to_owned(), String::new()));
+            entries.push((17, "st".to_owned(), String::new()));
+            crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+        };
+        let _scope = crate::rules::scope(rules(true));
+        let padded = |v: &[&str]| {
+            type_padded_direction_variants(&v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+        };
+        // "6890 Notre-Dame Est": the variant "notre dame e" is what the sheet keys with its type
+        let got = padded(&["notre dame e"]);
+        assert!(got.contains(&"rue notre dame e".to_owned()), "{got:?}");
+        // near-misses: no closing direction, a variant that already names a type ("st w" once
+        // "Dundas" is the town: padded it is "park st w"), a type in front
+        assert!(padded(&["notre dame"]).is_empty());
+        assert!(padded(&["st w"]).is_empty());
+        assert!(padded(&["rue notre dame e"]).is_empty());
+        let _off = crate::rules::scope(rules(false));
+        assert!(padded(&["notre dame e"]).is_empty());
+    }
+
+    #[test]
     fn forward_interpolation_forwards_the_requested_address() {
         let idx = forward_housenumber_index(
             "interp",
@@ -20697,6 +21928,918 @@ mod tests {
         // The comma-only form does not glue.
         let _scope = crate::rules::scope(region_postal_fixture_rules("comma", None));
         assert!(city_tail("Main St 1, Springfield IL 62701").is_none());
+    }
+
+    /// The Canadian pack (rules/ca/city_tail.tsv, inlined; where the file exists it must match):
+    /// `postal_pattern` "A9A 9A9" reads the alphanumeric code with or without its space, in the region
+    /// segment, glued to the city or as a segment of its own, and sets it aside -- the retry never
+    /// carries it, because the sheet keeps no numeric postcode for it (E1.5, 28.10.2026).
+    fn ca_city_tail_rules() -> &'static crate::rules::Rules {
+        let tsv: String = [
+            "# Generated Canadian additions from ca_overlay.json.\n",
+            "city_first\t1\n",
+            "direction_trailing\tn s e w ne nw se sw o\n",
+            "enabled\t1\n",
+            "forms\tcomma region_postal\n",
+            "fuzzy_short_forms\t1\n",
+            "glue_road_numbers\t1\n",
+            "homonym_prominence\t1\n",
+            "interp_max_gap\t400\n",
+            "interp_max_km\t2.0\n",
+            "junk_tail\tnear next behind opposite across beside tel phone fax suite apt unit floor room rm bldg basement app bureau\n",
+            "number_first_types\thwy\n",
+            "postal_digits\t6\n",
+            "postal_pattern\tA9A 9A9\n",
+            "postal_split\t3\n",
+            "quadrant_suffixes\tNW NE SW SE\n",
+            "region_names\talberta=AB;british columbia=BC;colombie britannique=BC;ile du prince edouard=PE;manitoba=MB;new brunswick=NB;newfoundland=NL;newfoundland and labrador=NL;northwest territories=NT;nouveau brunswick=NB;nouvelle ecosse=NS;nova scotia=NS;nunavut=NU;ontario=ON;prince edward island=PE;quebec=QC;saskatchewan=SK;terre neuve et labrador=NL;territoires du nord ouest=NT;yukon=YT\n",
+            "regions\tAB BC MB NB NL NS NT NU ON PE QC SK YT\n",
+            "saint_communes\t1\n",
+            "street_type_last\t1\n",
+            "type_first_siblings\t1\n",
+            "unit_hyphen\t1\n",
+        ]
+        .concat();
+        let pack = concat!(env!("CARGO_MANIFEST_DIR"), "/../rules/ca/city_tail.tsv");
+        if let Ok(file) = std::fs::read_to_string(pack) {
+            assert_eq!(file, tsv, "inline copy of rules/ca/city_tail.tsv is stale");
+        }
+        let entries: Vec<(u8, String, String)> = tsv
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .map(|l| {
+                let (k, v) = l.split_once('\t').unwrap();
+                (23, k.to_owned(), v.to_owned())
+            })
+            .collect();
+        crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+    }
+
+    #[test]
+    fn ca_postal_pattern_reads_spaced_glued_and_lower_case_codes() {
+        let _scope = crate::rules::scope(ca_city_tail_rules());
+        let cfg = &crate::rules::rules().city_tail;
+        assert_eq!(split_region_postal(cfg, "ON M5X 1A9"), Some(("ON", None)));
+        assert_eq!(split_region_postal(cfg, "qc h2x1y4"), Some(("qc", None)));
+        assert_eq!(
+            split_region_postal(cfg, "Ontario M5X 1A9"),
+            Some(("Ontario", None))
+        );
+        assert!(pattern_postal(cfg, "K1A 0B1") && pattern_postal(cfg, "k1a0b1"));
+    }
+
+    #[test]
+    fn ca_postal_pattern_rejects_near_misses() {
+        // every position of the shape: a digit where a letter is due, a letter where a digit is
+        // due, one character short or long, a US ZIP (PRINCIPLES 6.6: near-misses, not absence)
+        let _scope = crate::rules::scope(ca_city_tail_rules());
+        let cfg = &crate::rules::rules().city_tail;
+        for bad in [
+            "1A1 1A1", "M55 1A9", "MXX 1A9", "M5X AA9", "M5X 1A", "M5X 1A9B", "02108", "M5X-1A9",
+        ] {
+            assert!(!pattern_postal(cfg, bad), "{bad}");
+            assert_eq!(
+                split_region_postal(cfg, &format!("ON {bad}")),
+                None,
+                "{bad}"
+            );
+        }
+        assert_eq!(split_region_postal(cfg, "XX M5X 1A9"), None); // not a region of the sheet
+    }
+
+    fn quadrant_hit(
+        precision: &'static str,
+        flags: Vec<&'static str>,
+        street: &str,
+    ) -> (Hit, [f32; N_FEATS]) {
+        (
+            Hit {
+                lat: 53.5,
+                lon: -113.5,
+                precision,
+                score: 1.0,
+                confidence: 0.9,
+                street: street.to_owned(),
+                housenumber: None,
+                commune: "Edmonton".to_owned(),
+                postcode: String::new(),
+                flags,
+                region: None,
+                distance_m: None,
+            },
+            [0.0; N_FEATS],
+        )
+    }
+
+    #[test]
+    fn ca_quadrant_variants_append_each_quadrant_to_the_street() {
+        let _scope = crate::rules::scope(ca_city_tail_rules());
+        assert_eq!(
+            quadrant_variants("10025 105th Street, Edmonton AB"),
+            vec![
+                "10025 105th Street NW, Edmonton AB",
+                "10025 105th Street NE, Edmonton AB",
+                "10025 105th Street SW, Edmonton AB",
+                "10025 105th Street SE, Edmonton AB",
+            ]
+        );
+        // a direction already written, in every form; no city; the street glued to the city
+        for none in [
+            "10025 105 Street NW, Edmonton AB",
+            "10025 105 Street nw, Edmonton AB",
+            "10025 105 Street N, Edmonton AB",
+            "10025 North 105 Street, Edmonton AB",
+            "10025 105 Street",
+            "10025 105 Street Edmonton, AB",
+            "10220 Jasper Avenue Edmonton, AB",
+        ] {
+            assert!(quadrant_variants(none).is_empty(), "{none}");
+        }
+        // the glued street and city are read as such by the tail, so only the guard holds them
+        assert_eq!(
+            city_tail("10220 Jasper Avenue Edmonton, AB").map(|t| t.city),
+            Some("edmonton".to_owned())
+        );
+        assert!(quadrant_variants("10220 Jasper Avenue Edmonton, AB").is_empty());
+    }
+
+    #[test]
+    fn quadrant_variants_need_the_sheet_key() {
+        // a sheet that reads the same tail but names no quadrants
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        assert!(city_tail("10025 105th Street, Edmonton, XY").is_some());
+        assert!(quadrant_variants("10025 105th Street, Edmonton, XY").is_empty());
+    }
+
+    #[test]
+    fn pick_quadrant_takes_the_only_street_in_the_commune() {
+        let exact = vec!["street_exact", "commune_exact"];
+        let house = || vec![quadrant_hit("house", exact.clone(), "105 St Nw")];
+        let near = || vec![quadrant_hit("near", exact.clone(), "105 St Sw")];
+        let pick =
+            |r: Vec<Vec<(Hit, [f32; N_FEATS])>>| pick_quadrant(r).map(|h| h[0].0.street.clone());
+        // one house among nothing, and a house over a neighbour on another quadrant
+        assert_eq!(
+            pick(vec![vec![], house(), vec![], vec![]]).as_deref(),
+            Some("105 St Nw")
+        );
+        assert_eq!(pick(vec![near(), house()]).as_deref(), Some("105 St Nw"));
+        // no house: the only neighbour; two neighbours or two houses: no answer
+        assert_eq!(pick(vec![vec![], near()]).as_deref(), Some("105 St Sw"));
+        assert_eq!(pick(vec![near(), near()]), None);
+        assert_eq!(pick(vec![house(), house()]), None);
+        // near-misses of "the street in the commune": a fuzzy street, a commune by prefix, a
+        // street without a house, a bare place
+        for (precision, flags) in [
+            ("house", vec!["street_fuzzy", "commune_exact"]),
+            ("house", vec!["street_exact", "commune_prefix"]),
+            ("street", exact.clone()),
+            ("city", vec!["place_exact"]),
+        ] {
+            assert_eq!(
+                pick(vec![vec![quadrant_hit(precision, flags.clone(), "x")]]),
+                None,
+                "{precision} {flags:?}"
+            );
+        }
+        assert_eq!(pick(vec![]), None);
+    }
+
+    #[test]
+    fn ca_pattern_postcodes_leave_every_segment_after_the_street() {
+        let _scope = crate::rules::scope(ca_city_tail_rules());
+        for (raw, want) in [
+            (
+                "2223 Bloor Street West, Toronto, ON M6S 1M7",
+                "2223 Bloor Street West, Toronto, ON",
+            ),
+            (
+                "2223 Bloor Street West, Toronto M6S1M7",
+                "2223 Bloor Street West, Toronto",
+            ),
+            (
+                "2490 rue Notre-Dame Ouest, Montréal, Canada H3J 1N5",
+                "2490 rue Notre-Dame Ouest, Montréal, Canada",
+            ),
+            (
+                "1588 Barrington Street, Halifax, Nova Scotia, B3J",
+                "1588 Barrington Street, Halifax, Nova Scotia",
+            ),
+            (
+                "2041 boul. René-Lévesque, Québec (QC) G1V 0B6",
+                "2041 boul. René-Lévesque, Québec (QC)",
+            ),
+        ] {
+            assert_eq!(strip_pattern_postals(raw).as_deref(), Some(want), "{raw}");
+        }
+        // near-misses: a digit where a letter is due, the first group not last, the street
+        // segment itself, no code at all
+        for raw in [
+            "1 Main Street, Toronto, ON M55 1A9",
+            "1 Main Street, Halifax, B3J Plaza",
+            "B3J 1Z7 Main Street",
+            "1 Main Street, Toronto, ON",
+        ] {
+            assert_eq!(strip_pattern_postals(raw), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn pattern_postcodes_stay_on_a_sheet_without_the_pattern() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        assert_eq!(
+            strip_pattern_postals("1 Main Street, Toronto, ON M6S 1M7"),
+            None
+        );
+    }
+
+    #[test]
+    fn city_tail_choose_region_asks_the_retry_before_the_region_commune() {
+        let exact = vec!["street_exact", "commune_exact"];
+        let at = |precision: &'static str, commune: &str| {
+            let (mut hit, f) = quadrant_hit(precision, exact.clone(), "x");
+            hit.commune = commune.to_owned();
+            vec![(hit, f)]
+        };
+        let commune =
+            |hits: Vec<(Hit, [f32; N_FEATS])>| hits.first().map(|(h, _)| h.commune.clone());
+        let choose = |original, retry: Vec<(Hit, [f32; N_FEATS])>| {
+            commune(city_tail_choose_region(
+                original,
+                "l islet",
+                "quebec",
+                || retry,
+            ))
+        };
+        // a strong answer in the commune the region word names yields to the retry in the city
+        assert_eq!(
+            choose(at("near", "Québec"), at("house", "L'Islet")),
+            Some("L'Islet".to_owned())
+        );
+        // the retry elsewhere or empty: the strong answer stays
+        assert_eq!(
+            choose(at("near", "Québec"), at("house", "Lévis")),
+            Some("Québec".to_owned())
+        );
+        assert_eq!(
+            choose(at("house", "Québec"), Vec::new()),
+            Some("Québec".to_owned())
+        );
+        // near-misses: a strong answer in another commune than the region word, or a weak one in
+        // the region commune — the frozen choice holds (strong elsewhere wins, retry unread)
+        assert_eq!(
+            commune(city_tail_choose_region(
+                at("near", "Lévis"),
+                "l islet",
+                "quebec",
+                || { panic!("read") }
+            )),
+            Some("Lévis".to_owned())
+        );
+        assert_eq!(
+            choose(at("street", "Québec"), at("house", "L'Islet")),
+            Some("L'Islet".to_owned())
+        );
+        assert_eq!(choose(at("street", "Québec"), Vec::new()), None);
+        // the city named like the region (Québec, Québec): nothing to tell apart
+        assert_eq!(
+            commune(city_tail_choose_region(
+                at("near", "Québec"),
+                "quebec",
+                "quebec",
+                || { panic!("read") }
+            )),
+            Some("Québec".to_owned())
+        );
+    }
+
+    fn direction_trailing_rules(with_key: bool) -> &'static crate::rules::Rules {
+        let mut entries: Vec<(u8, String, String)> = [("enabled", "1"), ("street_type_last", "1")]
+            .iter()
+            .map(|(k, v)| (23, (*k).to_owned(), (*v).to_owned()))
+            .collect();
+        if with_key {
+            entries.push((23, "direction_trailing".to_owned(), "n s e w".to_owned()));
+        }
+        for (from, to) in [
+            ("e", "east"),
+            ("w", "west"),
+            ("n", "north"),
+            ("av", "avenue"),
+            ("ave", "avenue"),
+            ("st", "street"),
+        ] {
+            entries.push((24, from.to_owned(), to.to_owned()));
+        }
+        crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+    }
+
+    #[test]
+    fn direction_trailing_key_moves_the_direction_and_shortens_every_word() {
+        let _scope = crate::rules::scope(direction_trailing_rules(true));
+        let key = |p: &str| direction_trailing_key(p, |_, _| true);
+        assert_eq!(key("east 10th avenue").as_deref(), Some("10th ave e"));
+        assert_eq!(
+            key("west hastings street").as_deref(),
+            Some("hastings st w")
+        );
+        assert_eq!(key("w hastings st").as_deref(), Some("hastings st w"));
+        assert_eq!(key("st george street").as_deref(), Some("saint george st"));
+        assert_eq!(key("ste anne street").as_deref(), Some("sainte anne st"));
+        // the key comes after every staged variant
+        let variants = street_data_variants("east 10th avenue");
+        assert_eq!(variants.last().map(String::as_str), Some("10th ave e"));
+        // near-misses: no leading direction or saint, a two-word phrase, a name word that only
+        // looks like a direction elsewhere ("eastern"), a direction already last
+        for none in [
+            "king street west",
+            "east avenue",
+            "eastern avenue east",
+            "10th avenue e",
+            "main street",
+        ] {
+            assert_eq!(key(none), None, "{none}");
+        }
+    }
+
+    #[test]
+    fn direction_trailing_key_needs_the_sheet_key() {
+        let _scope = crate::rules::scope(direction_trailing_rules(false));
+        assert_eq!(
+            direction_trailing_key("east 10th avenue", |_, _| true),
+            None
+        );
+        assert!(!street_data_variants("east 10th avenue").contains(&"10th ave e".to_owned()));
+    }
+
+    fn city_first_rules(on: bool) -> &'static crate::rules::Rules {
+        let mut entries = vec![(23, "enabled".to_owned(), "1".to_owned())];
+        if on {
+            entries.push((23, "city_first".to_owned(), "1".to_owned()));
+        }
+        entries.push((16, "highway".to_owned(), String::new()));
+        crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+    }
+
+    #[test]
+    fn city_first_reordered_puts_the_address_before_the_place() {
+        let _scope = crate::rules::scope(city_first_rules(true));
+        for (raw, want) in [
+            (
+                "WINDSOR ONT (1453 PRINCE RD)",
+                "1453 PRINCE RD, WINDSOR ONT",
+            ),
+            ("LONDON (251 PLATTS LANE) ON", "251 PLATTS LANE, LONDON, ON"),
+            ("LINDSAY, ON (180 KENT ST.)", "180 KENT ST., LINDSAY, ON"),
+            (
+                "OSHAWA, ON - 1200 AIRPORT BLVD.",
+                "1200 AIRPORT BLVD., OSHAWA, ON",
+            ),
+            ("Burnaby BC, 7348 Edmonds St", "7348 Edmonds St, Burnaby BC"),
+            (
+                "ABBOTSFORD BC 3911 MT LEHMAN RD",
+                "3911 MT LEHMAN RD, ABBOTSFORD BC",
+            ),
+            (
+                "Surrey, BC 19540 - 94 Avenue",
+                "19540 94 Avenue, Surrey, BC",
+            ),
+        ] {
+            assert_eq!(city_first_reordered(raw).as_deref(), Some(want), "{raw}");
+        }
+        // near-misses: the address already first, a parenthesis without a number, a dash with a
+        // number before it, a lone number, a place glued to the number, nothing to reorder
+        for raw in [
+            "1453 Prince Rd, Windsor, ON",
+            "Windsor (near the airport) ON",
+            "Highway 7 - 1200 Airport Blvd",
+            "Windsor ON 1453",
+            "Windsor1453 Prince Rd",
+            "Windsor, ON",
+        ] {
+            assert_eq!(city_first_reordered(raw), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn city_first_reordered_moves_a_closing_postal_code_behind_the_place() {
+        let _scope = crate::rules::scope(ca_city_tail_rules());
+        assert_eq!(
+            city_first_reordered("Calgary AB 5111 47 St NE T3J 0V4").as_deref(),
+            Some("5111 47 St NE, Calgary AB, T3J 0V4")
+        );
+        assert_eq!(
+            city_first_reordered("Calgary AB 5111 47 St NE T3J0V4").as_deref(),
+            Some("5111 47 St NE, Calgary AB, T3J0V4")
+        );
+        // near-misses: a code that is the whole address, a code-like word inside the street,
+        // a number dash with nothing after it
+        assert_eq!(city_first_reordered("Calgary AB 5111 T3J 0V4"), None);
+        assert_eq!(
+            city_first_reordered("Calgary AB 5111 A1A Street").as_deref(),
+            Some("5111 A1A Street, Calgary AB")
+        );
+        assert_eq!(city_first_reordered("Surrey, BC 19540 -"), None);
+    }
+
+    #[test]
+    fn city_first_reordered_needs_the_sheet_key() {
+        let _scope = crate::rules::scope(city_first_rules(false));
+        assert_eq!(city_first_reordered("WINDSOR ONT (1453 PRINCE RD)"), None);
+    }
+
+    #[test]
+    fn city_first_quality_puts_an_exact_street_before_a_fuzzy_house() {
+        let one = |precision: &'static str, flag: &'static str, number: &str| {
+            let (mut hit, feats) = quadrant_hit(precision, vec![flag], "Queen ST");
+            hit.housenumber = Some(number.to_owned());
+            vec![(hit, feats)]
+        };
+        let q = |hits: &[(Hit, [f32; N_FEATS])]| {
+            city_first_quality(hits, "230 Queen Street, Ottawa, ON")
+        };
+        // "Ottawa, ON, 230 Queen Street": the exact street's interpolation beats a fuzzy house
+        assert!(q(&one("interp", "street_exact", "230")) > q(&one("house", "street_fuzzy", "230")));
+        assert!(q(&one("near", "street_exact", "236")) > q(&one("house", "street_fuzzy", "230")));
+        // between two exact streets, or two fuzzy ones, precision still decides
+        assert!(q(&one("house", "street_exact", "230")) > q(&one("interp", "street_exact", "230")));
+        assert!(q(&one("house", "street_fuzzy", "230")) > q(&one("interp", "street_fuzzy", "230")));
+        // near-misses: a bare street, a neighbour far from the number written
+        assert!(q(&one("street", "street_exact", "")) < q(&one("house", "street_fuzzy", "230")));
+        assert!(q(&one("near", "street_exact", "11530")) < q(&one("house", "street_fuzzy", "230")));
+        assert!(q(&[]) < q(&one("house", "street_fuzzy", "230")));
+    }
+
+    #[test]
+    fn neighbour_far_from_written_counts_house_numbers() {
+        let near = |number: &str, precision: &'static str| {
+            let (mut hit, _) = quadrant_hit(precision, vec!["street_exact"], "Eglinton AVE E");
+            hit.housenumber = Some(number.to_owned());
+            hit
+        };
+        // a neighbour 2 800 numbers away does not settle; one at the span does
+        assert!(neighbour_far_from_written(
+            &near("600", "near"),
+            "3400 Eglinton Ave E, Toronto"
+        ));
+        assert!(!neighbour_far_from_written(
+            &near("3500", "near"),
+            "3400 Eglinton Ave E, Toronto"
+        ));
+        assert!(neighbour_far_from_written(
+            &near("3501", "near"),
+            "3400 Eglinton Ave E, Toronto"
+        ));
+        assert!(!neighbour_far_from_written(
+            &near("3300", "near"),
+            "3400 Eglinton Ave E, Toronto"
+        ));
+        // suffixes are read by their digits
+        assert!(!neighbour_far_from_written(
+            &near("3402A", "near"),
+            "3400B Eglinton Ave E"
+        ));
+        // near-misses: another precision, no number written, no number stored
+        assert!(!neighbour_far_from_written(
+            &near("600", "house"),
+            "3400 Eglinton Ave E, Toronto"
+        ));
+        assert!(!neighbour_far_from_written(
+            &near("600", "interp"),
+            "3400 Eglinton Ave E, Toronto"
+        ));
+        assert!(!neighbour_far_from_written(
+            &near("600", "near"),
+            "Eglinton Ave E, Toronto"
+        ));
+        let mut bare = near("600", "near");
+        bare.housenumber = None;
+        assert!(!neighbour_far_from_written(
+            &bare,
+            "3400 Eglinton Ave E, Toronto"
+        ));
+    }
+
+    #[test]
+    fn ca_unit_hyphen_reads_unit_and_civic_number() {
+        let _scope = crate::rules::scope(ca_city_tail_rules());
+        for (raw, want) in [
+            (
+                "9-2755 Denison St, Markham, ON",
+                "2755 Denison St, Markham, ON",
+            ),
+            ("23-789 Yonge Street, Toronto", "789 Yonge Street, Toronto"),
+            ("12B-450 Main St", "450 Main St"),
+            (
+                "#102-11442 168 Street NW, Edmonton",
+                "11442 168 Street NW, Edmonton",
+            ),
+            ("7 - 2425 Clover Ave", "2425 Clover Ave"),
+            ("1-1749 Portage Ave.", "1749 Portage Ave."),
+            ("3-450B Main St", "450B Main St"),
+        ] {
+            assert_eq!(unit_hyphen_civic(raw).as_deref(), Some(want), "{raw}");
+        }
+        // ranges and other near-misses: close numbers, a civic of 20 or less, the civic exactly
+        // three times the unit, two letters after the unit, a civic glued to a word, no hyphen
+        for raw in [
+            "1300-1308 de Portland",
+            "1-3 rue du Val-Marie",
+            "2-20 Main St",
+            "10-30 Main St",
+            "12BC-450 Main St",
+            "9-2755Denison St",
+            "9 2755 Denison St",
+            "Denison St 9-2755",
+        ] {
+            assert_eq!(unit_hyphen_civic(raw), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn unit_hyphen_needs_the_sheet_key() {
+        let _scope = crate::rules::scope(city_tail_fixture_rules());
+        assert_eq!(unit_hyphen_civic("9-2755 Denison St, Markham, XY"), None);
+    }
+
+    fn number_first_rules(with_key: bool) -> &'static crate::rules::Rules {
+        let mut entries: Vec<(u8, String, String)> = vec![
+            (23, "enabled".to_owned(), "1".to_owned()),
+            (23, "street_type_last".to_owned(), "1".to_owned()),
+        ];
+        if with_key {
+            entries.push((23, "number_first_types".to_owned(), "hwy".to_owned()));
+        }
+        for (from, to) in [("hwy", "highway"), ("rd", "road")] {
+            entries.push((24, from.to_owned(), to.to_owned()));
+        }
+        crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+    }
+
+    #[test]
+    fn number_first_key_puts_the_road_number_before_its_type() {
+        let _scope = crate::rules::scope(number_first_rules(true));
+        let key = |p: &str| number_first_key(p, |_, _| true);
+        for (phrase, want) in [
+            ("highway 7", "7 hwy"),
+            ("highway no 3", "3 hwy"),
+            ("no 2 highway", "2 hwy"),
+            ("hwy 11", "11 hwy"),
+            ("7 highway", "7 hwy"),
+        ] {
+            assert_eq!(key(phrase).as_deref(), Some(want), "{phrase}");
+        }
+        // the key comes after every staged variant
+        assert_eq!(
+            street_data_variants("highway 7").last().map(String::as_str),
+            Some("7 hwy")
+        );
+        // near-misses: a type the sheet does not key number first, a named highway, two numbers,
+        // a five-digit number, no number
+        for none in [
+            "no 3 road",
+            "trans canada highway",
+            "highway 7 8",
+            "highway 12345",
+            "highway",
+            "east bay highway",
+        ] {
+            assert_eq!(key(none), None, "{none}");
+        }
+    }
+
+    #[test]
+    fn number_first_key_needs_the_sheet_key() {
+        let _scope = crate::rules::scope(number_first_rules(false));
+        assert_eq!(number_first_key("highway 7", |_, _| true), None);
+    }
+
+    fn glue_rules(with_key: bool) -> &'static crate::rules::Rules {
+        let mut entries: Vec<(u8, String, String)> = vec![
+            (23, "enabled".to_owned(), "1".to_owned()),
+            (23, "number_first_types".to_owned(), "hwy".to_owned()),
+        ];
+        if with_key {
+            entries.push((23, "glue_road_numbers".to_owned(), "1".to_owned()));
+        }
+        for t in ["road", "rd", "avenue", "ave", "highway", "hwy", "street"] {
+            entries.push((16, t.to_owned(), String::new()));
+        }
+        entries.push((24, "hwy".to_owned(), "highway".to_owned()));
+        crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+    }
+
+    #[test]
+    fn glue_road_numbers_keeps_the_road_number_in_the_name() {
+        let _scope = crate::rules::scope(glue_rules(true));
+        for (raw, want) in [
+            (
+                "5300 No. 3 Road, Richmond, BC",
+                "5300 No3 Road, Richmond, BC",
+            ),
+            ("3700 No 3 Rd, Richmond BC", "3700 No3 Rd, Richmond BC"),
+            ("9371 no 5 rd", "9371 No5 rd"),
+            (
+                "5515 47 A Avenue, Wetaskiwin",
+                "5515 47A Avenue, Wetaskiwin",
+            ),
+            ("12B 47 A Avenue, Wetaskiwin", "12B 47A Avenue, Wetaskiwin"),
+        ] {
+            assert_eq!(glue_road_numbers(raw).as_deref(), Some(want), "{raw}");
+        }
+        // near-misses: a highway (keyed number first), no type after, a three-digit "No", a
+        // two-letter suffix, no house number first, the pattern outside the street segment
+        for raw in [
+            "8740 No 2 Highway, Great Village",
+            "5300 No. 3 Richmond",
+            "5300 No. 123 Road",
+            "5515 47 AB Avenue",
+            "No. 3 Road 5300",
+            "Richmond, 5300 No. 3 Road",
+            "5515 1234 A Avenue",
+            "Main No 3 Road, Richmond",
+        ] {
+            assert_eq!(glue_road_numbers(raw), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn glue_road_numbers_needs_the_sheet_key() {
+        let _scope = crate::rules::scope(glue_rules(false));
+        assert_eq!(glue_road_numbers("5300 No. 3 Road, Richmond, BC"), None);
+    }
+
+    fn interp_rules(entries: &[(&str, &str)]) -> &'static crate::rules::Rules {
+        let mut all = vec![(23, "enabled".to_owned(), "1".to_owned())];
+        all.extend(
+            entries
+                .iter()
+                .map(|(k, v)| (23, (*k).to_owned(), (*v).to_owned())),
+        );
+        crate::rules::from_section(&crate::rules::serialize_entries(&all))
+    }
+
+    #[test]
+    fn interp_limits_default_to_dense_numbering() {
+        let _scope = crate::rules::scope(interp_rules(&[]));
+        assert_eq!(interp_limits(), (12, 0.3));
+    }
+
+    #[test]
+    fn interp_limits_come_from_the_sheet() {
+        let _scope = crate::rules::scope(ca_city_tail_rules());
+        assert_eq!(interp_limits(), (400, 2.0));
+        // near-misses: an unreadable, a zero or a negative distance keep the default
+        for (gap, km, want) in [
+            ("x", "2.0", (12, 2.0)),
+            ("400", "nan", (400, 0.3)),
+            ("400", "0", (400, 0.3)),
+            ("400", "-1.0", (400, 0.3)),
+            ("-5", "2.0", (12, 2.0)),
+        ] {
+            let _inner = crate::rules::scope(interp_rules(&[
+                ("interp_max_gap", gap),
+                ("interp_max_km", km),
+            ]));
+            assert_eq!(interp_limits(), want, "{gap} {km}");
+        }
+    }
+
+    #[test]
+    fn city_first_keeps_a_merged_city_within_reach_of_its_point() {
+        let at = |precision: &'static str, flags: Vec<&'static str>, lat: f64, lon: f64| {
+            let (mut hit, _) = quadrant_hit(precision, flags, "Wingarden CRT");
+            hit.lat = lat;
+            hit.lon = lon;
+            hit
+        };
+        let toronto = [(43.7064, -79.3986)];
+        let exact = vec!["street_exact"];
+        // Scarborough, ~20 km from Toronto's point: kept; the exact commune is kept anywhere
+        assert!(city_first_keeps_place(
+            &at("house", exact.clone(), 43.80, -79.25),
+            &toronto
+        ));
+        assert!(city_first_keeps_place(
+            &at("street", vec!["commune_exact"], 49.0, -100.0),
+            &toronto
+        ));
+        // near-misses: 40 km off, a fuzzy street, a bare street, no city point at all
+        assert!(!city_first_keeps_place(
+            &at("house", exact.clone(), 44.0, -79.0),
+            &toronto
+        ));
+        assert!(!city_first_keeps_place(
+            &at("house", vec!["street_fuzzy"], 43.80, -79.25),
+            &toronto
+        ));
+        assert!(!city_first_keeps_place(
+            &at("street", exact.clone(), 43.80, -79.25),
+            &toronto
+        ));
+        assert!(!city_first_keeps_place(
+            &at("house", exact, 43.80, -79.25),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn commaless_postal_tail_sets_aside_the_code_the_region_and_the_country() {
+        let _scope = crate::rules::scope(ca_city_tail_rules());
+        let bare = |q: &str| commaless_postal_tail(q);
+        assert_eq!(
+            bare("1150 Station St Vancouver BC V6A 4C7").as_deref(),
+            Some("1150 Station St Vancouver")
+        );
+        assert_eq!(
+            bare("12 rue Donnacona Québec (Québec) G1R 3Y7").as_deref(),
+            Some("12 rue Donnacona Québec")
+        );
+        assert_eq!(
+            bare("2072 rue Gignac Shawinigan (Québec) G9N6V7").as_deref(),
+            Some("2072 rue Gignac Shawinigan")
+        );
+        assert_eq!(
+            bare("1 Tower Rd Prince George British Columbia V2N 4Z9").as_deref(),
+            Some("1 Tower Rd Prince George")
+        );
+        assert_eq!(
+            bare("165 Richmond St Charlottetown Prince Edward Island C1A 1J1").as_deref(),
+            Some("165 Richmond St Charlottetown")
+        );
+        // no region: only the code goes
+        assert_eq!(
+            bare("4141 Living Arts Dr Mississauga L5B 4B8").as_deref(),
+            Some("4141 Living Arts Dr Mississauga")
+        );
+        // near-misses: a comma, no code, a code that is no pattern code, too little left, a
+        // region that would leave too little
+        assert_eq!(bare("1150 Station St, Vancouver BC V6A 4C7"), None);
+        assert_eq!(bare("1150 Station St Vancouver BC"), None);
+        assert_eq!(bare("1150 Station St Vancouver BC 12345"), None);
+        assert_eq!(bare("1150 Station V6A 4C7"), None);
+        assert_eq!(
+            bare("1150 Station BC V6A 4C7").as_deref(),
+            Some("1150 Station BC")
+        );
+    }
+
+    #[test]
+    fn commaless_postal_tail_sets_aside_country_words_around_the_code() {
+        let entries = vec![
+            (23, "enabled".to_owned(), "1".to_owned()),
+            (23, "postal_pattern".to_owned(), "A9A 9A9".to_owned()),
+            (23, "regions".to_owned(), "BC ON".to_owned()),
+            (23, "region_names".to_owned(), "ontario=ON".to_owned()),
+            (11, "canada".to_owned(), String::new()),
+        ];
+        let _scope = crate::rules::scope(crate::rules::from_section(
+            &crate::rules::serialize_entries(&entries),
+        ));
+        assert_eq!(
+            commaless_postal_tail("6393 NW Marine Drive Vancouver BC Canada V6T 1Z2").as_deref(),
+            Some("6393 NW Marine Drive Vancouver")
+        );
+        assert_eq!(
+            commaless_postal_tail("131 Farnham Avenue Toronto Ontario M4V 1H7 Canada").as_deref(),
+            Some("131 Farnham Avenue Toronto")
+        );
+    }
+
+    #[test]
+    fn commaless_postal_tail_needs_the_sheet_pattern() {
+        let _scope = crate::rules::scope(city_first_rules(true));
+        assert_eq!(
+            commaless_postal_tail("1150 Station St Vancouver BC V6A 4C7"),
+            None
+        );
+    }
+
+    fn type_first_rules(on: bool) -> &'static crate::rules::Rules {
+        let mut entries = vec![(23, "enabled".to_owned(), "1".to_owned())];
+        if on {
+            entries.push((23, "type_first_siblings".to_owned(), "1".to_owned()));
+        }
+        for (from, to) in [
+            ("blvd", "boulevard"),
+            ("boulevard", "blvd"),
+            ("boul", "boulevard"),
+            ("boulevard", "boul"),
+            ("av", "avenue"),
+            ("avenue", "av"),
+            ("ave", "avenue"),
+            ("avenue", "ave"),
+            ("o", "ouest"),
+            ("ouest", "o"),
+            ("n", "nord"),
+            ("nord", "n"),
+            ("no", "nord"),
+            ("nord", "no"),
+        ] {
+            entries.push((24, from.to_owned(), to.to_owned()));
+        }
+        entries.push((16, "boulevard".to_owned(), String::new()));
+        entries.push((16, "avenue".to_owned(), String::new()));
+        crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+    }
+
+    #[test]
+    fn a_type_written_in_front_reaches_the_sheet_sibling_short_form() {
+        let _scope = crate::rules::scope(type_first_rules(true));
+        let one_word = |from: &str, to: &str| !from.contains(' ') && !to.contains(' ');
+        assert_eq!(
+            type_first_sibling_keys("blvd manseau", one_word),
+            vec!["boul manseau".to_owned()]
+        );
+        assert_eq!(
+            type_first_sibling_keys("ave des pins ouest", one_word),
+            vec!["av des pins ouest".to_owned(), "av des pins o".to_owned()]
+        );
+        // the staged variants carry the key after their own
+        let variants = street_data_variants("blvd manseau");
+        assert_eq!(variants.last().map(String::as_str), Some("boul manseau"));
+        assert!(variants.contains(&"boulevard manseau".to_owned()));
+        // near-misses: a short form that is no type ("o" for ouest), the full word, the type
+        // trailing, one word alone
+        assert!(type_first_sibling_keys("o street", one_word).is_empty());
+        assert!(type_first_sibling_keys("n chemin", one_word).is_empty());
+        assert!(type_first_sibling_keys("boulevard manseau", one_word).is_empty());
+        assert!(type_first_sibling_keys("manseau blvd", one_word).is_empty());
+        assert!(type_first_sibling_keys("blvd", one_word).is_empty());
+    }
+
+    #[test]
+    fn type_first_sibling_keys_need_the_sheet_key() {
+        let _scope = crate::rules::scope(type_first_rules(false));
+        let one_word = |from: &str, to: &str| !from.contains(' ') && !to.contains(' ');
+        assert!(type_first_sibling_keys("blvd manseau", one_word).is_empty());
+        assert!(!street_data_variants("blvd manseau").contains(&"boul manseau".to_owned()));
+    }
+
+    #[test]
+    fn ca_accented_region_names_are_regions_with_their_code() {
+        // "Lévis (Québec) G6V 4A4": the writer's accents and hyphens, the rule's plain words
+        // (Canada E3.1, 29.10.2026: 219 rows of the clean set, GridPin 52 against 146 and 148)
+        let _scope = crate::rules::scope(ca_city_tail_rules());
+        let cfg = &crate::rules::rules().city_tail;
+        for (name, code) in [
+            ("Québec", "QC"),
+            ("QUÉBEC", "QC"),
+            ("Île-du-Prince-Édouard", "PE"),
+            ("Colombie-Britannique", "BC"),
+            ("Nouvelle-Écosse", "NS"),
+        ] {
+            assert!(region_matches(cfg, name), "{name}");
+            assert_eq!(region_code(cfg, name).as_deref(), Some(code), "{name}");
+        }
+        // near-misses: one letter more, a city named after the province, a word left over
+        for bad in ["Québecc", "Québec City", "Ville de Québec", "Lévis", "Île"] {
+            assert!(!region_matches(cfg, bad), "{bad}");
+            assert_eq!(region_code(cfg, bad), None, "{bad}");
+        }
+        assert_eq!(
+            split_region_postal(cfg, "Québec G6V 4A4"),
+            Some(("Québec", None))
+        );
+        let tail = city_tail("18, rue Notre Dame, Lévis (Québec) G6V 4A4").unwrap();
+        assert_eq!(
+            (tail.city.as_str(), tail.region.as_deref()),
+            ("levis", Some("QC"))
+        );
+    }
+
+    #[test]
+    fn ca_city_tail_finds_the_city_in_every_tail_form_and_drops_the_code() {
+        let _scope = crate::rules::scope(ca_city_tail_rules());
+        for q in [
+            "100 King St W, Toronto, ON M5X 1A9",
+            "100 King St W, Toronto ON M5X 1A9",
+            "100 King St W, Toronto, ON, M5X 1A9",
+            "100 King St W, Toronto, ON M5X1A9",
+            "100 King St W, Toronto ON m5x1a9",
+        ] {
+            let tail = city_tail(q).unwrap_or_else(|| panic!("{q}"));
+            assert_eq!(tail.city, "toronto", "{q}");
+            assert_eq!(tail.region.as_deref(), Some("ON"), "{q}");
+            for kept in [
+                tail.retry.as_deref().unwrap_or(""),
+                tail.without_region.as_str(),
+            ] {
+                assert!(
+                    !kept.to_lowercase().contains("m5x"),
+                    "{q} kept the code: {kept}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_sheet_without_postal_pattern_reads_no_alphanumeric_code() {
+        // the US pack has no postal_pattern: "ON M5X 1A9" is no region segment there
+        let _scope = crate::rules::scope(region_postal_fixture_rules("comma region_postal", None));
+        let cfg = &crate::rules::rules().city_tail;
+        assert!(!pattern_postal(cfg, "M5X 1A9"));
+        assert_eq!(split_region_postal(cfg, "IL M5X 1A9"), None);
     }
 
     #[test]

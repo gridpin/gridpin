@@ -8,6 +8,7 @@ RULES=$(if $(wildcard rules),--rules rules,)
 MODELS=--model ml/parser_v0.bin --rank ml/rank_v0.bin $(RULES)
 GEONAMES_RS=data/geonames_rs.txt
 GEONAMES_US=data/geonames_us.txt
+GEONAMES_CA=data/geonames_ca.txt
 
 # All recipes are phony (not files). Without this, a file named like a target (e.g. `smoke`)
 # in the working dir makes `make` consider the target up to date and silently skip the recipe — which
@@ -46,6 +47,9 @@ test-py: bindings mc
 	.venv-py/bin/python -m pytest gridpin/tests/ -q
 	# gridpin-mcp: sheet downloads and agent tools; the MCP wiring tests skip without the mcp SDK
 	.venv-py/bin/python -m pytest mcp/tests/ -q
+	# gridpin-cascade: offline first pass + fallback; standard library only, so it shares .venv-py.
+	# The package is not part of every checkout, so its tests run only where it is present.
+	$(if $(wildcard integrations/cascade/tests),.venv-py/bin/python -m pytest integrations/cascade/tests/ -q -p no:cacheprovider)
 
 # langchain-gridpin (integrations/langchain) against the Monaco smoke sheet, in its own venv:
 # langchain-tests brings pytest plugins (asyncio, socket, recording) that must not load into
@@ -181,6 +185,14 @@ us: engine
 	GRIDPIN_MEM=8GB nice -n 19 python3 prep/us_tiger.py $(TIGER_DIR) $(GEONAMES_POSTAL_US) data/us_norm.parquet data/us_tiger.parquet --manifest data/us_manifest.json
 	GRIDPIN_MEM=8GB nice -n 19 python3 prep/export_build.py data/us_norm.parquet,data/us_tiger.parquet data/build_us.csv.gz
 	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_us.csv.gz data/us.bin $(MODELS) --meta data/us_manifest.json
+
+ca: RULES=$(if $(wildcard rules),--rules rules/ca,)
+ca: engine
+	test -f $(GEONAMES_CA) || python3 prep/fetch_zip.py https://download.geonames.org/export/dump/CA.zip CA.txt $(GEONAMES_CA)
+	nice -n 19 python3 prep/overture.py CA $(GEONAMES_CA)
+	$(if $(wildcard rules),python3 prep/ca_rules.py,)
+	GRIDPIN_MEM=6GB nice -n 19 python3 prep/export_build.py data/ca_norm.parquet data/build_ca.csv.gz
+	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_ca.csv.gz data/ca.bin $(MODELS) --meta data/ca_manifest.json
 
 rs: engine
 	test -f $(GEONAMES_RS) || python3 prep/fetch_zip.py https://download.geonames.org/export/dump/RS.zip RS.txt $(GEONAMES_RS)

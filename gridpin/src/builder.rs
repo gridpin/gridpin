@@ -102,6 +102,26 @@ fn plausible_pc(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ')
 }
 
+/// The sheet's own postal-code shape (city_tail `postal_pattern`, "A9A 9A9": A a letter, 9 a digit)
+/// also passes, spaces aside: a Canadian code opens with a letter ("V9Z 1K2"), which `plausible_pc`
+/// refuses, so a Canadian answer carried no postcode. Only the declared shape passes — the junk
+/// letter-first values of other sources ("ROW", "MISSION") still do not (Canada, 30.10.2026).
+fn plausible_display_pc(s: &str, pattern: Option<&str>) -> bool {
+    plausible_pc(s)
+        || pattern.is_some_and(|pattern| {
+            let shape: Vec<u8> = pattern.bytes().filter(|b| *b != b' ').collect();
+            let given: Vec<u8> = s.bytes().filter(|b| *b != b' ').collect();
+            s.len() <= 8
+                && !shape.is_empty()
+                && shape.len() == given.len()
+                && shape.iter().zip(&given).all(|(want, got)| match want {
+                    b'A' => got.is_ascii_alphabetic(),
+                    b'9' => got.is_ascii_digit(),
+                    _ => false,
+                })
+        })
+}
+
 /// Append one u8-length-prefixed string to SEC_NAMES. The names section has no room for an entry
 /// longer than 255 bytes, so reject instead of silently truncating it to another value.
 fn push_name(names: &mut Vec<u8>, s: &str) -> Result<u32> {
@@ -507,6 +527,15 @@ pub fn build(
     // full postcode string (NL "1012XJ": 4 digits + 2 letters); falls back to the numeric
     // code_postal when absent. Preserves letters and leading zeros in output.
     let c_cp_disp: Option<usize> = headers.iter().position(|h| h == "code_postal_display");
+    // the sheet's postal-code shape, read from its rules before the rows (see `plausible_display_pc`)
+    let postal_pattern: Option<String> = match rules_dir {
+        Some(d) => crate::rules::entries_from_tsv_dir(d)
+            .with_context(|| format!("cannot read rules from {d:?}"))?
+            .into_iter()
+            .find(|(section, key, _)| *section == 23 && key == "postal_pattern")
+            .map(|(_, _, value)| value),
+        None => None,
+    };
 
     // section accumulators
     let mut streets_fst = MapBuilder::memory();
@@ -757,7 +786,7 @@ pub fn build(
             "0" => "",
             s => s,
         };
-        let cp_key: &str = if plausible_pc(cp_disp_s) {
+        let cp_key: &str = if plausible_display_pc(cp_disp_s, postal_pattern.as_deref()) {
             cp_disp_s
         } else {
             cp_num
@@ -2470,6 +2499,57 @@ mod tests {
             "6-digit postcode must not be truncated to 5 (got lon {})",
             hit[0].0.lon
         );
+    }
+
+    #[test]
+    fn a_letter_first_code_is_shown_only_in_the_sheet_declared_shape() {
+        // "V9Z 1K2" opens with a letter: shown when the sheet's rules declare postal_pattern
+        // "A9A 9A9"; junk letter-first values ("ROW") and a code of another shape never are, and
+        // without the rule the letter-first code is refused as before (Canada, 30.10.2026).
+        let build_with = |rules: Option<&str>| {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "gridpin-ca-postcode-{}-{serial}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let _scratch = crate::scratch::Scratch::keep(&dir);
+            let src = dir.join("ca.csv");
+            std::fs::write(
+                &src,
+                "nom_voie_norm,code_insee,nom_commune_norm,code_postal,code_postal_display,numero,rep,lon,lat,nom_voie,nom_commune\n\
+                 front st,001,victoria,0,V9Z 1K2,1,,-123.40,48.43,Front ST,Victoria\n\
+                 front st,001,victoria,0,V9Z 1K3,3,,-123.40,48.43,Front ST,Victoria\n\
+                 king st,001,victoria,0,ROW,5,,-123.41,48.43,King ST,Victoria\n\
+                 main st,001,victoria,0,V9Z1K,7,,-123.42,48.43,Main ST,Victoria\n\
+                 oak st,001,victoria,0,V99 1K2,9,,-123.43,48.43,Oak ST,Victoria\n",
+            )
+            .unwrap();
+            let rules_dir = rules.map(|tsv| {
+                let d = dir.join("rules");
+                std::fs::create_dir_all(&d).unwrap();
+                std::fs::write(d.join("city_tail.tsv"), tsv).unwrap();
+                d
+            });
+            let out = dir.join("ca.bin");
+            build(&src, &out, None, None, rules_dir.as_deref(), None, None).expect("build");
+            crate::query::Index::open(&out).unwrap()
+        };
+        let postcode = |idx: &crate::query::Index, q: &str| {
+            idx.query(q, 1)
+                .first()
+                .map(|h| h.postcode.clone())
+                .unwrap_or_default()
+        };
+        let on = build_with(Some("postal_pattern\tA9A 9A9\n"));
+        assert_eq!(postcode(&on, "front st 1 victoria"), "V9Z 1K2");
+        assert_eq!(postcode(&on, "front st 3 victoria"), "V9Z 1K3");
+        assert_eq!(postcode(&on, "king st 5 victoria"), "");
+        assert_eq!(postcode(&on, "main st 7 victoria"), "");
+        assert_eq!(postcode(&on, "oak st 9 victoria"), "");
+        let off = build_with(None);
+        assert_eq!(postcode(&off, "front st 1 victoria"), "");
     }
 
     #[test]

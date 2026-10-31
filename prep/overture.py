@@ -37,6 +37,7 @@ from de_sources import (
     stats_witness_problems as de_stats_witness_problems,
     validate_manifest as validate_de_manifest,
 )
+from ca_provinces import GEONAMES_ADMIN1_TO_PROVINCE
 from us_umbrella import attach_umbrella
 
 # Per-country upstream provider + license for Overture ADDRESSES. Verified against the
@@ -69,6 +70,12 @@ ADDRESS_LICENSE = {
            "license": "mixed permissive: U.S. Government work (17 U.S.C. §105), NYC Open Data "
                       "(Admin Code §23-502), CC0 1.0, PDDL 1.0, CC BY 4.0, open data terms of "
                       "Los Angeles County, Oakland County, MassGIS, MnGeo, Oregon GEOHub"},
+    # CA (owner decisions ANSWERS §162-§163, licence check 2026-10-28): all three Canadian datasets,
+    # terms read at each primary source (code/eval/work/kanada_licenzii_20261028/report.md).
+    "ca": {"provider": "Statistics Canada National Address Register, Adresses Quebec (MRNF) and "
+                       "Government of Yukon civic address points via OpenAddresses",
+           "license": "mixed permissive: Statistics Canada Open Licence, CC BY 4.0 (Quebec), "
+                      "Open Government Licence - Yukon"},
 }
 S3 = f"s3://overturemaps-us-west-2/release/{RELEASE}/theme=addresses/type=*/*.parquet"
 
@@ -84,6 +91,10 @@ US_GREEN_DATASETS = (
     "us/wi/waupaca",
 )
 # The contour: 50 states and DC (address_levels[1].value); territories (VI, PR, ...) stay out.
+# CA: the release pinned by the owner (ANSWERS §163) and the three datasets of the Canadian rows
+# (count 2026-10-28: 11 579 915 / 5 342 381 / 23 975; every row has exactly one source).
+CA_RELEASE = "2026-10-21.0"
+CA_DATASETS = ("ca/countrywide", "ca/qc/province", "ca/yt/province")
 US_STATES = (
     "AK", "AL", "AR", "AZ", "CA", "CO", "CT", "DC", "DE", "FL", "GA", "HI", "IA", "ID", "IL", "IN",
     "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO", "MS", "MT", "NC", "ND", "NE", "NH", "NJ",
@@ -101,6 +112,8 @@ def release_for_country(cc: str) -> str:
         return "2026-08-19.0"
     if cc.lower() == "us":  # ANSWERS §140
         return US_RELEASE
+    if cc.lower() == "ca":  # ANSWERS §163
+        return CA_RELEASE
     return DE_RELEASE if cc.lower() == "de" else RELEASE
 
 
@@ -111,6 +124,8 @@ BOUNDED_STORAGE = {
     "BR": ("br_build", 12, "6GiB"),
     # US green rows are ~1.5x BR; same streamed extraction, the duplicate merge runs locally.
     "US": ("us_build", 16, "6GiB"),
+    # CA is ~17 % of US rows (16.9 M); same streamed extraction.
+    "CA": ("ca_build", 8, "4GiB"),
 }
 
 
@@ -202,6 +217,17 @@ def address_manifest(cc: str, geonames: bool = False, release: str | None = None
             + f"; via Overture Maps / OpenAddresses, release {selected_release}; "
             "address normalization applied; partial coverage (sources with an explicit right "
             "to redistribute)" + geonames_credit
+        )
+    if country == "ca":
+        # The notices the three licences require (Statistics Canada Open Licence "Acknowledgment
+        # of Source" (b); CC BY 4.0; Open Government Licence - Yukon v2.0), read 2026-10-28.
+        result["attribution"] = (
+            "Adapted from Statistics Canada, National Address Register, 2024. This does not "
+            "constitute an endorsement by Statistics Canada of this product; Adresses Quebec, "
+            "Ministere des Ressources naturelles et des Forets du Quebec (CC BY 4.0); contains "
+            "information licensed under the Open Government Licence - Yukon; "
+            f"via Overture Maps / OpenAddresses, release {selected_release}; "
+            "address normalization applied" + geonames_credit
         )
     return result
 
@@ -307,7 +333,15 @@ US_POSTCODE_SQL = (
     "CASE WHEN regexp_full_match(postcode, '[0-9]{5}-[0-9]{4}') "
     "THEN substr(postcode, 1, 5) ELSE coalesce(postcode, '') END"
 )
-POSTCODE_SQL = {"BR": BR_POSTCODE_SQL, "US": US_POSTCODE_SQL}
+# Canadian postal code: letter-digit-letter digit-letter-digit. The source writes it glued and in
+# capitals ("V9Z1K2", 16.9 M of 16.95 M rows), people write it with a space; the sheet keeps the
+# spaced form "V9Z 1K2". Anything else (9 902 already spaced, 44 138 empty) passes through the same rule.
+CA_POSTCODE_SQL = (
+    "CASE WHEN regexp_full_match(upper(replace(postcode, ' ', '')), '[A-Z][0-9][A-Z][0-9][A-Z][0-9]') "
+    "THEN substr(upper(replace(postcode, ' ', '')), 1, 3) || ' ' || substr(upper(replace(postcode, ' ', '')), 4, 3) "
+    "ELSE coalesce(postcode, '') END"
+)
+POSTCODE_SQL = {"BR": BR_POSTCODE_SQL, "US": US_POSTCODE_SQL, "CA": CA_POSTCODE_SQL}
 
 # US city: postal_city when filled (76.8 % of the green rows), else the second address level,
 # which mixes a city ("Phoenix"), a county ("Fairfax County", Louisiana "Parish"), New Jersey's
@@ -354,6 +388,17 @@ def select_src_sql(cc: str, s3: str) -> str:
         where_clause = (
             f"country = 'US' AND sources[1].dataset IN ({_sql_list(US_GREEN_DATASETS)}) "
             f"AND address_levels[1].value IN ({_sql_list(US_STATES)}) "
+            "AND street IS NOT NULL AND number IS NOT NULL"
+        )
+    elif cc == "CA":
+        # The city is always the second level and the province the first (survey 2026-10-28:
+        # 16 891 094 rows with both, 21 350 with the province only, 9 852 Statistics Canada rows
+        # with no level at all -- these get the umbrella city and keep an empty province).
+        city = "coalesce(address_levels[2].value, '')"
+        province = "coalesce(address_levels[1].value, '')"
+        evidence_columns = ""
+        where_clause = (
+            f"country = 'CA' AND sources[1].dataset IN ({_sql_list(CA_DATASETS)}) "
             "AND street IS NOT NULL AND number IS NOT NULL"
         )
     else:
@@ -520,8 +565,15 @@ TITLE = ("CASE WHEN {col} = upper({col}) AND len({col}) > 3 THEN "
          "x -> upper(x[1]) || x[2:]), ' ') ELSE {col} END")
 
 
-def base_sql(source: str = "src") -> str:
+# The numeric postcode of the index (u32) is the first digit run of the raw code. A Canadian code
+# starts with a letter ("V9Z 1K2"), and its first digit run ("9") is no postcode at all: Canada
+# keeps the numeric code empty and carries the full code in code_postal_display only (E1.4, 28.10).
+POSTAL_DIGITS_SQL = {"CA": "CAST(NULL AS VARCHAR)"}
+
+
+def base_sql(source: str = "src", cc: str | None = None) -> str:
     norm_voie = NORM.format(col="nom_voie")
+    postal_digits = POSTAL_DIGITS_SQL.get((cc or "").upper(), "regexp_extract(postcode_raw, '[0-9]+')")
     norm_commune = NORM.format(col="nom_commune")
     return f"""
             SELECT id, {TITLE.format(col='nom_voie')} AS nom_voie,
@@ -530,7 +582,7 @@ def base_sql(source: str = "src") -> str:
                    nullif(lower(trim(regexp_replace(
                        regexp_extract(number_raw, '^[0-9]+(.*)$', 1),
                        '^[\\s/\\-]+', ''))), '')        AS rep,
-                   regexp_extract(postcode_raw, '[0-9]+') AS code_postal,
+                   {postal_digits} AS code_postal,
                    postcode_raw,
                    {TITLE.format(col='nom_commune')} AS nom_commune,
                    {norm_commune} AS nom_commune_norm,
@@ -540,7 +592,7 @@ def base_sql(source: str = "src") -> str:
             WHERE nom_commune <> '' AND lon IS NOT NULL AND lat IS NOT NULL"""
 
 
-def keys_sql(insee_order: str, source: str = "src") -> str:
+def keys_sql(insee_order: str, source: str = "src", cc: str | None = None) -> str:
     """Locality codes over DISTINCT keys: identical to dense_rank over all rows by the same
     key, without sorting every address. Only valid for a key made of the two columns."""
     if insee_order != "nom_commune_norm, provincia":
@@ -549,13 +601,13 @@ def keys_sql(insee_order: str, source: str = "src") -> str:
         SELECT nom_commune_norm, provincia, n,
                'L' || lpad(CAST(dense_rank() OVER (ORDER BY {insee_order}) AS VARCHAR), 6, '0') AS code_insee
         FROM (SELECT nom_commune_norm, provincia, count(*) AS n
-              FROM ({base_sql(source)})
+              FROM ({base_sql(source, cc)})
               WHERE numero IS NOT NULL AND nom_voie_norm <> ''
               GROUP BY nom_commune_norm, provincia)"""
 
 
 def canon_sql(insee_order: str, prov_alias: str, keys_table: str | None = None,
-              source: str = "src") -> str:
+              source: str = "src", cc: str | None = None) -> str:
     if keys_table is None:
         # the locality key includes the province: same-named communes do not merge
         loc = f"""
@@ -569,7 +621,7 @@ def canon_sql(insee_order: str, prov_alias: str, keys_table: str | None = None,
               ON b.nom_commune_norm = k.nom_commune_norm AND b.provincia = k.provincia
             WHERE b.numero IS NOT NULL AND b.nom_voie_norm <> ''"""
     return f"""
-        WITH base AS ({base_sql(source)}
+        WITH base AS ({base_sql(source, cc)}
         ),
         loc AS ({loc}
         )
@@ -585,22 +637,24 @@ def canon_sql(insee_order: str, prov_alias: str, keys_table: str | None = None,
 
 # Countries extracted in two streamed passes over an S3 view: the source never sits in memory
 # (BR 74M rows, US 100M). `canon` is then a view over the written Parquet, not a table.
-STREAMED = frozenset({"BR", "US"})
+STREAMED = frozenset({"BR", "US", "CA"})
 # Streamed countries whose source leaves the city empty on part of the rows (US survey 2026-10-19:
 # about 4.7 M green rows, Texas 1.7 M and New York State 0.97 M first). With a GeoNames dump the
 # adapter fills those cities in a zero pass (fill_missing_cities) before the shared base_sql filter
 # drops rows without a city. The other streamed countries refuse the dump: every row carries its
 # region, and the Serbian province alias would need the whole source as a table.
-CITY_UMBRELLA = frozenset({"US"})
+CITY_UMBRELLA = frozenset({"US", "CA"})
+# The GeoNames admin1 code of the dump -> the region code the source carries (Canada: "08" -> "ON").
+UMBRELLA_ADMIN1 = {"CA": GEONAMES_ADMIN1_TO_PROVINCE}
 assert CITY_UMBRELLA <= STREAMED
 
 
 def stream_canon(con, cc: str, insee_order: str, prov_alias: str,
                  out_parquet: pathlib.Path, source: str = "src") -> int:
     """Copy the streamed second pass and verify its count against the locality-key pass."""
-    con.execute("CREATE TABLE keys AS " + keys_sql(insee_order, source))
+    con.execute("CREATE TABLE keys AS " + keys_sql(insee_order, source, cc))
     expected = con.execute("SELECT sum(n) FROM keys").fetchone()[0] or 0
-    con.execute(f"COPY ({canon_sql(insee_order, prov_alias, keys_table='keys', source=source)}) "
+    con.execute(f"COPY ({canon_sql(insee_order, prov_alias, keys_table='keys', source=source, cc=cc)}) "
                 f"TO '{out_parquet}' (FORMAT parquet, COMPRESSION zstd)")
     con.execute(f"CREATE VIEW canon AS SELECT * FROM read_parquet('{out_parquet}')")
     kept = con.execute("SELECT count(*) FROM canon").fetchone()[0]
@@ -610,7 +664,7 @@ def stream_canon(con, cc: str, insee_order: str, prov_alias: str,
 
 
 def fill_missing_cities(con, geonames_file: str, source: str = "src",
-                        out_view: str = "src_city") -> dict:
+                        out_view: str = "src_city", admin1_map: dict | None = None) -> dict:
     """Zero pass: give the rows of `source` that carry no city the GeoNames umbrella place.
 
     One more scan of the source (about 20 minutes on S3 for the US), restricted to the rows whose
@@ -626,7 +680,7 @@ def fill_missing_cities(con, geonames_file: str, source: str = "src",
                 f"FROM {source} WHERE nom_commune = ''")
     rows_nocity = con.execute("SELECT count(*) FROM src_nocity").fetchone()[0]
     filled, cross = attach_umbrella(con, "src_nocity", geonames_file, city_col="nom_commune",
-                                    rid_col="rowid", out_table="umbrella")
+                                    rid_col="rowid", out_table="umbrella", admin1_map=admin1_map)
     con.execute("CREATE TABLE umbrella_city AS SELECT id, nom_commune FROM src_nocity "
                 "WHERE nom_commune <> ''")
     con.execute("DROP TABLE src_nocity; DROP TABLE umbrella;")
@@ -735,7 +789,8 @@ def main(argv: list[str] | None = None) -> None:
     if geonames_file and cc in CITY_UMBRELLA:
         # The city itself, not an alias: rows without a city get the nearest populated place of
         # their own state (prep/us_umbrella.py) in one extra streamed scan, then join back by id.
-        umbrella_stats = fill_missing_cities(con, geonames_file, source="src", out_view="src_city")
+        umbrella_stats = fill_missing_cities(con, geonames_file, source="src", out_view="src_city",
+                                             admin1_map=UMBRELLA_ADMIN1.get(cc))
         source = "src_city"
     elif geonames_file:
         # Umbrella city from GeoNames (CC BY 4.0, permissive — NOT OSM/ODbL):

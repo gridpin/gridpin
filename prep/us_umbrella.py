@@ -48,16 +48,22 @@ def _sql_literal(text):
     return str(text).replace("'", "''")
 
 
-def places_sql(geonames_path, table="places"):
+def places_sql(geonames_path, table="places", admin1_map=None):
     """SQL creating `table` from a GeoNames country dump (tab-separated, 19 columns).
 
     Columns: name, admin1 (state code), lat, lon, pop, fcode, bla, blo (0.1-degree cells).
     Selection: class P with population >= MIN_POPULATION, or an administrative seat of
-    CENTRE_CODES regardless of population.
+    CENTRE_CODES regardless of population. `admin1_map` translates the dump's admin1 codes to
+    the sheet's region codes (Canada: "08" -> "ON"); a code missing from the map stays as it is.
     """
     codes = ", ".join(f"'{c}'" for c in CENTRE_CODES)
+    admin1 = "column10"
+    if admin1_map:
+        whens = " ".join(f"WHEN '{_sql_literal(k)}' THEN '{_sql_literal(v)}'"
+                         for k, v in sorted(admin1_map.items()))
+        admin1 = f"CASE column10 {whens} ELSE column10 END"
     return f"""CREATE OR REPLACE TABLE {table} AS
-SELECT column01 AS name, column10 AS admin1,
+SELECT column01 AS name, {admin1} AS admin1,
        CAST(column04 AS DOUBLE) AS lat, CAST(column05 AS DOUBLE) AS lon,
        greatest(coalesce(TRY_CAST(column14 AS BIGINT), 0), 0) AS pop,
        column07 AS fcode,
@@ -107,7 +113,7 @@ SELECT rid, best.name AS name, best.admin1 AS admin1, true AS cross_state FROM {
 
 
 def attach_umbrella(con, addr_table, geonames_path, city_col="city", rid_col="rid",
-                    out_table="umbrella"):
+                    out_table="umbrella", admin1_map=None):
     """Fill the empty `city_col` of `addr_table` with the umbrella place; return (filled, cross).
 
     `addr_table` needs `rid_col` (unique; `rowid` of a base table works), lat, lon, state and
@@ -116,7 +122,7 @@ def attach_umbrella(con, addr_table, geonames_path, city_col="city", rid_col="ri
     place table and the pending-row table are dropped.
     """
     places, pending = f"{out_table}_places", f"{out_table}_pending"
-    con.execute(places_sql(geonames_path, places))
+    con.execute(places_sql(geonames_path, places, admin1_map))
     con.execute(f"""CREATE OR REPLACE TABLE {pending} AS
 SELECT {rid_col} AS rid, lat, lon, state FROM {addr_table} WHERE coalesce({city_col}, '') = ''""")
     for statement in umbrella_sql(pending, places, out_table):

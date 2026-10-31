@@ -147,6 +147,7 @@ A country in a file — most countries are a single file (a few regional dataset
 | Country     | File size | Addresses | Source              | Data license          | POI layer |
 |-------------|-----------|-----------|---------------------|-----------------------|-----------|
 | United States | 1.45 GB | 95.33M | Overture / NAD + Census TIGER/Line; 7 states by address ranges only | open data (per source) | — |
+| Canada | 183 MB | 16.94M | Overture / Statistics Canada NAR, Adresses Québec, Yukon | open data (per source) | — |
 | Germany     | 213 MB    | 19.27M    | Overture / OpenAddresses, 15 Länder; BNetzA postcode witness | dl-de/by-2-0 · dl-de/zero-2-0 · CC BY 4.0 (per source) | — |
 | France      | 365 MB    | 26.1 M    | BAN (national registry) | Licence Ouverte   | ✓ (231 MB, optional) |
 | Italy       | 247 MB    | 25.9 M    | Overture / ANNCSU   | CC BY 4.0             | — |
@@ -209,8 +210,10 @@ independent reference coordinate (empty answers count as misses):
 
 | Query set | Rows | GridPin | Photon | Nominatim |
 |---|---:|---:|---:|---:|
-| United States · distorted addresses | 3,655 | **32.7%** | 28.5% | 24.3% |
-| United States · historic-places register (as recorded) | 1,000 | **64.0%** | 38.9% | 52.3% |
+| United States · distorted addresses | 3,655 | **32.9%** | 28.5% | 24.3% |
+| United States · historic-places register (as recorded) | 1,000 | **64.1%** | 38.9% | 52.3% |
+| Canada · distorted addresses | 2,785 | **55.9%** | 45.2% | 32.7% |
+| Canada · radio-station sites (as recorded) | 1,000 | **39.3%** | 39.3% | 25.2% |
 | Germany · distorted addresses | 2,000 | **82.1%** | 46.9% | 15.8% |
 | Germany · clean addresses | 2,000 | **82.8%** | 83.2% | 81.2% |
 | Spain · distorted addresses | 1,590 | **33.8%** | 29.6% | 20.8% |
@@ -222,7 +225,7 @@ coordinate kept byte for byte. On German and Spanish distorted addresses GridPin
 on Brazilian distorted addresses GridPin and Photon are level, both well ahead of Nominatim; on clean
 German addresses GridPin and Photon are level (p=0.6691367 — not proof of parity). We show the sets
 where GridPin leads or is level; on the other Spanish sets Photon leads, and on clean Brazilian
-addresses Photon leads too. Counts, paired tests and data fingerprints for every set are in
+addresses Photon leads too; on clean Canadian addresses Photon leads (59.1% vs 57.5%; Nominatim 57.2%). Counts, paired tests and data fingerprints for every set are in
 [docs-public/BENCHMARK.md](docs-public/BENCHMARK.md); the summary lives on the
 [test bench page](https://gridpin.dev/bench).
 
@@ -316,6 +319,7 @@ contact@gridpin.dev.
 The engine is Apache-2.0. Each sheet carries the license of its source data:
 
 - **United States** — National Address Database (USDOT) and 19 state and county open datasets via Overture/OpenAddresses, each under its own permissive licence (U.S. Government work, CC0, PDDL, CC BY 4.0, open-data terms — listed per source in the sheet manifest); address ranges from U.S. Census Bureau TIGER/Line 2025 (U.S. Government work); postal codes from GeoNames (CC BY 4.0).
+- **Canada** — Statistics Canada National Address Register under the [Statistics Canada Open Licence](https://www.statcan.gc.ca/en/terms-conditions/open-licence) (required notice: "Adapted from Statistics Canada, National Address Register, 2024. This does not constitute an endorsement by Statistics Canada of this product."); Adresses Québec (MRNF) under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); Yukon civic addresses under the [Open Government Licence – Yukon](https://yukon.ca/en/your-government/open-government/open-government-licence-yukon) ("Contains information licensed under the Open Government Licence – Yukon"); all via Overture/OpenAddresses; settlement names from GeoNames (CC BY 4.0).
 - **France** — BAN, under [Licence Ouverte 2.0](https://www.etalab.gouv.fr/licence-ouverte-open-licence/).
 - **Italy** — ANNCSU via Overture/OpenAddresses, under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 - **Netherlands** — Nationaal Georegister (BAG) via Overture, under [Public Domain Mark 1.0](https://creativecommons.org/publicdomain/mark/1.0/).
@@ -329,6 +333,8 @@ All of these licenses let you **store geocoding results indefinitely**. This is 
 This also matters for GDPR: the addresses you geocode are often customer data, and with GridPin they never leave your infrastructure.
 
 ## Status & roadmap
+
+**v0.6.0: Canada added. Client update required.** One nationwide sheet (`canada.bin`, 183 MB): 16.94M point addresses in all provinces and territories from the Statistics Canada National Address Register, Adresses Québec and the Government of Yukon (via Overture Maps, release 2026-10-21.0); answers carry the Canadian postal code. Older engines have no Canadian rules (place written before the address, Edmonton and Calgary quadrants, French street types in front, "A9A 9A9" postal codes). Use the 0.6.0 client with this release. All nine country sheets and the France POI layer use the new immutable `v0.6.0/` path and a new attestation; `v0.1.0/` to `v0.5.0/` are unchanged.
 
 **v0.5.0: the United States added. Client update required.** One nationwide sheet (`usa.bin`, 1.45 GB): 95.33M point addresses from sources with an explicit right to redistribute (National Address Database, New York City, Los Angeles, Oakland County, MassGIS, MnGeo, Oregon and other state and county open data) plus 34.52M address-range points from Census TIGER/Line 2025 where no point addresses exist. Point addresses cover 35 states; in CO, FL, HI, MS, NH, NV and SC answers are interpolated from address ranges (tens to hundreds of metres). Older engines have no US rules (trailing street types, directions, ZIP+4, state tails). Use the 0.5.0 client with this release. All eight country sheets and the France POI layer use the new immutable `v0.5.0/` path and a new attestation; `v0.1.0/` to `v0.4.0/` are unchanged.
 

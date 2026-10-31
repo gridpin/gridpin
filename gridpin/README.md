@@ -22,7 +22,7 @@ pip install --upgrade gridpin==0.5.0
 ```
 
 The wheel contains the engine, not the data: **download a country sheet
-separately**. Free static sheets for the United States, Germany, France, Italy, Spain, the Netherlands, Brazil and Serbia
+separately**. Free static sheets for the United States, Canada, Germany, France, Italy, Spain, the Netherlands, Brazil and Serbia
 are listed at <https://gridpin.dev/docs#delivery> — no account, no key, no
 sign-up.
 
@@ -32,9 +32,9 @@ signed release; from Python, `gridpin_mcp.sheets.download("fr")` returns the sam
 same package is an MCP server for AI agents (`uvx gridpin-mcp`).
 
 The United States is one nationwide sheet: point addresses in 35 states, Census address ranges
-elsewhere. Germany covers **15 of 16 Länder; Bavaria is not covered**. Spain covers all
+elsewhere; Canada is one nationwide sheet (all provinces and territories). Germany covers **15 of 16 Länder; Bavaria is not covered**. Spain covers all
 52 postal provinces; Brazil is one nationwide sheet. Client update required:
-use 0.5.0, because older engines have no US rules.
+use 0.6.0, because older engines have no Canadian rules.
 
 ```python
 import gridpin

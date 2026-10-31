@@ -7,7 +7,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets an agent geocode addr
 No API key, no rate limit, and no query leaves the machine. The only network step is
 downloading a country sheet once, verified against the signed GridPin release.
 
-Countries (release v0.5.0): United States, Germany, France, Italy, Spain, Netherlands, Brazil, Serbia.
+Countries (release v0.6.0): United States, Canada, Germany, France, Italy, Spain, Netherlands, Brazil, Serbia.
 
 ## Add it to an agent
 

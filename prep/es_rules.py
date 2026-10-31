@@ -54,7 +54,7 @@ def expected_pack(common: Path, overlay: Path, marker: bytes = MARKER) -> dict[s
         config = additions["city_tail"]
         required = {"enabled", "regions", "forms", "postal_digits", "postal_split"}
         optional = {"street_titles", "street_title_aliases", "postal_extension", "street_type_last", "region_names",
-                    "junk_tail", "homonym_prominence"}
+                    "junk_tail", "homonym_prominence", "postal_pattern", "quadrant_suffixes", "direction_trailing", "city_first", "unit_hyphen", "number_first_types", "glue_road_numbers", "type_first_siblings", "fuzzy_short_forms", "saint_communes", "interp_max_gap", "interp_max_km"}
         if not isinstance(config, dict) or not required <= set(config) or set(config) - required - optional:
             raise ValueError("city_tail: expected complete tail grammar")
         # homonym_prominence: "1" orders equal-score homonyms of a cityless query by commune size
@@ -67,6 +67,58 @@ def expected_pack(common: Path, overlay: Path, marker: bytes = MARKER) -> dict[s
             raise ValueError("city_tail: postal_extension must be a single digit 1-9")
         # street_type_last: the street type trails the name ("Main Street"), so type and direction rewrites
         # from abbrev2 also apply to the last word and compose with the leading one (US, 21.10.2026).
+        # postal_pattern: an alphanumeric postal code, "A" a letter and "9" a digit, one optional space
+        # ("A9A 9A9", Canada); recognised and set aside by the tail grammar (query.rs pattern_postal).
+        if "postal_pattern" in config and not re.fullmatch(r"[A9]+( [A9]+)?", str(config["postal_pattern"])):
+            raise ValueError("city_tail: postal_pattern must be A/9 letters with at most one space")
+        # quadrant_suffixes: direction words the sheet appends to every street of some cities
+        # ("105 St Nw", Edmonton, Calgary), tried in turn when the query leaves the quadrant out
+        # (query.rs quadrant_variants, Canada 29.10.2026).
+        if "quadrant_suffixes" in config and not re.fullmatch(r"[A-Z]{1,2}( [A-Z]{1,2})*",
+                                                               str(config["quadrant_suffixes"])):
+            raise ValueError("city_tail: quadrant_suffixes must be upper-case direction codes separated by spaces")
+        # direction_trailing: the sheet's own (short) direction words, kept after the street type
+        # ("10th ave e"); a leading direction in the query is moved there (query.rs
+        # direction_trailing_key, Canada 29.10.2026).
+        if "direction_trailing" in config and not re.fullmatch(r"[a-z]{1,2}( [a-z]{1,2})*",
+                                                                str(config["direction_trailing"])):
+            raise ValueError("city_tail: direction_trailing must be short lower-case direction words")
+        # city_first: "1" reads "<place> (<address>)", "<place> - <address>" and "<place>, <number> …"
+        # address-first as well (query.rs city_first_reordered, Canada 29.10.2026).
+        if "city_first" in config and str(config["city_first"]) != "1":
+            raise ValueError("city_tail: city_first must be \"1\" when present")
+        # unit_hyphen: "1" reads a leading "<unit>-<civic>" as unit and house number (Canada Post form)
+        # instead of a range (query.rs unit_hyphen_civic, Canada 29.10.2026).
+        if "unit_hyphen" in config and str(config["unit_hyphen"]) != "1":
+            raise ValueError("city_tail: unit_hyphen must be \"1\" when present")
+        # number_first_types: short street-type words the sheet keys number first ("7 hwy"); "Highway 7",
+        # "Highway No. 3" are read that way too (query.rs number_first_key, Canada 29.10.2026).
+        if "number_first_types" in config and not re.fullmatch(r"[a-z]+( [a-z]+)*",
+                                                                str(config["number_first_types"])):
+            raise ValueError("city_tail: number_first_types must be lower-case words")
+        # glue_road_numbers: "1" keeps a road's own number in its name ("No. 3 Road" -> "No3", "47 A Avenue"
+        # -> "47A") instead of the parser reading it as the house number (query.rs glue_road_numbers).
+        if "glue_road_numbers" in config and str(config["glue_road_numbers"]) != "1":
+            raise ValueError("city_tail: glue_road_numbers must be \"1\" when present")
+        # type_first_siblings: "1" lets a type written in front reach the sheet's other short form of
+        # the same type ("Blvd Manseau" -> "boul manseau"; query.rs type_first_sibling_keys).
+        if "type_first_siblings" in config and str(config["type_first_siblings"]) != "1":
+            raise ValueError("city_tail: type_first_siblings must be \"1\" when present")
+        # fuzzy_short_forms: "1" repeats an empty fuzzy street search with type and direction words at the
+        # sheet short form ("Ratchfrod Street" -> "ratchfrod st"; query.rs fuzzy_short_rest).
+        if "fuzzy_short_forms" in config and str(config["fuzzy_short_forms"]) != "1":
+            raise ValueError("city_tail: fuzzy_short_forms must be \"1\" when present")
+        # saint_communes: "1" spells out a town opening with "st"/"ste" when the name as written finds no town
+        # ("STE-JULIE" -> "sainte julie"; query.rs saint_commune_name).
+        if "saint_communes" in config and str(config["saint_communes"]) != "1":
+            raise ValueError("city_tail: saint_communes must be \"1\" when present")
+        # interp_max_gap / interp_max_km: how wide a bracket of stored house numbers is still interpolated
+        # (numbers, km; engine defaults 12 and 0.3) — sparse rural numbering widens both (query.rs
+        # interp_limits, Canada 29.10.2026).
+        if "interp_max_gap" in config and not re.fullmatch(r"[1-9][0-9]{0,3}", str(config["interp_max_gap"])):
+            raise ValueError("city_tail: interp_max_gap must be a whole number 1-9999")
+        if "interp_max_km" in config and not re.fullmatch(r"(0|[1-9][0-9]?)\.[0-9]", str(config["interp_max_km"])):
+            raise ValueError("city_tail: interp_max_km must be a number of kilometres with one decimal")
         if "street_type_last" in config and str(config["street_type_last"]) not in {"0", "1"}:
             raise ValueError("city_tail: street_type_last must be 0 or 1")
         # junk_tail: words that open a trailing segment the tail grammar ignores ("near the mall", "tel …");
