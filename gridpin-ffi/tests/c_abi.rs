@@ -36,8 +36,12 @@ fn sheet(dir: &Path) -> PathBuf {
 fn static_library() -> (PathBuf, Vec<String>) {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let out = Command::new(env!("CARGO"))
+        // No colour codes: CI sets CARGO_TERM_COLOR=always, and the escape glued to the last library
+        // (`-lc\x1b[0m`) reached the linker as a library name (31.10.2026, gridpin/gridpin#16).
         .args([
             "rustc",
+            "--color",
+            "never",
             "--lib",
             "--crate-type",
             "staticlib",
