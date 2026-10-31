@@ -17,7 +17,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: GIS",
 ]
 # gridpin-mcp brings the engine (gridpin) and the verified sheet downloader (gridpin-fetch).
-dependencies = ["langchain-core>=1.0,<2", "gridpin-mcp>=0.2,<0.3"]
+dependencies = ["langchain-core>=1.0,<2", "gridpin-mcp>=0.2,<0.4"]
 
 [project.urls]
 Homepage = "https://gridpin.dev"

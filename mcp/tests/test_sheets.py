@@ -54,7 +54,7 @@ def test_resolve_unknown_country_lists_what_is_available():
 
 
 def test_every_pin_is_a_full_sha256_and_url_points_to_the_release():
-    assert len(sheets.SHEETS) == 8
+    assert len(sheets.SHEETS) == 9
     for s in sheets.SHEETS.values():
         assert len(s.sha256) == 64 and int(s.sha256, 16) >= 0
         assert s.url == f"https://dl.gridpin.dev/{sheets.RELEASE}/{s.file}"

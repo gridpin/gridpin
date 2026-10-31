@@ -1,2 +1,2 @@
-gridpin==0.5.0
+gridpin==0.6.0
 pytest==9.1.1

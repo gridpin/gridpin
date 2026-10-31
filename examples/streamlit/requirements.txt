@@ -1,2 +1,2 @@
-gridpin-mcp==0.2.0
+gridpin-mcp==0.3.0
 streamlit>=1.40,<2
