@@ -21991,7 +21991,7 @@ mod tests {
     #[test]
     fn ca_postal_pattern_rejects_near_misses() {
         // every position of the shape: a digit where a letter is due, a letter where a digit is
-        // due, one character short or long, a US ZIP (PRINCIPLES 6.6: near-misses, not absence)
+        // due, one character short or long, a US ZIP (near-misses, not absence)
         let _scope = crate::rules::scope(ca_city_tail_rules());
         let cfg = &crate::rules::rules().city_tail;
         for bad in [

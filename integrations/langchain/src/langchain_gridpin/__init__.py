@@ -8,4 +8,4 @@ from langchain_gridpin.tools import (
 )
 
 __all__ = ["GridPinGeocode", "GridPinReverse", "GridPinToolkit", "download_sheet"]
-__version__ = "0.1.0"
+__version__ = "0.1.1"
