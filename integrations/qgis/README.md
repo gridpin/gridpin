@@ -13,7 +13,7 @@ Coverage is limited to the countries listed at https://gridpin.dev.
 2. Processing Toolbox > GridPin > **Download country sheet**, pick the country.
 
 Without QPIP, install the engine into the QGIS Python yourself:
-`python3 -m pip install "gridpin>=0.6,<0.7"`.
+`python3 -m pip install "gridpin>=0.7,<0.8"`.
 
 ## Use
 

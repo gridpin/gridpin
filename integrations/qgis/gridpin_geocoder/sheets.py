@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-RELEASE = "v0.6.0"
+RELEASE = "v0.7.0"
 BASE_URL = "https://dl.gridpin.dev"
 CHUNK = 1 << 20
 DISK_MARGIN = 512 << 20
@@ -42,6 +42,8 @@ SHEETS = {
               "c0ac3d0cbf3dbd480bff6aebd717e2df96e9f0a2eb4e83aeffde736fa42b18af"),  # pragma: allowlist secret (sha256 of a public file)
         Sheet("es", "Spain", "spain.bin", 185426996,
               "c671b9a46089e32580189ee3c5a65e024779691a50ab26e77f5639023994819b"),  # pragma: allowlist secret (sha256 of a public file)
+        Sheet("mx", "Mexico", "mexico.bin", 155577589,
+              "6cc9e627bf84cf1126a5d31b71c14504cbbbf56eb5b1835731d85fc2a2ef454c"),  # pragma: allowlist secret (sha256 of a public file)
         Sheet("fr", "France", "france.bin", 364964425,
               "f7278398c1a63308ea3dc69e5cda2f779250716fc231b2122d6ee890da237839"),  # pragma: allowlist secret (sha256 of a public file)
         Sheet("it", "Italy", "italy.bin", 246502930,

@@ -21,10 +21,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-RELEASE = "v0.6.0"
+RELEASE = "v0.7.0"
 BASE_URL = "https://dl.gridpin.dev"
 # SHA-256 of attestation.json for RELEASE; the pins below are taken from that file.
-ATTESTATION_SHA256 = "c42d27538e95b4153621fd0c64f412ea8702af9506b6699793369f76bf16504c"
+ATTESTATION_SHA256 = "5ca6afcb271593c0e1229676517b97b891b51021ec3810e50f1095fbc6c5fd5c"
 
 CHUNK = 1 << 20
 # Free space required beyond the sheet itself, so a download never fills the disk.
@@ -57,6 +57,8 @@ SHEETS = {
               "c0ac3d0cbf3dbd480bff6aebd717e2df96e9f0a2eb4e83aeffde736fa42b18af"),
         Sheet("es", "Spain", "spain.bin", 185426996,
               "c671b9a46089e32580189ee3c5a65e024779691a50ab26e77f5639023994819b"),
+        Sheet("mx", "Mexico", "mexico.bin", 155577589,
+              "6cc9e627bf84cf1126a5d31b71c14504cbbbf56eb5b1835731d85fc2a2ef454c"),
         Sheet("fr", "France", "france.bin", 364964425,
               "f7278398c1a63308ea3dc69e5cda2f779250716fc231b2122d6ee890da237839"),
         Sheet("it", "Italy", "italy.bin", 246502930,

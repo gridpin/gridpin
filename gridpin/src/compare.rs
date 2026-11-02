@@ -6,7 +6,7 @@
 //! street/commune boundaries and keeps the one that answers best, so the answer is the reading it chose.
 //!
 //! `same_address` compares the two top answers. "house" requires the same street, number and commune
-//! AND that neither answer is weak (ANSWERS §195): on the published sets that keeps false merges at
+//! AND that neither answer is weak: on the published sets that keeps false merges at
 //! or below 0.14 % in every country, where unfiltered answers merged up to 1.6 % of different
 //! addresses (France). When either line has no answer the level is "unknown", and `text` says how the
 //! two readings compare.
