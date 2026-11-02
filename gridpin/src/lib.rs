@@ -1,6 +1,7 @@
 //! Geocoder core library (used by both the CLI binary and the Python bindings).
 
 pub mod builder;
+pub mod compare;
 mod de;
 #[cfg(test)]
 mod de_effect_audit;
@@ -11,6 +12,9 @@ pub mod ml;
 pub mod norm;
 pub mod query;
 pub mod rules;
+pub mod serve;
+pub mod sheets;
+pub mod tabular;
 
 #[cfg(feature = "python")]
 mod py;

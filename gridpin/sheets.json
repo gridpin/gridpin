@@ -1,0 +1,71 @@
+{
+ "_about": "Sheets of the release this engine ships with: size and SHA-256 from the signed release attestation. The copies in gridpin-mcp, the QGIS plugin and the R package are checked equal to this file (tools/test_sheet_registry.py).",
+ "release": "v0.6.0",
+ "base_url": "https://dl.gridpin.dev",
+ "attestation_sha256": "c42d27538e95b4153621fd0c64f412ea8702af9506b6699793369f76bf16504c",
+ "sheets": [
+  {
+   "code": "us",
+   "name": "United States",
+   "file": "usa.bin",
+   "size": 1451500169,
+   "sha256": "4f3422f4d95939aefbcf454ceebc9a8dd16f78f2a13c5e6660028ddfad712cc0"
+  },
+  {
+   "code": "ca",
+   "name": "Canada",
+   "file": "canada.bin",
+   "size": 182551507,
+   "sha256": "234515843c54b6c4feb93ab83c7b023a3e14beec8357c6d570eeed0f66f35400"
+  },
+  {
+   "code": "br",
+   "name": "Brazil",
+   "file": "brazil.bin",
+   "size": 676851417,
+   "sha256": "016e102debb05aafad0ae409c3a2acec478b60bb48b74d03210b80dc52d42a6d"
+  },
+  {
+   "code": "de",
+   "name": "Germany",
+   "file": "germany.bin",
+   "size": 213315143,
+   "sha256": "c0ac3d0cbf3dbd480bff6aebd717e2df96e9f0a2eb4e83aeffde736fa42b18af"
+  },
+  {
+   "code": "es",
+   "name": "Spain",
+   "file": "spain.bin",
+   "size": 185426996,
+   "sha256": "c671b9a46089e32580189ee3c5a65e024779691a50ab26e77f5639023994819b"
+  },
+  {
+   "code": "fr",
+   "name": "France",
+   "file": "france.bin",
+   "size": 364964425,
+   "sha256": "f7278398c1a63308ea3dc69e5cda2f779250716fc231b2122d6ee890da237839"
+  },
+  {
+   "code": "it",
+   "name": "Italy",
+   "file": "italy.bin",
+   "size": 246502930,
+   "sha256": "37346d884e551189e91f0453d4aad7aafe211430e62b1e9054141081488b021c"
+  },
+  {
+   "code": "nl",
+   "name": "Netherlands",
+   "file": "netherlands.bin",
+   "size": 103234504,
+   "sha256": "d5205f8e323eeda309f3d411a3efcd45c259005d2da25fef33998bf9ca9d28e7"
+  },
+  {
+   "code": "rs",
+   "name": "Serbia",
+   "file": "serbia.bin",
+   "size": 31998043,
+   "sha256": "9e358bd6a940b290e01cd52081e476e2799513f16dd934dc6a5bc89ba4fb5388"
+  }
+ ]
+}

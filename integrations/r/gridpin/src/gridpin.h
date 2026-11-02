@@ -40,13 +40,13 @@ uint32_t gridpin_abi_version(void);
 GridpinState *gridpin_state_new(void);
 void gridpin_state_drop(GridpinState *state);
 
-/* geocode / reverse rows: the best hit as a JSON object, "{}" when nothing matches. */
+/* geocode / reverse rows: the best hit as a JSON object, "{}" when nothing matches. Every hit carries
+ * "weak": true when the answer needs a check before use (city level, low confidence, or a fuzzy
+ * street with middling confidence). */
 GridpinResponse *gridpin_invoke(const GridpinState *state, uint32_t operation, const GridpinText *texts,
                                 const double *lats, const double *lons, const uint8_t *nulls, size_t len);
 
-/* geocode / reverse rows: a JSON array of up to k hits, "[]" when nothing matches. k >= 1. Each hit
- * also carries "weak": true when the answer needs a check before use (city level, low
- * confidence, or a fuzzy street with middling confidence). */
+/* geocode / reverse rows: a JSON array of up to k hits, "[]" when nothing matches. k >= 1. */
 GridpinResponse *gridpin_invoke_k(const GridpinState *state, uint32_t operation, size_t k,
                                   const GridpinText *texts, const double *lats, const double *lons,
                                   const uint8_t *nulls, size_t len);

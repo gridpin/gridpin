@@ -163,7 +163,8 @@ jobs:
         shell: bash
         run: |
           pip install --quiet gridpin/target/wheels/*.whl
-          python -c "import gridpin; gridpin.Geocoder"
+          # the Python layer ships in the wheel and the sheet list works with no extra installed
+          python -c "import gridpin, importlib.util; gridpin.Geocoder; assert gridpin.sheets.list(); assert all(importlib.util.find_spec(m) for m in ('gridpin.pandas', 'gridpin.geopy'))"
           # artifact-content check: the wheel's license files (pyproject `license-files`) sit in
           # .dist-info/licenses/ byte for byte as gridpin/LICENSE and gridpin/THIRDPARTY.yml, and nothing
           # lands at the top of site-packages (an earlier include rule put LICENSE there). maturin skips a
@@ -555,3 +556,161 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           packages-dir: wheels
+
+  # Country images for GHCR come from the sheet registry (mcp/src/gridpin_mcp/sheets.py), not from a
+  # list written here: a new country in the registry gets its image with no edit to this file.
+  docker-countries:
+    runs-on: ubuntu-latest
+    outputs:
+      countries: ${{ steps.list.outputs.countries }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - id: list
+        run: |
+          echo "countries=$(python3 -c 'import json, sys; sys.path.insert(0, "mcp/src"); from gridpin_mcp import sheets; print(json.dumps(sorted(sheets.SHEETS)))')" >> "$GITHUB_OUTPUT"
+
+  # Images publish like PyPI: only after the owner-signed SHA256SUMS is on the release
+  # (sums-are-signed) and only with the approval of the "ghcr" environment (required reviewer), so a
+  # tag alone never pushes an image. The binary inside is the released linux x86_64 archive, checked
+  # against SHA256SUMS; its LICENSE and THIRDPARTY.yml travel into the image. linux/amd64 only: an
+  # arm64 image needs an aarch64 CLI archive in the signed release asset set first.
+  docker:
+    needs: [sums-are-signed, docker-countries]
+    runs-on: ubuntu-latest
+    environment: ghcr
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        country: ${{ fromJSON(needs.docker-countries.outputs.countries) }}
+        include:
+          - country: engine
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/gridpin
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: The released linux x86_64 binary, checked against SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p rel
+          gh release download "${{ github.ref_name }}" --repo "${{ github.repository }}" --dir rel \
+            --pattern 'gridpin-x86_64-unknown-linux-gnu.tar.gz' --pattern 'SHA256SUMS'
+          (cd rel && grep ' gridpin-x86_64-unknown-linux-gnu.tar.gz$' SHA256SUMS | sha256sum -c -)
+          tar xzf rel/gridpin-x86_64-unknown-linux-gnu.tar.gz -C rel
+          cp ATTRIBUTIONS.en.md rel/
+      - name: Build context
+        run: |
+          if [ "${{ matrix.country }}" = engine ]; then
+            python3 docker/context.py --binary rel/gridpin --legal-dir rel --out ctx > args.env
+          else
+            python3 docker/context.py --binary rel/gridpin --legal-dir rel --out ctx --country "${{ matrix.country }}" > args.env
+          fi
+          cat args.env
+      - name: Build, check and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -a; . ./args.env; set +a
+          version="${GITHUB_REF_NAME#v}"
+          cc="${{ matrix.country }}"
+          if [ "$cc" = engine ]; then target=engine; else target=country; fi
+          docker build --target "$target" --build-arg VERSION="$version" --build-arg SHEET --build-arg COUNTRY \
+            --build-arg SHEET_SHA256 --build-arg SHEET_RELEASE \
+            -t "$IMAGE:$cc-$version" -t "$IMAGE:$cc" -f docker/Dockerfile ctx
+          if [ "$cc" != engine ]; then
+            docker run -d --rm --name check --network none "$IMAGE:$cc"
+            for i in $(seq 1 90); do
+              docker exec check /usr/local/bin/gridpin serve --probe http://127.0.0.1:8080/health && break
+              sleep 2
+            done
+            docker exec check /usr/local/bin/gridpin serve --probe http://127.0.0.1:8080/health
+            docker stop check
+          fi
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:$cc-$version"
+          docker push "$IMAGE:$cc"
+          docker logout ghcr.io
+
+  # npm (integrations/node): one native module per platform, built by node-gyp over gridpin-ffi at the tag.
+  # The modules travel as workflow artifacts, not release assets: the signed release asset graph stays the
+  # same. The platform list is integrations/node/scripts/platform-packages.mjs PLATFORMS (a test keeps the
+  # two equal).
+  npm-native:
+    needs: [check, ci-passed]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            key: linux-x64
+          - os: ubuntu-24.04-arm
+            key: linux-arm64
+          - os: macos-latest
+            key: darwin-arm64
+          - os: windows-latest
+            key: win32-x64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.93.0"  # pinned: a floating input can change the build between runs
+      - name: Build gridpin-ffi and the CLI (the module's tests compare with it)
+        run: |
+          cargo build --release --manifest-path gridpin-ffi/Cargo.toml --lib
+          cargo build --release --manifest-path gridpin/Cargo.toml --bin gridpin
+      - name: Build the module (node-gyp, bundled with npm) and test it on a sheet built here
+        working-directory: integrations/node
+        run: |
+          node "$(npm root -g)/npm/node_modules/node-gyp/bin/node-gyp.js" rebuild
+          node --test test/fixture.test.js test/packages.test.js
+          mkdir -p "$GITHUB_WORKSPACE/native/${{ matrix.key }}"
+          cp build/Release/gridpin.node "$GITHUB_WORKSPACE/native/${{ matrix.key }}/"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-native-${{ matrix.key }}
+          path: native/${{ matrix.key }}/gridpin.node
+          if-no-files-found: error
+
+  # Publishing to npm is manual-only, like PyPI: the "npm" environment has a required reviewer. Trusted
+  # publishing (OIDC): npm checks the workflow identity, no long-lived NPM_TOKEN. One-time setup on npm:
+  # package gridpin and each @gridpin/gridpin-<platform> -> Settings -> Trusted publisher (owner gridpin,
+  # repo gridpin, workflow release.yml, environment npm). Platform packages go first, the main package
+  # (whose optionalDependencies name them) last.
+  npm:
+    needs: [npm-native, sums-are-signed]
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24.9.0"  # pinned: npm 11 (trusted publishing needs 11.5.1 or later)
+          registry-url: "https://registry.npmjs.org"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: npm-native-*
+          path: artifacts
+      - name: Assemble the packages
+        run: |
+          mkdir -p native
+          for d in artifacts/npm-native-*; do mkdir -p "native/${d#artifacts/npm-native-}"; cp "$d/gridpin.node" "native/${d#artifacts/npm-native-}/"; done
+          node integrations/node/scripts/platform-packages.mjs native npm "${GITHUB_REF_NAME#v}"
+      - name: Publish (platform packages, then gridpin)
+        run: |
+          for d in npm/*/; do
+            [ "$d" = npm/gridpin/ ] && continue
+            (cd "$d" && npm publish --provenance --access public)
+          done
+          (cd npm/gridpin && npm publish --provenance --access public)

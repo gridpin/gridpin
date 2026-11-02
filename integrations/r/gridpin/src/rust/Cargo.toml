@@ -3,7 +3,7 @@
 # repository checks.
 [package]
 name = "gridpin-ffi"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
@@ -13,7 +13,7 @@ name = "gridpin_ffi"
 crate-type = ["staticlib"]
 
 [dependencies]
-gridpin = "=0.6.0"
+gridpin = "=0.7.0"
 serde = "1"
 serde_json = "1"
 

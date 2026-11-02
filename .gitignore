@@ -18,10 +18,14 @@ gridpin-ffi/target/
 .r-lib-src/
 # R package: the 1 KB test sheet ships with it; build leftovers do not
 !integrations/r/gridpin/inst/extdata/tiny.bin
+integrations/node/build/
 integrations/r/gridpin/src/Makevars
 integrations/r/gridpin/src/Makevars.win
 integrations/r/gridpin/src/*.o
 integrations/r/gridpin/src/*.so
+# `maturin develop` copies the extension next to the Python sources of the wheel
+gridpin/python/gridpin/*.so
+gridpin/python/gridpin/*.pyd
 integrations/r/gridpin/src/*.dll
 integrations/r/gridpin/src/rust/target/
 integrations/r/gridpin/src/rust/vendor/

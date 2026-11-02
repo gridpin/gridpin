@@ -24,7 +24,7 @@ def test_metadata_declares_qt6_and_qpip():
     assert "supportsQt6=True" in text
     assert "plugin_dependencies=qpip" in text
     req = (Path(__file__).parents[1] / "gridpin_geocoder" / "requirements.txt").read_text().split()
-    assert req == ["gridpin>=0.5,<0.6"]
+    assert req == ["gridpin>=0.6,<0.7"]
 
 
 def test_geocode_field_keeps_every_row(processing, sheet_file):

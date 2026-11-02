@@ -133,7 +133,7 @@ jobs:
           # packaging/permissions contract. pycountry is the ISO source used by the country-vote
           # generator exercised by the whole-directory tools test below. Both are pinned like the
           # rest so a clean CI runner observes the same inputs as the local gate.
-          .venv-py/bin/pip install --quiet maturin==1.14.0 pytest==9.1.1 duckdb==1.5.3 pyyaml==6.0.3 pycountry==24.6.1  # pinned: a floating input can change the build between runs
+          .venv-py/bin/pip install --quiet maturin==1.14.0 pytest==9.1.1 duckdb==1.5.3 pyyaml==6.0.3 pycountry==24.6.1 pandas==2.3.3 geopy==2.5.0  # pinned: a floating input can change the build between runs
           # `make mc` runs the prep/ pipeline with the SYSTEM python3 — it needs duckdb too
           pip install --quiet duckdb==1.5.3
           git clone https://github.com/duckdb/extension-ci-tools duckdb-ext/extension-ci-tools
@@ -147,6 +147,50 @@ jobs:
         run: make langchain-venv test-langchain
       - name: QGIS plugin tests (integrations/qgis, QGIS LTR and current release in Docker)
         run: make test-qgis
+
+  node:
+    # The npm package (integrations/node): Node-API glue over gridpin-ffi, built here on every platform
+    # the prebuilt binaries are meant for, and its answers compared with the CLI on the Monaco smoke sheet.
+    # The runner's own Node.js (18 or later) is used: the package needs Node-API 8, nothing newer.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.93.0"  # pinned: a floating input can change the build between runs
+      - name: Tooling for the smoke sheet (duckdb for prep/)
+        run: python3 -m pip install --quiet --break-system-packages duckdb==1.5.3 || python3 -m pip install --quiet duckdb==1.5.3  # pinned: a floating input can change the build between runs
+      - name: Node.js version
+        run: node --version
+      - name: Build the Monaco smoke sheet and the package, run its tests
+        run: make test-node
+
+  node-windows:
+    # Windows has no `make mc` pipeline here: node-gyp builds the module (it also supplies node.lib, the
+    # import library Node-API links against), and the tests that build their own sheet with the CLI run.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.93.0"  # pinned: a floating input can change the build between runs
+      - name: Build the CLI and gridpin-ffi
+        run: |
+          cargo build --release --manifest-path gridpin/Cargo.toml --bin gridpin
+          cargo build --release --manifest-path gridpin-ffi/Cargo.toml --lib
+      - name: Build the module with node-gyp (bundled with npm)
+        working-directory: integrations/node
+        run: node "$(npm root -g)/npm/node_modules/node-gyp/bin/node-gyp.js" rebuild
+      - name: Tests that need no smoke sheet
+        working-directory: integrations/node
+        run: node --test test/fixture.test.js test/packages.test.js
 
   duckdb-cpp:
     runs-on: ubuntu-latest
@@ -221,3 +265,62 @@ jobs:
               sys.exit(f"::error::list_countries failed: {listed}")
           print("server", init["result"]["serverInfo"]["version"], "answers with", sorted(tools))
           PY
+
+  # The country image of docker/Dockerfile, built from THIS run's binary on both architectures: the
+  # smallest sheet (Serbia) inside, started with no network at all, healthy through `serve --probe`,
+  # and then, with a published port, answering /search with the same point as `gridpin query`.
+  # Nothing is pushed; the release workflow publishes images from the signed release archive.
+  server-docker:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.93.0"  # pinned: a floating input can change the build between runs
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: gridpin
+      - name: Build the CLI
+        run: cargo build --release --manifest-path gridpin/Cargo.toml
+      - name: Build context (binary, legal files, the Serbia sheet checked against its release SHA-256)
+        run: |
+          cp gridpin/THIRDPARTY.yml THIRDPARTY.yml
+          python3 docker/context.py --binary gridpin/target/release/gridpin --legal-dir . --out ctx --country rs > args.env
+          cat args.env
+      - name: Build the image
+        run: |
+          set -a; . ./args.env; set +a
+          docker build --target country --build-arg VERSION=ci --build-arg SHEET --build-arg COUNTRY \
+            --build-arg SHEET_SHA256 --build-arg SHEET_RELEASE -t gridpin:rs -f docker/Dockerfile ctx
+          docker image inspect gridpin:rs --format '{{.Size}} bytes, user {{.Config.User}}'
+      - name: Healthy with no network
+        run: |
+          docker run -d --rm --name offline --network none gridpin:rs
+          for i in $(seq 1 60); do
+            docker exec offline /usr/local/bin/gridpin serve --probe http://127.0.0.1:8080/health && break
+            sleep 2
+          done
+          docker exec offline /usr/local/bin/gridpin serve --probe http://127.0.0.1:8080/health
+          docker logs offline
+          docker stop offline
+      - name: Answers /search like gridpin query
+        run: |
+          docker run -d --rm --name online -p 127.0.0.1:8080:8080 gridpin:rs
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8080/health >/dev/null && break; sleep 2; done
+          python3 - <<'PY'
+          import json, subprocess, urllib.parse, urllib.request
+          q = "Knez Mihailova 1, Beograd"
+          cli = json.loads(subprocess.check_output(
+              ["gridpin/target/release/gridpin", "query", "ctx/serbia.bin", q, "-k", "1"], text=True).splitlines()[0])
+          url = "http://127.0.0.1:8080/search?" + urllib.parse.urlencode({"q": q, "format": "json", "limit": 1})
+          got = json.load(urllib.request.urlopen(url, timeout=30))[0]
+          want = (f"{cli['lat']:.7f}", f"{cli['lon']:.7f}")
+          if (got["lat"], got["lon"]) != want:
+              raise SystemExit(f"::error::container {got['lat']},{got['lon']} != gridpin query {want}")
+          print("container answers", got["display_name"], got["lat"], got["lon"])
+          PY
+          docker stop online

@@ -9,6 +9,8 @@
     "Check `precision` in every result: `house` is a door-level match, `street` and `city` are approximate; reverse geocoding returns `distance_m` and is approximate.",
     "For many addresses use `Geocoder.geocode_many(queries, k)` in Python or `gridpin batch` in the CLI instead of a loop of single calls.",
     "In DuckDB 2.0.0+ (older DuckDB versions install an older build): `INSTALL gridpin_ext FROM community; LOAD gridpin_ext;`, then `SELECT gridpin_load(path)` once per session; one country per session, `SELECT gridpin_reset()` to switch.",
+    "For a service use `gridpin serve <sheet>`: its own `/v1/geocode` API plus Nominatim-compatible `/search` and `/reverse`; one country per process.",
+    "Use the `weak` field, not a confidence threshold, to decide which answers need a check before use.",
     "Geocoding never uses the network; only downloading a sheet does."
   ]
 }

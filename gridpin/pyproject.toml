@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "gridpin"
-version = "0.6.0"
+version = "0.7.0"
 description = "Offline forward and reverse geocoder: country files, no server or database import, no per-request fees; queries stay local"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -21,6 +21,11 @@ classifiers = [
   "Topic :: Scientific/Engineering :: GIS",
 ]
 
+[project.optional-dependencies]
+# The engine needs nothing; these only enable the helper modules gridpin.pandas and gridpin.geopy.
+pandas = ["pandas>=1.5"]
+geopy = ["geopy>=2.0"]
+
 [project.urls]
 Homepage = "https://gridpin.dev"
 Documentation = "https://gridpin.dev/docs"
@@ -30,3 +35,7 @@ Issues = "https://github.com/gridpin/gridpin/issues"
 
 [tool.maturin]
 features = ["python"]
+# Mixed layout: the Rust extension is gridpin._gridpin, the Python helpers (sheets, pandas, geopy) live in
+# python/gridpin/ and __init__.py re-exports Geocoder, so `gridpin.Geocoder` stays where it was.
+python-source = "python"
+module-name = "gridpin._gridpin"

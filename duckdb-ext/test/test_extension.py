@@ -116,6 +116,14 @@ def test_four_functions_exist_and_load(con):
     assert isinstance(json.loads(rev), dict)
 
 
+def test_every_answer_carries_the_weak_verdict(con):
+    con.execute(f"SELECT gridpin_load('{SHEET}')")
+    # the engine's own "check before use", in the plain form and in the k form alike
+    city = json.loads(con.execute("SELECT gridpin_geocode('monaco')").fetchone()[0])
+    house = json.loads(con.execute("SELECT gridpin_geocode('boulevard des moulins 27 monaco')").fetchone()[0])
+    assert city["weak"] is True and house["weak"] is False
+
+
 def test_empty_result_contract_is_braces(con):
     con.execute(f"SELECT gridpin_load('{SHEET}')")
     # documented contract: no match -> '{}' (not NULL, not an error)

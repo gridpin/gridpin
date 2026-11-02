@@ -38,6 +38,7 @@ from de_sources import (
     validate_manifest as validate_de_manifest,
 )
 from ca_provinces import GEONAMES_ADMIN1_TO_PROVINCE
+from mx_states import GEONAMES_ADMIN1_TO_STATE, OVERTURE_STATE_TO_CODE
 from us_umbrella import attach_umbrella
 
 # Per-country upstream provider + license for Overture ADDRESSES. Verified against the
@@ -76,6 +77,13 @@ ADDRESS_LICENSE = {
                        "Government of Yukon civic address points via OpenAddresses",
            "license": "mixed permissive: Statistics Canada Open Licence, CC BY 4.0 (Quebec), "
                       "Open Government Licence - Yukon"},
+    # MX (owner decisions ANSWERS §185-§186, licence check 2026-10-31): one dataset, INEGI address points
+    # merged by AddressForAll; postcodes of 56 % of the points were set by AddressForAll from Correos de
+    # Mexico postcode polygons (code/eval/work/meksika_licenzii_20261031/report.md).
+    "mx": {"provider": "INEGI (Instituto Nacional de Estadistica y Geografia), Vectorial de localidades "
+                       "amanzanadas y numeros exteriores, via AddressForAll and OpenAddresses; postcodes "
+                       "Correos de Mexico (datos.gob.mx)",
+           "license": "mixed permissive: Terminos de Libre Uso de la Informacion del INEGI, Libre Uso MX"},
 }
 S3 = f"s3://overturemaps-us-west-2/release/{RELEASE}/theme=addresses/type=*/*.parquet"
 
@@ -95,6 +103,9 @@ US_GREEN_DATASETS = (
 # (count 2026-10-28: 11 579 915 / 5 342 381 / 23 975; every row has exactly one source).
 CA_RELEASE = "2026-10-21.0"
 CA_DATASETS = ("ca/countrywide", "ca/qc/province", "ca/yt/province")
+# MX: the release pinned by the owner (ANSWERS §186) and the one Mexican dataset (30 726 687 rows, 2026-10-31).
+MX_RELEASE = "2026-10-21.0"
+MX_DATASETS = ("mx/countrywide",)
 US_STATES = (
     "AK", "AL", "AR", "AZ", "CA", "CO", "CT", "DC", "DE", "FL", "GA", "HI", "IA", "ID", "IL", "IN",
     "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO", "MS", "MT", "NC", "ND", "NE", "NH", "NJ",
@@ -114,6 +125,8 @@ def release_for_country(cc: str) -> str:
         return US_RELEASE
     if cc.lower() == "ca":  # ANSWERS §163
         return CA_RELEASE
+    if cc.lower() == "mx":  # ANSWERS §186
+        return MX_RELEASE
     return DE_RELEASE if cc.lower() == "de" else RELEASE
 
 
@@ -126,6 +139,8 @@ BOUNDED_STORAGE = {
     "US": ("us_build", 16, "6GiB"),
     # CA is ~17 % of US rows (16.9 M); same streamed extraction.
     "CA": ("ca_build", 8, "4GiB"),
+    # MX streams 30.7 M rows (15 M with a number), about 1.8x CA.
+    "MX": ("mx_build", 10, "4GiB"),
 }
 
 
@@ -227,6 +242,19 @@ def address_manifest(cc: str, geonames: bool = False, release: str | None = None
             "Ministere des Ressources naturelles et des Forets du Quebec (CC BY 4.0); contains "
             "information licensed under the Open Government Licence - Yukon; "
             f"via Overture Maps / OpenAddresses, release {selected_release}; "
+            "address normalization applied" + geonames_credit
+        )
+    if country == "mx":
+        # The notices the two licences require, read 2026-10-31: INEGI Terminos de Libre Uso 1(f) source and
+        # update date, 1(g) the user is told of the transformation and it is not presented as INEGI's,
+        # 1(h) no endorsement; Libre Uso MX (a) dataset, agency, link and access date, (c) no endorsement.
+        result["attribution"] = (
+            "Fuente: INEGI, Vectorial de localidades amanzanadas y numeros exteriores (actualizacion "
+            "2009-2010), via AddressForAll; postal codes: Correos de Mexico, \"Codigos Postales, coordenadas "
+            "y colonias\" and \"Ubicacion de codigos postales en Mexico\", CM, "
+            "https://datos.gob.mx (accessed 2026-10-31), Libre Uso MX. Adapted by GridPin (normalized, "
+            "filtered and re-keyed); this product is not produced, endorsed or sponsored by INEGI or the "
+            f"Government of Mexico; via Overture Maps / OpenAddresses, release {selected_release}; "
             "address normalization applied" + geonames_credit
         )
     return result
@@ -341,7 +369,26 @@ CA_POSTCODE_SQL = (
     "THEN substr(upper(replace(postcode, ' ', '')), 1, 3) || ' ' || substr(upper(replace(postcode, ' ', '')), 4, 3) "
     "ELSE coalesce(postcode, '') END"
 )
-POSTCODE_SQL = {"BR": BR_POSTCODE_SQL, "US": US_POSTCODE_SQL, "CA": CA_POSTCODE_SQL}
+# Mexican C.P.: five digits for all rows of the source; 406 rows carry only zeros (no code at all).
+MX_POSTCODE_SQL = "CASE WHEN regexp_full_match(coalesce(postcode, ''), '0*') THEN '' ELSE postcode END"
+POSTCODE_SQL = {"BR": BR_POSTCODE_SQL, "US": US_POSTCODE_SQL, "CA": CA_POSTCODE_SQL, "MX": MX_POSTCODE_SQL}
+
+# Mexican state: the full Overture name -> the ISO 3166-2:MX code the rule pack keys (prep/mx_states.py).
+MX_STATE_SQL = ("CASE address_levels[1].value " + " ".join(
+    f"WHEN '{name}' THEN '{code}'" for name, code in sorted(OVERTURE_STATE_TO_CODE.items()))
+    + " ELSE '' END")
+# INEGI writes the street type in capitals before the name; "OTRO" is INEGI's "other type" and is no word
+# of the name ("OTRO CARRETERA FEDERAL" -> "CARRETERA FEDERAL").
+MX_STREET_SQL = "regexp_replace(street, '^OTRO ', '')"
+# Survey 2026-10-31 (code/eval/work/meksika_licenzii_20261031/report.md): of 15 016 772 rows with a street and a
+# number, 548 595 name no street ("NINGUNO", "SIN NOMBRE"), the "RASGO ..." rows are landmarks (a block, a
+# stream, a hill), and 237 471 numbers are a block and lot ("MZ 5 LT 3") or a road kilometre, not a house.
+MX_WHERE_SQL = (
+    f"country = 'MX' AND sources[1].dataset IN ({', '.join(repr(d) for d in MX_DATASETS)}) "
+    "AND street IS NOT NULL AND number IS NOT NULL "
+    "AND NOT regexp_matches(upper(street), 'NINGUNO|SIN NOMBRE|^RASGO ') "
+    "AND NOT regexp_matches(upper(number), 'MZ|MANZANA|LT|LOTE|^KM')"
+)
 
 # US city: postal_city when filled (76.8 % of the green rows), else the second address level,
 # which mixes a city ("Phoenix"), a county ("Fairfax County", Louisiana "Parish"), New Jersey's
@@ -401,6 +448,13 @@ def select_src_sql(cc: str, s3: str) -> str:
             f"country = 'CA' AND sources[1].dataset IN ({_sql_list(CA_DATASETS)}) "
             "AND street IS NOT NULL AND number IS NOT NULL"
         )
+    elif cc == "MX":
+        # The city is the municipality (second level), the state the first; 624 rows carry no level at
+        # all and get the umbrella city (ANSWERS §189: the colonia is not part of the first sheet).
+        city = "coalesce(address_levels[2].value, '')"
+        province = MX_STATE_SQL
+        evidence_columns = ""
+        where_clause = MX_WHERE_SQL
     else:
         city = "coalesce(address_levels[-1].value, '')"
         province = (
@@ -410,9 +464,10 @@ def select_src_sql(cc: str, s3: str) -> str:
         evidence_columns = ""
         where_clause = f"country = '{cc}' AND street IS NOT NULL AND number IS NOT NULL"
     postcode = POSTCODE_SQL.get(cc, "coalesce(postcode, '')")
+    street = MX_STREET_SQL if cc == "MX" else "street"
     return f"""
         SELECT id,
-               street                                   AS nom_voie,
+               {street:<40} AS nom_voie,
                number                                   AS number_raw,
                {postcode:<40} AS postcode_raw,
                {city}                                    AS nom_commune,
@@ -637,15 +692,15 @@ def canon_sql(insee_order: str, prov_alias: str, keys_table: str | None = None,
 
 # Countries extracted in two streamed passes over an S3 view: the source never sits in memory
 # (BR 74M rows, US 100M). `canon` is then a view over the written Parquet, not a table.
-STREAMED = frozenset({"BR", "US", "CA"})
+STREAMED = frozenset({"BR", "US", "CA", "MX"})
 # Streamed countries whose source leaves the city empty on part of the rows (US survey 2026-10-19:
 # about 4.7 M green rows, Texas 1.7 M and New York State 0.97 M first). With a GeoNames dump the
 # adapter fills those cities in a zero pass (fill_missing_cities) before the shared base_sql filter
 # drops rows without a city. The other streamed countries refuse the dump: every row carries its
 # region, and the Serbian province alias would need the whole source as a table.
-CITY_UMBRELLA = frozenset({"US", "CA"})
+CITY_UMBRELLA = frozenset({"US", "CA", "MX"})
 # The GeoNames admin1 code of the dump -> the region code the source carries (Canada: "08" -> "ON").
-UMBRELLA_ADMIN1 = {"CA": GEONAMES_ADMIN1_TO_PROVINCE}
+UMBRELLA_ADMIN1 = {"CA": GEONAMES_ADMIN1_TO_PROVINCE, "MX": GEONAMES_ADMIN1_TO_STATE}
 assert CITY_UMBRELLA <= STREAMED
 
 

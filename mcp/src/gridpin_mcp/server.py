@@ -19,7 +19,8 @@ Countries in release {sheets.RELEASE}: {", ".join(f"{s.code} ({s.name})" for s i
 Workflow: call list_countries; if the country is not downloaded, call download_sheet once
 (32-677 MB, verified against the signed release); then geocode, reverse or batch.
 No API key, no rate limit, and no query leaves the machine. Results carry precision
-(house, interp, street, city, ...) and confidence; treat street- or city-level results as approximate.
+(house, interp, street, city, ...), confidence and weak; weak is true when the engine itself says
+the answer needs a check before use. Treat street- or city-level results as approximate.
 """
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
@@ -40,6 +41,8 @@ class Hit(TypedDict):
     region: NotRequired[str]
     flags: NotRequired[List[str]]
     distance_m: NotRequired[float]
+    # true when the answer needs a check before use (engine 0.7 and later)
+    weak: NotRequired[bool]
 
 
 class GeocodeOut(TypedDict):

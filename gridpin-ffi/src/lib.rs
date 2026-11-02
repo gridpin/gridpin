@@ -197,24 +197,23 @@ fn reverse(
 }
 
 fn answer(hits: &[gridpin::query::Hit], k: Option<usize>) -> Result<String, Box<dyn Error>> {
+    // Every hit carries `weak`: the engine's own verdict that an answer needs a check before use
+    // (`hit_is_weak`, the rule of the POI cascade). Set here, not left to the engine's serializer,
+    // because the R package builds this crate against the released engine from crates.io.
+    let row = |h: &gridpin::query::Hit| -> Result<serde_json::Value, serde_json::Error> {
+        let mut row = serde_json::to_value(h)?;
+        if let Some(fields) = row.as_object_mut() {
+            fields.insert("weak".into(), gridpin::query::hit_is_weak(h).into());
+        }
+        Ok(row)
+    };
     match k {
-        // The k form carries `weak`: the engine's own verdict that an answer needs a check before
-        // use (`hit_is_weak`, the rule of the POI cascade). The SQL form stays as it shipped.
         Some(_) => {
-            let rows = hits
-                .iter()
-                .map(|h| {
-                    let mut row = serde_json::to_value(h)?;
-                    if let Some(fields) = row.as_object_mut() {
-                        fields.insert("weak".into(), gridpin::query::hit_is_weak(h).into());
-                    }
-                    Ok(row)
-                })
-                .collect::<Result<Vec<_>, serde_json::Error>>()?;
+            let rows = hits.iter().map(row).collect::<Result<Vec<_>, _>>()?;
             serde_json::to_string(&rows).map_err(Into::into)
         }
         None => match hits.first() {
-            Some(h) => serde_json::to_string(h).map_err(Into::into),
+            Some(h) => serde_json::to_string(&row(h)?).map_err(Into::into),
             None => Ok("{}".into()),
         },
     }
@@ -223,6 +222,42 @@ fn answer(hits: &[gridpin::query::Hit], k: Option<usize>) -> Result<String, Box<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hit(
+        precision: &'static str,
+        confidence: f32,
+        flags: Vec<&'static str>,
+    ) -> gridpin::query::Hit {
+        gridpin::query::Hit {
+            lat: 0.0,
+            lon: 0.0,
+            precision,
+            score: 0.0,
+            confidence,
+            street: String::new(),
+            housenumber: None,
+            commune: String::new(),
+            postcode: String::new(),
+            flags,
+            region: None,
+            distance_m: None,
+        }
+    }
+
+    #[test]
+    fn both_answer_forms_carry_the_weak_verdict() {
+        let hits = [
+            hit("city", 0.05, vec!["place_exact"]),
+            hit("house", 0.9, vec!["street_exact"]),
+        ];
+        let plain: serde_json::Value = serde_json::from_str(&answer(&hits, None).unwrap()).unwrap();
+        assert_eq!(plain["weak"], true);
+        let listed: serde_json::Value =
+            serde_json::from_str(&answer(&hits, Some(2)).unwrap()).unwrap();
+        assert_eq!(listed[0]["weak"], true);
+        assert_eq!(listed[1]["weak"], false);
+        assert_eq!(answer(&[], None).unwrap(), "{}");
+    }
 
     #[test]
     fn single_path_enforces_a_constant_path_contract() {

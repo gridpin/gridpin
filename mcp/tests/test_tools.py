@@ -35,7 +35,8 @@ def test_geocode_returns_engine_results_with_coordinates(session):
     assert out["country"] == "fr" and out["query"] == ADDRESS
     top = out["results"][0]
     assert isinstance(top["lat"], float) and isinstance(top["lon"], float)
-    assert {"precision", "confidence", "street", "commune"} <= set(top)
+    assert {"precision", "confidence", "street", "commune", "weak"} <= set(top)
+    assert isinstance(top["weak"], bool)
     assert len(out["results"]) <= 3
 
 

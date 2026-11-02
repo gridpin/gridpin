@@ -37,6 +37,26 @@ def test_geocode_returns_list_of_dicts(geo):
     assert isinstance(top["lat"], float) and isinstance(top["lon"], float)
 
 
+def test_every_answer_carries_the_weak_verdict(geo):
+    # the engine's own "check before use": a city-level answer is weak, an exact house is not
+    assert geo.geocode("monaco", 1)[0]["weak"] is True
+    assert geo.geocode("boulevard des moulins 27 monaco", 1)[0]["weak"] is False
+
+
+def test_parse_reports_the_reading_and_the_answer(geo):
+    r = geo.parse("boulevard des moulins 27 monaco")
+    assert (r["house_number"], r["words"]) == (27, "boulevard des moulins monaco")
+    assert r["answer"]["housenumber"] == "27"
+    assert geo.parse("xyzzy plugh nonexistent street 999")["answer"] is None
+
+
+def test_same_address_levels(geo):
+    assert geo.same_address("boulevard des moulins 27 monaco", "Bd des Moulins 27, Monaco")["level"] == "house"
+    assert geo.same_address("boulevard des moulins 27 monaco", "boulevard des moulins 29 monaco")["level"] == "street"
+    unknown = geo.same_address("boulevard des moulins 27 monaco", "xyzzy plugh 999")
+    assert (unknown["level"], unknown["text"]) == ("unknown", "different_text")
+
+
 def test_geocode_empty_on_garbage(geo):
     # a made-up street must return an empty list, never a fabricated hit
     assert geo.geocode("xyzzy plugh nonexistent street 999", 1) == []

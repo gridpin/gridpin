@@ -54,9 +54,39 @@ def expected_pack(common: Path, overlay: Path, marker: bytes = MARKER) -> dict[s
         config = additions["city_tail"]
         required = {"enabled", "regions", "forms", "postal_digits", "postal_split"}
         optional = {"street_titles", "street_title_aliases", "postal_extension", "street_type_last", "region_names",
-                    "junk_tail", "homonym_prominence", "postal_pattern", "quadrant_suffixes", "direction_trailing", "city_first", "unit_hyphen", "number_first_types", "glue_road_numbers", "type_first_siblings", "fuzzy_short_forms", "saint_communes", "interp_max_gap", "interp_max_km"}
+                    "junk_tail", "homonym_prominence", "postal_pattern", "quadrant_suffixes", "direction_trailing", "city_first", "unit_hyphen", "number_first_types", "glue_road_numbers", "type_first_siblings", "fuzzy_short_forms", "saint_communes", "interp_max_gap", "interp_max_km", "bare_street_types", "postal_pad_zero", "number_mark", "postal_prefix", "commaless_restore", "postal_near_digits", "postal_street_suffix", "no_number_marks"}
         if not isinstance(config, dict) or not required <= set(config) or set(config) - required - optional:
             raise ValueError("city_tail: expected complete tail grammar")
+        # postal_pad_zero: "1" restores the leading zero of a postal code written one digit short (query.rs
+        # pad_short_postal, Mexico City "6060" -> "06060").
+        if "postal_pad_zero" in config and str(config["postal_pad_zero"]) != "1":
+            raise ValueError("city_tail: postal_pad_zero must be \"1\" when present")
+        # commaless_restore: "1" gives a query written without commas and ending with a postal code its
+        # commas back (query.rs restore_commas, Mexico).
+        if "commaless_restore" in config and str(config["commaless_restore"]) != "1":
+            raise ValueError("city_tail: commaless_restore must be \"1\" when present")
+        # postal_near_digits: how many leading digits of the code written a street's postcode must share when a
+        # cityless query read nothing inside the code itself (query.rs bare_street_near_code, Mexico).
+        if "postal_near_digits" in config and str(config["postal_near_digits"]) not in {"2", "3", "4"}:
+            raise ValueError("city_tail: postal_near_digits must be 2, 3 or 4 when present")
+        # postal_street_suffix: "1" lets a query that read nothing take the house of the one street inside the
+        # postal code whose name ends with the words written (query.rs postal_street_suffix, Mexico).
+        if "postal_street_suffix" in config and str(config["postal_street_suffix"]) != "1":
+            raise ValueError("city_tail: postal_street_suffix must be \"1\" when present")
+        # no_number_marks: words saying the address has no house number ("s/n"); with postal_street_suffix a
+        # street-level answer inside the postal code (query.rs postal_street_without_number, Mexico).
+        if "no_number_marks" in config and not str(config["no_number_marks"]).strip():
+            raise ValueError("city_tail: no_number_marks must name at least one word when present")
+        # number_mark: one character dropped before a house number ("Abasolo #508"); postal_prefix: a word of
+        # lowercase letters dropped before a postal code ("C.P. 30450" -> "cp"). query.rs strip_number_marks, Mexico.
+        if "number_mark" in config and (len(str(config["number_mark"])) != 1 or str(config["number_mark"]).isalnum()):
+            raise ValueError("city_tail: number_mark must be one character that is no letter or digit")
+        if "postal_prefix" in config and not re.fullmatch(r"[a-z]{1,4}", str(config["postal_prefix"])):
+            raise ValueError("city_tail: postal_prefix must be one to four lowercase letters")
+        # bare_street_types: type words tried in front of a typeless street when a cityless query ends
+        # with a postal code and the answer is not inside it (query.rs bare_street_postal_variants, Mexico).
+        if "bare_street_types" in config and not re.fullmatch(r"[a-z]+( [a-z]+)*", str(config["bare_street_types"])):
+            raise ValueError("city_tail: bare_street_types must be lowercase words separated by spaces")
         # homonym_prominence: "1" orders equal-score homonyms of a cityless query by commune size
         # before distance to the sheet's anchor commune (query.rs homonym_prominence_first).
         if "homonym_prominence" in config and str(config["homonym_prominence"]) != "1":

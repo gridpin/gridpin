@@ -36,7 +36,16 @@ fn hit_to_dict<'py>(py: Python<'py>, h: &query::Hit) -> PyResult<Bound<'py, PyDi
     if let Some(region) = &h.region {
         d.set_item("region", region)?;
     }
+    // the engine's verdict that the answer needs a check before use, as in every JSON surface
+    d.set_item("weak", query::hit_is_weak(h))?;
     Ok(d)
+}
+
+/// A serializable result as plain Python objects, through the same JSON the CLI prints.
+fn to_python<'py, T: serde::Serialize>(py: Python<'py>, value: &T) -> PyResult<Bound<'py, PyAny>> {
+    let text = serde_json::to_string(value)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    py.import("json")?.call_method1("loads", (text,))
 }
 
 #[pymethods]
@@ -70,6 +79,21 @@ impl Geocoder {
             out.append(hit_to_dict(py, h)?)?;
         }
         Ok(out)
+    }
+
+    /// How the engine reads an address line: dict with `words`, `postcode` and `house_number` of the
+    /// first parse hypothesis and `answer` (the top hit, or None). No new parsing rules: see `gridpin parse`.
+    fn parse<'py>(&self, py: Python<'py>, q: &str) -> PyResult<Bound<'py, PyAny>> {
+        let reading = py.detach(|| crate::compare::read(&self.inner, self.poi.as_ref(), q));
+        to_python(py, &reading)
+    }
+
+    /// Do two address lines name the same place? dict with `level` (house, street, commune, different,
+    /// unknown), `reason`, `text` (only when a line has no answer) and both readings. "house" needs the
+    /// same street, number and commune and no weak answer on either side.
+    fn same_address<'py>(&self, py: Python<'py>, a: &str, b: &str) -> PyResult<Bound<'py, PyAny>> {
+        let same = py.detach(|| crate::compare::same_address(&self.inner, self.poi.as_ref(), a, b));
+        to_python(py, &same)
     }
 
     /// Batch of queries (rayon; defaults to cores minus two to keep the machine
@@ -180,8 +204,101 @@ fn batch_pool() -> std::sync::Arc<rayon::ThreadPool> {
     pool
 }
 
+// Sheets of the release (`gridpin sheets`): the same registry, cache folder, check and download as
+// the CLI, so a sheet fetched from Python is found by every other GridPin tool. The Python module
+// gridpin.sheets wraps these.
+
+fn sheet_of(country: &str) -> PyResult<&'static crate::sheets::Sheet> {
+    crate::sheets::resolve(country)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
+fn io_err(e: anyhow::Error) -> PyErr {
+    pyo3::exceptions::PyOSError::new_err(format!("{e:#}"))
+}
+
+/// The release the sheets belong to, and the download base URL.
+#[pyfunction]
+fn _sheets_release() -> (String, String) {
+    let r = crate::sheets::registry();
+    (r.release.clone(), r.base_url.clone())
+}
+
+/// Every sheet of the release: code, name, file, size, sha256, url.
+#[pyfunction]
+fn _sheets_registry<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+    let out = PyList::empty(py);
+    for s in &crate::sheets::registry().sheets {
+        let d = PyDict::new(py);
+        d.set_item("code", &s.code)?;
+        d.set_item("name", &s.name)?;
+        d.set_item("file", &s.file)?;
+        d.set_item("size", s.size)?;
+        d.set_item("sha256", &s.sha256)?;
+        d.set_item("url", s.url())?;
+        out.append(d)?;
+    }
+    Ok(out)
+}
+
+/// Folder of downloaded sheets (GRIDPIN_HOME, else XDG_CACHE_HOME/gridpin, else ~/.cache/gridpin).
+#[pyfunction]
+fn _sheets_home() -> PyResult<PathBuf> {
+    crate::sheets::home().map_err(io_err)
+}
+
+/// Where the sheet of a country lives in the cache, downloaded or not.
+#[pyfunction]
+fn _sheets_path(country: &str) -> PyResult<PathBuf> {
+    crate::sheets::local_path(sheet_of(country)?).map_err(io_err)
+}
+
+/// The file is in the cache with the pinned size (the digest is `_sheets_verify`'s job).
+#[pyfunction]
+fn _sheets_downloaded(country: &str) -> PyResult<bool> {
+    crate::sheets::is_downloaded(sheet_of(country)?).map_err(io_err)
+}
+
+/// "ok", "missing", "wrong_size" or "wrong_sha256" for the country's sheet at `path` (default: the cache).
+#[pyfunction]
+#[pyo3(signature = (country, path = None))]
+fn _sheets_verify(py: Python<'_>, country: &str, path: Option<PathBuf>) -> PyResult<&'static str> {
+    let sheet = sheet_of(country)?;
+    let path = match path {
+        Some(p) => p,
+        None => crate::sheets::local_path(sheet).map_err(io_err)?,
+    };
+    let verdict = py
+        .detach(|| crate::sheets::verify(&path, sheet))
+        .map_err(io_err)?;
+    Ok(match verdict {
+        crate::sheets::Verdict::Ok => "ok",
+        crate::sheets::Verdict::Missing => "missing",
+        crate::sheets::Verdict::WrongSize(_) => "wrong_size",
+        crate::sheets::Verdict::WrongDigest(_) => "wrong_sha256",
+    })
+}
+
+/// Download the country's sheet unless it is already in place and checked; returns its path.
+/// `offline` (or GRIDPIN_OFFLINE) forbids the network: then a missing sheet is an error naming the URL.
+#[pyfunction]
+#[pyo3(signature = (country, offline = false))]
+fn _sheets_fetch(py: Python<'_>, country: &str, offline: bool) -> PyResult<PathBuf> {
+    let sheet = sheet_of(country)?;
+    let offline = offline || crate::sheets::offline_from_env();
+    py.detach(|| crate::sheets::fetch(sheet, offline))
+        .map_err(io_err)
+}
+
 #[pymodule]
-fn gridpin(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _gridpin(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Geocoder>()?;
+    m.add_function(wrap_pyfunction!(_sheets_release, m)?)?;
+    m.add_function(wrap_pyfunction!(_sheets_registry, m)?)?;
+    m.add_function(wrap_pyfunction!(_sheets_home, m)?)?;
+    m.add_function(wrap_pyfunction!(_sheets_path, m)?)?;
+    m.add_function(wrap_pyfunction!(_sheets_downloaded, m)?)?;
+    m.add_function(wrap_pyfunction!(_sheets_verify, m)?)?;
+    m.add_function(wrap_pyfunction!(_sheets_fetch, m)?)?;
     Ok(())
 }

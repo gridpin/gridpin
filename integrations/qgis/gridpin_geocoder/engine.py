@@ -7,7 +7,7 @@ _engines = {}
 
 MISSING = (
     "The gridpin Python package is not installed. Install the QPIP plugin and restart QGIS, "
-    "or run `pip install \"gridpin>=0.5,<0.6\"` in the QGIS Python environment."
+    "or run `pip install \"gridpin>=0.6,<0.7\"` in the QGIS Python environment."
 )
 
 

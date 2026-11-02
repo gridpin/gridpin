@@ -89,9 +89,14 @@ int main(int argc, char **argv) {
           "a town-level answer with k carries weak = true");
     free(s);
     gridpin_response_drop(r);
+    r = gridpin_invoke(state, GRIDPIN_OP_GEOCODE, &town, NULL, NULL, NULL, 1);
+    s = row_of(r, 0, &st);
+    CHECK(st == 0 && contains(s, "\"weak\":true"), "the plain form carries weak = true for a town too");
+    free(s);
+    gridpin_response_drop(r);
     r = gridpin_invoke(state, GRIDPIN_OP_GEOCODE, q, NULL, NULL, NULL, 1);
     s = row_of(r, 0, &st);
-    CHECK(st == 0 && !contains(s, "weak"), "the SQL form carries no weak field");
+    CHECK(st == 0 && contains(s, "\"weak\":false"), "the plain form carries weak = false for a door");
     free(s);
     gridpin_response_drop(r);
 

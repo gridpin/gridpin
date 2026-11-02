@@ -9,11 +9,12 @@ MODELS=--model ml/parser_v0.bin --rank ml/rank_v0.bin $(RULES)
 GEONAMES_RS=data/geonames_rs.txt
 GEONAMES_US=data/geonames_us.txt
 GEONAMES_CA=data/geonames_ca.txt
+GEONAMES_MX=data/geonames_mx.txt
 
 # All recipes are phony (not files). Without this, a file named like a target (e.g. `smoke`)
 # in the working dir makes `make` consider the target up to date and silently skip the recipe — which
 # let the release check skip its provenance verification.
-.PHONY: engine bindings duckdb-ext third-party-licenses fr nl it rs es br us de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb langchain-venv test-langchain test-qgis qgis-plugin-zip http public-bench-contract public-bench
+.PHONY: engine bindings duckdb-ext third-party-licenses fr nl it rs es br us mx de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb test-node langchain-venv test-langchain test-qgis qgis-plugin-zip http public-bench-contract public-bench
 
 engine:
 	cargo build --release --manifest-path gridpin/Cargo.toml
@@ -78,6 +79,12 @@ qgis-plugin-zip:
 	cd integrations/qgis && zip -qrX -FS gridpin_geocoder.zip gridpin_geocoder -x '*/__pycache__/*' '*.pyc' '*/.DS_Store'
 	@ls -l integrations/qgis/gridpin_geocoder.zip
 
+# Node.js package (integrations/node): the Node-API glue over gridpin-ffi, against the Monaco smoke sheet;
+# its answers are compared with the CLI built by `engine`.
+test-node: engine mc
+	sh integrations/node/build.sh
+	cd integrations/node && GRIDPIN_TEST_SHEET=$(CURDIR)/data/mc.bin node --test
+
 # DuckDB extension against the Monaco smoke sheet
 test-duckdb: bindings mc
 	test -s duckdb-ext/gridpin_ext.duckdb_extension || { echo 'Run make duckdb-ext first'; exit 1; }
@@ -102,8 +109,16 @@ endif
 # Extension version comes from its Cargo.toml — the single source;
 # -dv v1.2.0 is the C_STRUCT ABI floor (stable since DuckDB 1.2.0), not the dep version.
 EXT_VERSION := $(shell grep -m1 '^version' duckdb-ext/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+# A built wheel, installed: `maturin develop` installs a mixed Rust/Python package as a link to this
+# checkout's python/ folder, and .venv-py may be shared by several checkouts of the repository.
+# The wheel name carries version and platform, so a rebuild overwrites the previous file.
 bindings: engine
-	cd gridpin && VIRTUAL_ENV=$$PWD/../.venv-py ../.venv-py/bin/maturin develop --release
+	cd gridpin && ../.venv-py/bin/maturin build --release -o target/wheels-dev
+	.venv-py/bin/python -m pip install --quiet --force-reinstall --no-deps gridpin/target/wheels-dev/gridpin-*.whl
+ifeq ($(UNAME_S),Darwin)
+	# Some macOS linkers leave the string table misaligned and dyld refuses the module (see the script).
+	.venv-py/bin/python .github/macho_align.py "$$(.venv-py/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["platlib"])')"/gridpin/_gridpin.abi3.so
+endif
 
 # CPP ABI requires DuckDB v1.5.5 sources and the same runtime version.
 # Supply an existing source checkout/archive; this target never downloads it.
@@ -119,7 +134,7 @@ duckdb-ext:
 	cp "$(DUCKDB_BUILD_DIR)/extension/gridpin_ext/gridpin_ext.duckdb_extension" duckdb-ext/gridpin_ext.duckdb_extension
 
 # License texts of the Rust libraries compiled into the wheel, the CLI archives (gridpin) and the
-# DuckDB extension (duckdb-ext). Regenerate and commit after every Cargo.lock change: the release
+# DuckDB extension (duckdb-ext) and the npm package's native module (gridpin-ffi). Regenerate and commit after every Cargo.lock change: the release
 # workflow refuses a THIRDPARTY.yml that no longer matches its lockfile. The generator must see the
 # same features as the build: pyo3 is optional behind `python` (the wheel's [tool.maturin]
 # features), and without it six compiled-in libraries go missing. The CLI links a subset of the
@@ -127,7 +142,8 @@ duckdb-ext:
 third-party-licenses:
 	cd gridpin && cargo bundle-licenses --features python --format yaml --output THIRDPARTY.yml
 	cd duckdb-ext && cargo bundle-licenses --format yaml --output THIRDPARTY.yml
-	python3 .github/thirdparty_licenses.py gridpin duckdb-ext
+	cd gridpin-ffi && cargo bundle-licenses --format yaml --output THIRDPARTY.yml
+	python3 .github/thirdparty_licenses.py gridpin duckdb-ext gridpin-ffi
 
 fr: engine
 	nice -n 19 python3 prep/normalize.py
@@ -197,6 +213,16 @@ ca: engine
 	$(if $(wildcard rules),python3 prep/ca_rules.py,)
 	GRIDPIN_MEM=6GB nice -n 19 python3 prep/export_build.py data/ca_norm.parquet data/build_ca.csv.gz
 	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_ca.csv.gz data/ca.bin $(MODELS) --meta data/ca_manifest.json
+
+# Mexico (ANSWERS §185-§189): Overture 2026-10-21.0, the INEGI dataset mx/countrywide; the municipality is the
+# commune and the ISO 3166-2:MX code the state; rows without a municipality get the GeoNames umbrella city.
+mx: RULES=$(if $(wildcard rules),--rules rules/mx,)
+mx: engine
+	test -f $(GEONAMES_MX) || python3 prep/fetch_zip.py https://download.geonames.org/export/dump/MX.zip MX.txt $(GEONAMES_MX)
+	nice -n 19 python3 prep/overture.py MX $(GEONAMES_MX)
+	$(if $(wildcard rules),python3 prep/mx_rules.py,)
+	GRIDPIN_MEM=6GB nice -n 19 python3 prep/export_build.py data/mx_norm.parquet data/build_mx.csv.gz
+	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_mx.csv.gz data/mx.bin $(MODELS) --meta data/mx_manifest.json
 
 rs: engine
 	test -f $(GEONAMES_RS) || python3 prep/fetch_zip.py https://download.geonames.org/export/dump/RS.zip RS.txt $(GEONAMES_RS)

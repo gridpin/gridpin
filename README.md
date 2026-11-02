@@ -111,6 +111,13 @@ $ gridpin reverse france.bin 48.8686 2.3305
 
 # batch: JSONL in ({"q": "..."} per line), JSONL out
 $ gridpin batch france.bin queries.jsonl results.jsonl -k 1
+
+# a spreadsheet: CSV or TSV in, the same file with gp_lat, gp_lon, gp_precision, ... out
+$ gridpin batch usa.bin addresses.csv geocoded.csv
+$ gridpin batch usa.bin orders.csv geocoded.csv --column "street,city,zip" --delimiter ";"
+
+# a local geocoding server: own JSON API plus Nominatim-compatible /search and /reverse
+$ gridpin serve usa.bin --port 8080
 ```
 
 ### Python
@@ -126,6 +133,8 @@ g = gridpin.Geocoder("france.bin")
 g.geocode("1 rue de la Paix Paris", 1)
 g.reverse(48.8686, 2.3305, 1)
 ```
+
+With pandas: `pip install "gridpin[pandas]"`, then `gridpin.sheets.fetch("us")`, `gridpin.geocode_df(df, "address", "us")` (or `df.gridpin.geocode(...)`) and `gridpin.reverse_df(df, "us")`; the `gp_*` columns are the same as in `gridpin batch` CSV and `gp_geocode_df` in R. `gridpin.sheets.list / path / verify / fetch` use the same cache and checks as `gridpin sheets`. Extras: `[pandas]`, `[geopy]`; without them the wheel still has no dependencies.
 
 The wheel wraps the Rust engine directly (pyo3/maturin); on a single core, exact lookups run at ~3,000/s, while typo-heavy input is fuzzy-matched at tens of milliseconds per query — use `geocode_many()` to batch across cores.
 
@@ -152,6 +161,7 @@ A country in a file — most countries are a single file (a few regional dataset
 | France      | 365 MB    | 26.1 M    | BAN (national registry) | Licence Ouverte   | ✓ (231 MB, optional) |
 | Italy       | 247 MB    | 25.9 M    | Overture / ANNCSU   | CC BY 4.0             | — |
 | Spain       | 185 MB    | 15.27M    | Overture / CartoCiudad (IGN/CNIG), all 52 postal provinces | CC BY 4.0 | — |
+| Mexico | 156 MB | 14.14M | Overture / INEGI address layer, Correos de México postal codes | open data (per source) | — |
 | Netherlands | 103 MB    | 9.9 M     | Overture / NGR (BAG) | Public Domain Mark 1.0 | — |
 | Brazil | 677 MB | 67.19M | Overture / IBGE CNEFE 2022, nationwide | CC0 1.0 (IBGE public data) | — |
 | Serbia      | 32 MB     | 2.6 M     | Overture / RGZ      | data.gov.rs Terms     | — |
@@ -218,6 +228,8 @@ independent reference coordinate (empty answers count as misses):
 | Germany · distorted addresses | 2,000 | **82.1%** | 46.9% | 15.8% |
 | Germany · clean addresses | 2,000 | **82.8%** | 83.2% | 81.2% |
 | Spain · distorted addresses | 1,590 | **33.8%** | 29.6% | 20.8% |
+| Mexico · distorted addresses | 909 | **18.4%** | 11.4% | 4.8% |
+| Mexico · cultural venues (as recorded) | 1,000 | **28.0%** | 17.3% | 10.2% |
 | Brazil · distorted addresses | 2,376 | **20.7%** | 19.8% | 9.6% |
 | Brazil · health-facility register (as typed) | 1,000 | **36.8%** | 28.2% | 20.7% |
 
@@ -226,7 +238,7 @@ coordinate kept byte for byte. On German and Spanish distorted addresses GridPin
 on Brazilian distorted addresses GridPin and Photon are level, both well ahead of Nominatim; on clean
 German addresses GridPin and Photon are level (p=0.6691367 — not proof of parity). We show the sets
 where GridPin leads or is level; on the other Spanish sets Photon leads, and on clean Brazilian
-addresses Photon leads too; on clean Canadian addresses Photon leads (59.1% vs 57.5%; Nominatim 57.2%). Counts, paired tests and data fingerprints for every set are in
+addresses Photon leads too; on clean Canadian addresses Photon leads (59.1% vs 57.5%; Nominatim 57.2%); on clean Mexican addresses GridPin leads (23.3% vs Photon 14.6%, Nominatim 9.4%). Counts, paired tests and data fingerprints for every set are in
 [docs-public/BENCHMARK.md](docs-public/BENCHMARK.md); the summary lives on the
 [test bench page](https://gridpin.dev/bench).
 
@@ -321,6 +333,7 @@ The engine is Apache-2.0. Each sheet carries the license of its source data:
 
 - **United States** — National Address Database (USDOT) and 19 state and county open datasets via Overture/OpenAddresses, each under its own permissive licence (U.S. Government work, CC0, PDDL, CC BY 4.0, open-data terms — listed per source in the sheet manifest); address ranges from U.S. Census Bureau TIGER/Line 2025 (U.S. Government work); postal codes from GeoNames (CC BY 4.0).
 - **Canada** — Statistics Canada National Address Register under the [Statistics Canada Open Licence](https://www.statcan.gc.ca/en/terms-conditions/open-licence) (required notice: "Adapted from Statistics Canada, National Address Register, 2024. This does not constitute an endorsement by Statistics Canada of this product."); Adresses Québec (MRNF) under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); Yukon civic addresses under the [Open Government Licence – Yukon](https://yukon.ca/en/your-government/open-government/open-government-licence-yukon) ("Contains information licensed under the Open Government Licence – Yukon"); all via Overture/OpenAddresses; settlement names from GeoNames (CC BY 4.0).
+- **Mexico** — "Fuente: INEGI, Vectorial de localidades amanzanadas y números exteriores (actualización 2009-2010), via AddressForAll"; postal codes: Correos de México (Libre Uso MX). GridPin's sheet is a derived work, not an INEGI product, and INEGI does not endorse it.
 - **France** — BAN, under [Licence Ouverte 2.0](https://www.etalab.gouv.fr/licence-ouverte-open-licence/).
 - **Italy** — ANNCSU via Overture/OpenAddresses, under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 - **Netherlands** — Nationaal Georegister (BAG) via Overture, under [Public Domain Mark 1.0](https://creativecommons.org/publicdomain/mark/1.0/).
@@ -334,6 +347,8 @@ All of these licenses let you **store geocoding results indefinitely**. This is 
 This also matters for GDPR: the addresses you geocode are often customer data, and with GridPin they never leave your infrastructure.
 
 ## Status & roadmap
+
+**v0.7.0: Mexico added, plus spreadsheets, a local server and Docker. Client update required.** One nationwide sheet (`mexico.bin`, 156 MB): 14.14M point addresses from the INEGI address layer (surveyed 2009–2010) with Correos de México postal codes. Engine rules for Mexican addresses (see docs). Also new: CSV/TSV in `gridpin batch`; `gridpin serve` with its own API and Nominatim-compatible /search and /reverse; Docker images per country; the `weak` field; `gridpin sheets`; `gridpin parse` and `gridpin same`; the npm package; `gridpin[pandas]` and `gridpin[geopy]`.
 
 **v0.6.0: Canada added. Client update required.** One nationwide sheet (`canada.bin`, 183 MB): 16.94M point addresses in all provinces and territories from the Statistics Canada National Address Register, Adresses Québec and the Government of Yukon (via Overture Maps, release 2026-10-21.0); answers carry the Canadian postal code. Older engines have no Canadian rules (place written before the address, Edmonton and Calgary quadrants, French street types in front, "A9A 9A9" postal codes). Use the 0.6.0 client with this release. All nine country sheets and the France POI layer use the new immutable `v0.6.0/` path and a new attestation; `v0.1.0/` to `v0.5.0/` are unchanged.
 

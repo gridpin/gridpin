@@ -1,0 +1,12 @@
+# Two countries side by side, each on its own port. The containers need no network at run time:
+# `network_mode: none` would block the published port too, so keep the default bridge and rely on
+# the image itself (it only listens; it never connects out).
+services:
+  geocoder-us:
+    image: ghcr.io/gridpin/gridpin:us
+    ports: ["127.0.0.1:8080:8080"]
+    restart: unless-stopped
+  geocoder-ca:
+    image: ghcr.io/gridpin/gridpin:ca
+    ports: ["127.0.0.1:8081:8080"]
+    restart: unless-stopped

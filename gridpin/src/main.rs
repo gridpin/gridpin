@@ -104,13 +104,28 @@ enum Cmd {
         #[arg(long)]
         poi: Option<PathBuf>,
     },
-    /// Batch mode: JSONL {"q": ...} in -> JSONL {"results": [...]} out, order preserved
+    /// Batch mode: JSONL {"q": ...} in -> JSONL {"results": [...]} out, or a CSV/TSV file in -> the same
+    /// file with gp_* answer columns out; order preserved
     Batch {
         index: PathBuf,
         input: PathBuf,
         output: PathBuf,
-        #[arg(short, default_value_t = 10)]
-        k: usize,
+        /// candidates per query (default 10 for JSONL, 1 for CSV/TSV)
+        #[arg(short)]
+        k: Option<usize>,
+        /// input format: jsonl, csv or tsv (default: from the extension; .csv, .tsv/.tab, anything else jsonl)
+        #[arg(long)]
+        format: Option<String>,
+        /// output format for a CSV/TSV input: csv or tsv (default: the input format)
+        #[arg(long)]
+        output_format: Option<String>,
+        /// CSV/TSV: the address column, or several joined with ", " ("street,city,postcode");
+        /// default: the one column named address, query or q
+        #[arg(long)]
+        column: Option<String>,
+        /// CSV/TSV: field delimiter of the input (one character or `tab`; default , for CSV and tab for TSV)
+        #[arg(long)]
+        delimiter: Option<String>,
         /// dump candidate features (rank training)
         #[arg(long, default_value_t = false)]
         dump: bool,
@@ -120,6 +135,54 @@ enum Cmd {
         /// optional POI layer (second .bin): cascades when the address result is weak
         #[arg(long)]
         poi: Option<PathBuf>,
+    },
+    /// Serve one sheet over local HTTP: /v1/geocode, /v1/reverse and Nominatim-compatible /search,
+    /// /reverse, /status. Prints `listening on http://HOST:PORT` first.
+    Serve {
+        /// the address sheet (.bin); not needed with --probe
+        #[arg(required_unless_present = "probe")]
+        index: Option<PathBuf>,
+        /// optional POI layer (second .bin): cascades when the address result is weak
+        #[arg(long)]
+        poi: Option<PathBuf>,
+        /// address to listen on; 127.0.0.1 keeps the server on this machine
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// port; 0 picks a free one (printed on the first line)
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        /// connections handled at once (default: cores minus two, at least 1)
+        #[arg(long)]
+        threads: Option<usize>,
+        /// only GET this http:// URL and exit 0 on status 200 (container health checks)
+        #[arg(long, conflicts_with_all = ["poi"])]
+        probe: Option<String>,
+    },
+    /// How the engine reads an address line: first-hypothesis words, postcode, house number, top answer
+    Parse {
+        index: PathBuf,
+        q: String,
+        /// optional POI layer (second .bin): cascades when the address result is weak
+        #[arg(long)]
+        poi: Option<PathBuf>,
+    },
+    /// Do two address lines name the same house, street or commune? (`--pairs`: a JSONL file of {"a","b"})
+    Same {
+        index: PathBuf,
+        /// the two lines; or with --pairs, the input and output JSONL files
+        #[arg(num_args = 2)]
+        lines: Vec<String>,
+        /// treat the two arguments as an input file of {"a": ..., "b": ...} lines and an output file
+        #[arg(long)]
+        pairs: bool,
+        /// optional POI layer (second .bin): cascades when the address result is weak
+        #[arg(long)]
+        poi: Option<PathBuf>,
+    },
+    /// Country sheets of this release: list, where they are kept, verify, download
+    Sheets {
+        #[command(subcommand)]
+        cmd: SheetsCmd,
     },
     /// Print the provenance/identity record of a sheet (SEC_META, v6+)
     Meta {
@@ -142,10 +205,160 @@ enum Cmd {
     Bench { index: PathBuf },
 }
 
+#[derive(Subcommand)]
+enum SheetsCmd {
+    /// Every sheet of the release: code, country, size, and whether it is downloaded
+    List {
+        /// one JSON array, with file, SHA-256, address and local path
+        #[arg(long)]
+        json: bool,
+    },
+    /// The folder of downloaded sheets, or with a country the path of its sheet
+    Where { country: Option<String> },
+    /// Check size and SHA-256 against the signed release (no argument: every downloaded sheet)
+    Verify {
+        /// country codes or names, or paths to .bin files
+        targets: Vec<String>,
+    },
+    /// Download a sheet with the system curl and check it before it is used
+    Fetch {
+        country: String,
+        /// never use the network (also GRIDPIN_OFFLINE=1): print the command to run elsewhere
+        #[arg(long)]
+        offline: bool,
+    },
+}
+
+fn sheets_command(cmd: SheetsCmd) -> anyhow::Result<()> {
+    use gridpin::sheets;
+    let registry = sheets::registry();
+    match cmd {
+        SheetsCmd::List { json } => {
+            if json {
+                let rows = registry
+                    .sheets
+                    .iter()
+                    .map(|s| {
+                        Ok(serde_json::json!({
+                            "code": s.code, "name": s.name, "file": s.file, "size": s.size,
+                            "sha256": s.sha256, "url": s.url(),
+                            "path": sheets::local_path(s)?, "downloaded": sheets::is_downloaded(s)?,
+                        }))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                println!("{}", serde_json::to_string(&rows)?);
+            } else {
+                println!(
+                    "release {}, folder {}",
+                    registry.release,
+                    sheets::home()?.join(&registry.release).display()
+                );
+                for s in &registry.sheets {
+                    let state = if sheets::is_downloaded(s)? {
+                        "downloaded"
+                    } else {
+                        "-"
+                    };
+                    println!(
+                        "{:<4}{:<16}{:>9.0} MB  {}",
+                        s.code,
+                        s.name,
+                        s.size as f64 / 1e6,
+                        state
+                    );
+                }
+            }
+        }
+        SheetsCmd::Where { country } => match country {
+            None => println!("{}", sheets::home()?.join(&registry.release).display()),
+            Some(country) => {
+                let s = sheets::resolve(&country)?;
+                let path = sheets::local_path(s)?;
+                if !sheets::is_downloaded(s)? {
+                    anyhow::bail!(
+                        "the {} sheet is not downloaded; run `gridpin sheets fetch {}`",
+                        s.name,
+                        s.code
+                    );
+                }
+                println!("{}", path.display());
+            }
+        },
+        SheetsCmd::Verify { targets } => {
+            let mut checks: Vec<(PathBuf, &gridpin::sheets::Sheet)> = Vec::new();
+            if targets.is_empty() {
+                for s in &registry.sheets {
+                    if sheets::is_downloaded(s)? {
+                        checks.push((sheets::local_path(s)?, s));
+                    }
+                }
+                if checks.is_empty() {
+                    println!("no sheet of {} is downloaded", registry.release);
+                }
+            }
+            for target in &targets {
+                let path = PathBuf::from(target);
+                if path.extension().is_some_and(|e| e == "bin") || path.is_file() {
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default();
+                    let s = registry
+                        .sheets
+                        .iter()
+                        .find(|s| s.file == name)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "{target}: not a sheet file name of {} (expected e.g. {})",
+                                registry.release,
+                                registry.sheets[0].file
+                            )
+                        })?;
+                    checks.push((path, s));
+                } else {
+                    let s = sheets::resolve(target)?;
+                    checks.push((sheets::local_path(s)?, s));
+                }
+            }
+            let mut bad = 0;
+            for (path, s) in checks {
+                let verdict = sheets::verify(&path, s)?;
+                let line = match &verdict {
+                    sheets::Verdict::Ok => "ok".to_string(),
+                    sheets::Verdict::Missing => "missing".to_string(),
+                    sheets::Verdict::WrongSize(n) => {
+                        format!("WRONG SIZE: {n} bytes, expected {}", s.size)
+                    }
+                    sheets::Verdict::WrongDigest(d) => {
+                        format!("WRONG SHA-256: {d}, expected {}", s.sha256)
+                    }
+                };
+                bad += usize::from(verdict != sheets::Verdict::Ok);
+                println!("{}  {}  {line}", s.code, path.display());
+            }
+            if bad > 0 {
+                anyhow::bail!("{bad} sheet(s) failed the check");
+            }
+        }
+        SheetsCmd::Fetch { country, offline } => {
+            let s = sheets::resolve(&country)?;
+            let path = sheets::fetch(s, offline || sheets::offline_from_env())?;
+            println!("{}", path.display());
+        }
+    }
+    Ok(())
+}
+
 /// Run a query that reads mmap'd sections, but never let a panic INSIDE the fst crate on a
 /// corrupt-but-openable sheet abort the CLI: the Python/DuckDB bindings have their
 /// own panic boundary; the CLI query/reverse/batch paths need one too. A caught panic yields the
 /// type's default (empty results) so the process exits cleanly instead of aborting the host.
+/// Like `panic_safe` for answers without a neutral value: a caught panic becomes an error.
+fn guarded<T>(f: impl FnOnce() -> T) -> anyhow::Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .map_err(|_| anyhow::anyhow!("the engine failed on this line (corrupt sheet or input)"))
+}
+
 fn panic_safe<T: Default>(f: impl FnOnce() -> T) -> T {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_default()
 }
@@ -349,11 +562,33 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             input,
             output,
             k,
+            format,
+            output_format,
+            column,
+            delimiter,
             dump,
             diagnose,
             poi,
         } => {
             use rayon::prelude::*;
+            let input_format = gridpin::tabular::Format::of_input(format.as_deref(), &input)?;
+            let table = input_format != gridpin::tabular::Format::Jsonl;
+            let output_format = match output_format.as_deref() {
+                None => input_format,
+                Some(name) => gridpin::tabular::Format::parse(name)?,
+            };
+            if table && (dump || diagnose) {
+                anyhow::bail!("batch: --dump and --diagnose read JSONL only");
+            }
+            if table == (output_format == gridpin::tabular::Format::Jsonl) {
+                anyhow::bail!(
+                    "batch: CSV/TSV output needs a CSV/TSV input, and JSONL output a JSONL input"
+                );
+            }
+            if !table && (column.is_some() || delimiter.is_some()) {
+                anyhow::bail!("batch: --column and --delimiter apply to CSV/TSV input only");
+            }
+            let k = k.unwrap_or(if table { 1 } else { 10 });
             let t0 = std::time::Instant::now();
             let idx = query::Index::open_address(&index)?;
             let poi_idx = poi.map(|p| query::Index::open(&p)).transpose()?;
@@ -440,6 +675,21 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             };
             let mut nq = 0u64;
             let tq = std::time::Instant::now();
+            let mut without_address = 0u64;
+            if table {
+                let opts = gridpin::tabular::Options {
+                    input_format,
+                    output_format,
+                    columns: column.as_deref(),
+                    delimiter: delimiter.as_deref(),
+                    k,
+                };
+                let stats = gridpin::tabular::run(&input, &mut out, &opts, &pool, |q| {
+                    panic_safe(|| query::query_cascade(&idx, poi_idx.as_ref(), q, k))
+                })?; // on Err, Drop cleans the temp
+                nq = stats.rows;
+                without_address = stats.without_address;
+            }
             // input is JSONL: {"q": "..."} per line. Lines without a usable "q" would
             // silently yield empty results, so they are counted and reported.
             let malformed = std::sync::atomic::AtomicU64::new(0);
@@ -449,6 +699,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             // order, so the output is byte-identical to the old all-in-memory path.
             const WINDOW: usize = 65_536;
             loop {
+                if table {
+                    break; // a CSV/TSV input was answered above by gridpin::tabular::run
+                }
                 let mut lines: Vec<String> = Vec::with_capacity(WINDOW);
                 for l in inp.by_ref() {
                     // Push EVERY input line — do NOT silently drop a blank one: that
@@ -545,6 +798,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 dt,
                 nq as f64 / dt
             );
+            if without_address > 0 {
+                // a blank address cell is data, not a format error: the row is kept with empty gp_* columns
+                eprintln!(
+                    "note: {without_address} of {nq} rows had no address and were left unanswered"
+                );
+            }
             let bad = malformed.load(std::sync::atomic::Ordering::Relaxed);
             if bad > 0 {
                 // Semantic FAILURE: never publish, keep the previous output intact.
@@ -561,6 +820,66 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             // build/repack path.
             gridpin::builder::finalize_replace(&tmp_out, &output)?; // on Err, Drop cleans the temp
             tmp_guard.disarm(); // published; do not remove the renamed file
+        }
+        Cmd::Serve {
+            index,
+            poi,
+            host,
+            port,
+            threads,
+            probe,
+        } => {
+            if let Some(url) = probe {
+                return gridpin::serve::probe(&url);
+            }
+            let index = index.expect("clap requires the index without --probe");
+            let engine = gridpin::serve::Engine::open(&index, poi.as_deref())?;
+            let threads = threads.unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|c| c.get().saturating_sub(2).max(1))
+                    .unwrap_or(2)
+            });
+            gridpin::serve::run(engine, index, &host, port, threads)?;
+        }
+        Cmd::Sheets { cmd } => sheets_command(cmd)?,
+        Cmd::Parse { index, q, poi } => {
+            let idx = query::Index::open_address(&index)?;
+            let poi_idx = poi.map(|p| query::Index::open(&p)).transpose()?;
+            let reading = guarded(|| gridpin::compare::read(&idx, poi_idx.as_ref(), &q))?;
+            println!("{}", serde_json::to_string(&reading)?);
+        }
+        Cmd::Same {
+            index,
+            lines,
+            pairs,
+            poi,
+        } => {
+            let idx = query::Index::open_address(&index)?;
+            let poi_idx = poi.map(|p| query::Index::open(&p)).transpose()?;
+            if !pairs {
+                let same = guarded(|| {
+                    gridpin::compare::same_address(&idx, poi_idx.as_ref(), &lines[0], &lines[1])
+                })?;
+                println!("{}", serde_json::to_string(&same)?);
+            } else {
+                use rayon::prelude::*;
+                let input = std::fs::read_to_string(&lines[0])?;
+                let rows: Vec<&str> = input.lines().collect();
+                let out: Vec<String> = rows
+                    .par_iter()
+                    .map(|line| {
+                        let pair: serde_json::Value = serde_json::from_str(line).unwrap_or_default();
+                        let (Some(a), Some(b)) = (pair["a"].as_str(), pair["b"].as_str()) else {
+                            return serde_json::json!({"error": "expected {\"a\": ..., \"b\": ...}"}).to_string();
+                        };
+                        match guarded(|| gridpin::compare::same_address(&idx, poi_idx.as_ref(), a, b)) {
+                            Ok(same) => serde_json::to_string(&same).unwrap_or_default(),
+                            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+                        }
+                    })
+                    .collect();
+                std::fs::write(&lines[1], out.join("\n") + "\n")?;
+            }
         }
         Cmd::Bench { index } => {
             println!("bench: {index:?} (not implemented)");

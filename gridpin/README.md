@@ -22,7 +22,7 @@ pip install --upgrade gridpin==0.5.0
 ```
 
 The wheel contains the engine, not the data: **download a country sheet
-separately**. Free static sheets for the United States, Canada, Germany, France, Italy, Spain, the Netherlands, Brazil and Serbia
+separately**. Free static sheets for the United States, Canada, Germany, France, Italy, Spain, Mexico, the Netherlands, Brazil and Serbia
 are listed at <https://gridpin.dev/docs#delivery> — no account, no key, no
 sign-up.
 
@@ -31,10 +31,16 @@ One command does the download and the check: `pip install gridpin-mcp`, then
 signed release; from Python, `gridpin_mcp.sheets.download("fr")` returns the same path. The
 same package is an MCP server for AI agents (`uvx gridpin-mcp`).
 
+With pandas: `pip install "gridpin[pandas]"`, then `gridpin.sheets.fetch("us")`,
+`gridpin.geocode_df(df, "address", "us")` (or `df.gridpin.geocode(...)`) and `gridpin.reverse_df(df, "us")`; the
+`gp_*` columns are the same as in `gridpin batch` CSV and `gp_geocode_df` in R. `gridpin.sheets.list / path / verify /
+fetch` use the same cache and checks as `gridpin sheets`. Extras `[pandas]`, `[geopy]`; without them the wheel still has
+no dependencies.
+
 The United States is one nationwide sheet: point addresses in 35 states, Census address ranges
 elsewhere; Canada is one nationwide sheet (all provinces and territories). Germany covers **15 of 16 Länder; Bavaria is not covered**. Spain covers all
-52 postal provinces; Brazil is one nationwide sheet. Client update required:
-use 0.6.0, because older engines have no Canadian rules.
+52 postal provinces; Brazil is one nationwide sheet; Mexico is one nationwide sheet. Client update required:
+use 0.7.0, because older engines have no Mexican rules.
 
 ```python
 import gridpin
