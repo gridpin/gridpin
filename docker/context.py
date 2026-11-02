@@ -20,6 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "mcp" / "src"))
 from gridpin_mcp import sheets  # noqa: E402
 
 
+# Name in the build context -> names looked up in --legal-dir, in order. The attribution file is
+# ATTRIBUTIONS.en.md in the source tree and ATTRIBUTIONS.md in the public repository, which renames it.
+LEGAL = {
+    "LICENSE": ("LICENSE",),
+    "THIRDPARTY.yml": ("THIRDPARTY.yml",),
+    "ATTRIBUTIONS.md": ("ATTRIBUTIONS.en.md", "ATTRIBUTIONS.md"),
+}
+
+
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -37,16 +46,16 @@ def fetch(url: str, dest: Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--binary", type=Path, required=True)
-    ap.add_argument("--legal-dir", type=Path, required=True, help="holds LICENSE, THIRDPARTY.yml, ATTRIBUTIONS.en.md")
+    ap.add_argument("--legal-dir", type=Path, required=True, help="holds LICENSE, THIRDPARTY.yml, ATTRIBUTIONS.md (or ATTRIBUTIONS.en.md)")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--country", choices=sorted(sheets.SHEETS))
     args = ap.parse_args(argv)
     args.out.mkdir(parents=True, exist_ok=True)
     shutil.copy2(args.binary, args.out / "gridpin")
-    for name in ("LICENSE", "THIRDPARTY.yml", "ATTRIBUTIONS.en.md"):
-        source = args.legal_dir / name
-        if not source.is_file():
-            print(f"missing {source}", file=sys.stderr)
+    for name, candidates in LEGAL.items():
+        source = next((args.legal_dir / c for c in candidates if (args.legal_dir / c).is_file()), None)
+        if source is None:
+            print(f"missing {args.legal_dir / candidates[-1]}", file=sys.stderr)
             return 1
         shutil.copy2(source, args.out / name)
     if args.country is None:

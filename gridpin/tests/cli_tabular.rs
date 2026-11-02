@@ -343,7 +343,11 @@ fn the_input_is_never_overwritten() {
     let link = dir.join("link.csv");
     std::fs::hard_link(&input, &link).unwrap();
     let out = batch(&bin, &input, &link, &[]);
-    assert!(!out.status.success());
+    // The refusal compares file identity (dev + inode), which only unix exposes; elsewhere the
+    // answers go to a fresh file that replaces the link, and the input keeps its bytes either way.
+    if cfg!(unix) {
+        assert!(!out.status.success());
+    }
     assert_eq!(
         std::fs::read_to_string(&input).unwrap(),
         "address\nrue a 1 ville\n"

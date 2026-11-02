@@ -600,7 +600,7 @@ jobs:
             --pattern 'gridpin-x86_64-unknown-linux-gnu.tar.gz' --pattern 'SHA256SUMS'
           (cd rel && grep ' gridpin-x86_64-unknown-linux-gnu.tar.gz$' SHA256SUMS | sha256sum -c -)
           tar xzf rel/gridpin-x86_64-unknown-linux-gnu.tar.gz -C rel
-          cp ATTRIBUTIONS.en.md rel/
+          cp ATTRIBUTIONS.md rel/  # the public name: the export renames ATTRIBUTIONS.en.md
       - name: Build context
         run: |
           if [ "${{ matrix.country }}" = engine ]; then
@@ -670,7 +670,7 @@ jobs:
       - name: Build the module (node-gyp, bundled with npm) and test it on a sheet built here
         working-directory: integrations/node
         run: |
-          node "$(npm root -g)/npm/node_modules/node-gyp/bin/node-gyp.js" rebuild
+          node scripts/node-gyp.mjs rebuild  # npm's bundled node-gyp, found on every runner layout
           node --test test/fixture.test.js test/packages.test.js
           mkdir -p "$GITHUB_WORKSPACE/native/${{ matrix.key }}"
           cp build/Release/gridpin.node "$GITHUB_WORKSPACE/native/${{ matrix.key }}/"

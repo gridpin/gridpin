@@ -3,7 +3,7 @@
 # The build context is prepared by the release workflow (or CI), not by this file: it holds the
 # `gridpin` binary taken from the signed release archive and checked against SHA256SUMS, the
 # archive's LICENSE and THIRDPARTY.yml (license texts of the compiled-in libraries),
-# ATTRIBUTIONS.en.md, and for the `country` target the sheet checked against its release SHA-256.
+# ATTRIBUTIONS.md, and for the `country` target the sheet checked against its release SHA-256.
 # Nothing is downloaded while the image is built, and nothing leaves the container at run time.
 #
 #   docker run --rm -p 8080:8080 ghcr.io/gridpin/gridpin:us
@@ -21,7 +21,7 @@ LABEL org.opencontainers.image.source="https://github.com/gridpin/gridpin" \
       org.opencontainers.image.title="GridPin" \
       org.opencontainers.image.description="Offline geocoder: gridpin serve, own API and Nominatim-compatible paths"
 COPY --chmod=0555 gridpin /usr/local/bin/gridpin
-COPY LICENSE THIRDPARTY.yml ATTRIBUTIONS.en.md /usr/share/doc/gridpin/
+COPY LICENSE THIRDPARTY.yml ATTRIBUTIONS.md /usr/share/doc/gridpin/
 # Create /data (0755, root) before any COPY into it: `COPY --chmod=0444 … /data/sheet.bin` would
 # otherwise create the directory with the file's mode, r--r--r--, and user 65532 could not enter it.
 WORKDIR /data
