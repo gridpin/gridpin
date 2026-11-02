@@ -187,7 +187,7 @@ jobs:
           cargo build --release --manifest-path gridpin-ffi/Cargo.toml --lib
       - name: Build the module with node-gyp (bundled with npm)
         working-directory: integrations/node
-        run: node scripts/node-gyp.mjs rebuild  # npm's bundled node-gyp, found on every runner layout
+        run: npm exec --yes --package=node-gyp@12.4.0 -- node-gyp rebuild  # pinned: npm's bundled node-gyp varies with the runner image (11.5 does not know Visual Studio 2026)
       - name: Tests that need no smoke sheet
         working-directory: integrations/node
         run: node --test test/fixture.test.js test/packages.test.js

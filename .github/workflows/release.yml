@@ -670,7 +670,7 @@ jobs:
       - name: Build the module (node-gyp, bundled with npm) and test it on a sheet built here
         working-directory: integrations/node
         run: |
-          node scripts/node-gyp.mjs rebuild  # npm's bundled node-gyp, found on every runner layout
+          npm exec --yes --package=node-gyp@12.4.0 -- node-gyp rebuild  # pinned: npm's bundled node-gyp varies with the runner image (11.5 does not know Visual Studio 2026)
           node --test test/fixture.test.js test/packages.test.js
           mkdir -p "$GITHUB_WORKSPACE/native/${{ matrix.key }}"
           cp build/Release/gridpin.node "$GITHUB_WORKSPACE/native/${{ matrix.key }}/"
