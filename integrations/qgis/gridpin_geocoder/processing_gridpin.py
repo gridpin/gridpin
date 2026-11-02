@@ -52,7 +52,7 @@ if _STRING_FIELD is None:  # QGIS 4: scoped enum
 
 
 def _point_type():
-    return QgsWkbTypes.Point if hasattr(QgsWkbTypes, "Point") else QgsWkbTypes.Type.Point
+    return QgsWkbTypes.Type.Point
 
 
 class GeocodeField(QgsProcessingAlgorithm):
@@ -76,7 +76,7 @@ class GeocodeField(QgsProcessingAlgorithm):
 
     def initAlgorithm(self, config=None):
         self.addParameter(QgsProcessingParameterFeatureSource(
-            self.INPUT, "Input layer or table", [QgsProcessing.TypeVector]))
+            self.INPUT, "Input layer or table", [QgsProcessing.SourceType.TypeVector]))
         self.addParameter(QgsProcessingParameterField(
             self.FIELD, "Address field", parentLayerParameterName=self.INPUT, type=_STRING_FIELD))
         self.addParameter(QgsProcessingParameterEnum(
@@ -84,7 +84,7 @@ class GeocodeField(QgsProcessingAlgorithm):
         self.addParameter(QgsProcessingParameterFile(
             self.SHEET, "Sheet file (overrides country)", optional=True, fileFilter="Sheets (*.bin)"))
         self.addParameter(QgsProcessingParameterFeatureSink(
-            self.OUTPUT, "Geocoded", QgsProcessing.TypeVectorPoint))
+            self.OUTPUT, "Geocoded", QgsProcessing.SourceType.TypeVectorPoint))
 
     def processAlgorithm(self, parameters, context, feedback):
         if not engine.available():
@@ -123,7 +123,7 @@ class GeocodeField(QgsProcessingAlgorithm):
             else:
                 extra = [None] * len(RESULT_FIELDS)
             out.setAttributes(feature.attributes() + extra)
-            sink.addFeature(out, QgsFeatureSink.FastInsert)
+            sink.addFeature(out, QgsFeatureSink.Flag.FastInsert)
             feedback.setProgress(100 * (i + 1) / total)
         feedback.pushInfo(f"Geocoded {found} of {source.featureCount()} rows.")
         return {self.OUTPUT: dest, "FOUND": found}

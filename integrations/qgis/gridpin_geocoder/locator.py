@@ -50,7 +50,7 @@ class GridPinLocator(QgsLocatorFilter):
         return "gp"
 
     def flags(self):
-        return QgsLocatorFilter.FlagFast if hasattr(QgsLocatorFilter, "FlagFast") else QgsLocatorFilter.Flag.FlagFast
+        return QgsLocatorFilter.Flag.FlagFast
 
     def fetchResults(self, text, context, feedback):
         if len(text.strip()) < 3 or not engine.available():
