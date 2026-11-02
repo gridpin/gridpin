@@ -38,6 +38,22 @@ Everything after the download runs offline.
 
 If GridPin is useful to you, [a star on GitHub](https://github.com/gridpin/gridpin) helps other people find it.
 
+**Ways to use it** — one engine and the same country files behind each:
+[CLI](https://gridpin.dev/docs#get-started) ·
+[spreadsheets (CSV)](https://gridpin.dev/geocode-csv) ·
+[local Nominatim-compatible server](https://gridpin.dev/geocoding-server) ·
+[Docker](https://gridpin.dev/docker-geocoding) ·
+[Python](https://gridpin.dev/offline-geocoding-python) ·
+[GeoPandas](https://gridpin.dev/geopandas-geocoding) ·
+[R](https://gridpin.dev/r-geocoding) ·
+[Node.js](https://gridpin.dev/docs#node) ·
+[DuckDB](https://gridpin.dev/duckdb-geocoding) ·
+[QGIS](https://gridpin.dev/docs#qgis) ·
+[AI agents (MCP)](https://gridpin.dev/mcp-geocoding) ·
+[LangChain](https://gridpin.dev/docs#langchain) ·
+[Rust](https://gridpin.dev/docs#rust).
+The whole list with what each one needs: [documentation](https://gridpin.dev/docs#ways).
+
 [GridPin](https://gridpin.dev) is an offline geocoder: a country in a data file, memory-mapped and ready in milliseconds, with no server, no database import, and no network. It resolves addresses to coordinates (forward) and coordinates to the nearest indexed address (reverse — approximate: streets are indexed by centroid, so each result carries its `distance_m`). On a single arm64 laptop core, measured on the France sheet: exact address lookups run at ~3,000/s, reverse geocoding at ~1,800/s, and typo-tolerant fuzzy matching much slower — tens of milliseconds per query, so batch it across cores when you feed it messy input. The engine and every query run fully offline — not a byte of what you geocode leaves your machine; the only network step is you downloading a sheet yourself, and a downloaded sheet carries no query data. Because you compute results locally from openly licensed data, you may store them forever, which hosted geocoding APIs typically forbid. If you have considered self-hosting Nominatim (a beefy server, days of import) or an on-prem geocoder license, the alternative here is: download one file, open it on any laptop.
 
 ## Install
