@@ -257,9 +257,9 @@ dependencies = [
 
 [[package]]
 name = "gridpin"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cda3f48e5f018f79b1955d6f62c369c624f5c70c767e4cd7705fe5982f2b1db1"
+checksum = "7ee445fd9391baffd9fa321581c2dac689ed6da36edd1638ed3b50481fc60292"
 dependencies = [
  "anyhow",
  "blake2",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "gridpin-ffi"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "gridpin",
  "serde",

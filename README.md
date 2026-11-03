@@ -65,11 +65,11 @@ macOS Apple Silicon (`aarch64-apple-darwin`) and Windows x86_64
 (Intel macOS, Linux arm64/musl, Windows arm) build from source:
 
 ```console
-$ base=https://github.com/gridpin/gridpin/releases/download/v0.7.0
+$ base=https://github.com/gridpin/gridpin/releases/download/v0.7.1
 $ curl -fsSLO "$base/gridpin-aarch64-apple-darwin.tar.gz"
 $ curl -fsSLO "$base/gridpin-release-signers"
-$ curl -fsSLO https://dl.gridpin.dev/v0.7.0/attestation.json
-$ curl -fsSLO https://dl.gridpin.dev/v0.7.0/attestation.json.sig
+$ curl -fsSLO https://dl.gridpin.dev/v0.7.1/attestation.json
+$ curl -fsSLO https://dl.gridpin.dev/v0.7.1/attestation.json.sig
 # the trust root comes from the OTHER channel — see "Verifying a release" for why
 $ ssh-keygen -Y verify -f gridpin-release-signers -I gridpin-release \
     -n gridpin-g02 -s attestation.json.sig < attestation.json \
@@ -215,17 +215,17 @@ Sizes are for v7 builds (August 2026; Germany repacked 2026-09-10; Spain added 2
 
 **Download sheets.** Free builds of all available countries are served as individual files —
 there is no directory listing, so link straight to the object you want:
-[`usa.bin`](https://dl.gridpin.dev/v0.7.0/usa.bin) (1.45 GB),
-[`canada.bin`](https://dl.gridpin.dev/v0.7.0/canada.bin) (183 MB),
-[`germany.bin`](https://dl.gridpin.dev/v0.7.0/germany.bin) (213 MB),
-[`france.bin`](https://dl.gridpin.dev/v0.7.0/france.bin) (365 MB),
-[`italy.bin`](https://dl.gridpin.dev/v0.7.0/italy.bin) (247 MB),
-[`spain.bin`](https://dl.gridpin.dev/v0.7.0/spain.bin) (185 MB),
-[`mexico.bin`](https://dl.gridpin.dev/v0.7.0/mexico.bin) (156 MB),
-[`netherlands.bin`](https://dl.gridpin.dev/v0.7.0/netherlands.bin) (103 MB),
-[`brazil.bin`](https://dl.gridpin.dev/v0.7.0/brazil.bin) (677 MB),
-[`serbia.bin`](https://dl.gridpin.dev/v0.7.0/serbia.bin) (32 MB), plus the optional France POI layer
-[`fr_poi.bin`](https://dl.gridpin.dev/v0.7.0/fr_poi.bin) (231 MB). The matching `SHA256SUMS` manifest (covering the
+[`usa.bin`](https://dl.gridpin.dev/v0.7.1/usa.bin) (1.45 GB),
+[`canada.bin`](https://dl.gridpin.dev/v0.7.1/canada.bin) (183 MB),
+[`germany.bin`](https://dl.gridpin.dev/v0.7.1/germany.bin) (213 MB),
+[`france.bin`](https://dl.gridpin.dev/v0.7.1/france.bin) (365 MB),
+[`italy.bin`](https://dl.gridpin.dev/v0.7.1/italy.bin) (247 MB),
+[`spain.bin`](https://dl.gridpin.dev/v0.7.1/spain.bin) (185 MB),
+[`mexico.bin`](https://dl.gridpin.dev/v0.7.1/mexico.bin) (156 MB),
+[`netherlands.bin`](https://dl.gridpin.dev/v0.7.1/netherlands.bin) (103 MB),
+[`brazil.bin`](https://dl.gridpin.dev/v0.7.1/brazil.bin) (677 MB),
+[`serbia.bin`](https://dl.gridpin.dev/v0.7.1/serbia.bin) (32 MB), plus the optional France POI layer
+[`fr_poi.bin`](https://dl.gridpin.dev/v0.7.1/fr_poi.bin) (231 MB). The matching `SHA256SUMS` manifest (covering the
 engine binary and every sheet) is on the [GitHub release](https://github.com/gridpin/gridpin/releases).
 Subscribers fetch fresh monthly builds from a keyed URL instead — see
 [gridpin.dev/docs](https://gridpin.dev/docs).
@@ -297,9 +297,9 @@ untrusted download. Steps 3–5 below use only `ssh-keygen` and `shasum`, which 
 and only step 6 runs our code.
 
 ```bash
-mkdir gridpin-v0.7.0 && cd gridpin-v0.7.0
+mkdir gridpin-v0.7.1 && cd gridpin-v0.7.1
 mkdir trust data          # two directories on purpose: the checker never sits in what it checks
-gh_base=https://github.com/gridpin/gridpin/releases/download/v0.7.0
+gh_base=https://github.com/gridpin/gridpin/releases/download/v0.7.1
 
 # 1. TRUST ROOT — from GitHub, never from the download host
 curl -fsSL -o trust/gridpin-release-signers "$gh_base/gridpin-release-signers"
@@ -308,7 +308,7 @@ curl -fsSL -o trust/verify_release.py       "$gh_base/verify_release.py"
 # 2. Data and proofs — from the download host
 for f in france.bin germany.bin italy.bin netherlands.bin serbia.bin fr_poi.bin spain.bin brazil.bin usa.bin canada.bin mexico.bin \
          SHA256SUMS attestation.json attestation.json.sig; do
-  curl -fsSL -o "data/$f" "https://dl.gridpin.dev/v0.7.0/$f"
+  curl -fsSL -o "data/$f" "https://dl.gridpin.dev/v0.7.1/$f"
 done
 
 # 3. The key is the one published below — compare by eye, before anything else
@@ -365,6 +365,8 @@ This also matters for GDPR: the addresses you geocode are often customer data, a
 
 ## Status & roadmap
 
+**v0.7.1: the engine knows the sheets of its own release.** In 0.7.0, `gridpin sheets`, `gridpin.sheets.fetch`, the npm `sheets.fetch` and the Docker images listed the previous release and had no Mexico; in 0.7.1 they list all ten countries, and the Mexico image `ghcr.io/gridpin/gridpin:mx` is published. The sheets are byte-for-byte the same as in 0.7.0; the new `sheets-receipt.json` (with its `.sig`) is the signed list of sheets, signed before the engine is built, and the engine pins it by SHA-256.
+
 **v0.7.0: Mexico added, plus spreadsheets, a local server and Docker. Client update required.** One nationwide sheet (`mexico.bin`, 156 MB): 14.14M point addresses from the INEGI address layer (surveyed 2009–2010) with Correos de México postal codes. Engine rules for Mexican addresses (see docs). Also new: CSV/TSV in `gridpin batch`; `gridpin serve` with its own API and Nominatim-compatible /search and /reverse; Docker images per country; the `weak` field; `gridpin sheets`; `gridpin parse` and `gridpin same`; the npm package; `gridpin[pandas]` and `gridpin[geopy]`.
 
 **v0.6.0: Canada added. Client update required.** One nationwide sheet (`canada.bin`, 183 MB): 16.94M point addresses in all provinces and territories from the Statistics Canada National Address Register, Adresses Québec and the Government of Yukon (via Overture Maps, release 2026-10-21.0); answers carry the Canadian postal code. Older engines have no Canadian rules (place written before the address, Edmonton and Calgary quadrants, French street types in front, "A9A 9A9" postal codes). Use the 0.6.0 client with this release. All nine country sheets and the France POI layer use the new immutable `v0.6.0/` path and a new attestation; `v0.1.0/` to `v0.5.0/` are unchanged.
@@ -373,7 +375,7 @@ This also matters for GDPR: the addresses you geocode are often customer data, a
 
 **v0.4.0: Brazil added. Client update required.** Brazil is one nationwide sheet covering 26 states and the Federal District; the source counts describe source presence, not address completeness. Spain covers all 52 postal provinces (incl. Ceuta and Melilla). Germany covers 15 of 16 Länder; Bavaria is not covered. Use the 0.4.0 client with this release: older engines do not contain the Brazilian rules. All seven country sheets and the France POI layer use the new immutable `v0.4.0/` path and a new attestation; `v0.1.0/`, `v0.2.0/` and `v0.3.0/` are unchanged.
 
-For an existing Python installation, use `pip install --upgrade gridpin==0.7.0`, not a plain install that may keep an older version.
+For an existing Python installation, use `pip install --upgrade gridpin==0.7.1`, not a plain install that may keep an older version.
 
 Interfaces and file formats may still change before v1.0. Sheets are tied to the engine's format major version — keep the engine build that shipped alongside your sheets; before v1.0 a newer engine may require newer sheets.
 
