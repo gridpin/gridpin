@@ -22,6 +22,11 @@ const REGISTRY: &str = include_str!("../sheets.json");
 pub struct Registry {
     pub release: String,
     pub base_url: String,
+    /// SHA-256 of the signed sheets receipt the registry is written from (0.7.1 and later).
+    #[serde(default)]
+    pub receipt_sha256: String,
+    /// SHA-256 of the release attestation; only registries before 0.7.1 carry it.
+    #[serde(default)]
     pub attestation_sha256: String,
     pub sheets: Vec<Sheet>,
 }
@@ -236,7 +241,12 @@ mod tests {
     fn the_registry_parses_and_every_sheet_is_pinned() {
         let r = registry();
         assert!(r.release.starts_with('v'));
-        assert_eq!(r.attestation_sha256.len(), 64);
+        let pins = [&r.receipt_sha256, &r.attestation_sha256];
+        assert_eq!(
+            pins.iter().filter(|p| p.len() == 64).count(),
+            1,
+            "one signed document pins the sheets"
+        );
         assert!(!r.sheets.is_empty());
         for s in &r.sheets {
             assert_eq!(s.sha256.len(), 64, "{}", s.code);

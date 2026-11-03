@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "gridpin"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "blake2",
@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "gridpin-ffi"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "gridpin",
  "serde",

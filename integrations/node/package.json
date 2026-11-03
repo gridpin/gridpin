@@ -1,6 +1,6 @@
 {
   "name": "gridpin",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Offline geocoder: addresses to coordinates and back from one local file per country, no API key, no query leaves the machine",
   "license": "Apache-2.0",
   "homepage": "https://gridpin.dev",

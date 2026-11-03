@@ -1,7 +1,7 @@
 # Generated from mcp/src/gridpin_mcp/sheets.py (the release pins of gridpin-mcp); do not edit by hand.
 # The pins come from the signed attestation of the release; the R package and gridpin-mcp share them.
 
-.gp_release <- "v0.7.0"
+.gp_release <- "v0.7.1"
 .gp_base_url <- "https://dl.gridpin.dev"
 .gp_sheets <- data.frame(
   code = c("us", "ca", "br", "de", "es", "mx", "fr", "it", "nl", "rs"),
