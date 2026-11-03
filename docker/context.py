@@ -1,10 +1,15 @@
 """Prepare the build context of docker/Dockerfile: binary, legal files and, for a country, the sheet.
 
     python3 docker/context.py --binary target/release/gridpin --legal-dir . --out ctx [--country rs]
+    python3 docker/context.py --binary target/release/gridpin --legal-dir . --out ctx --sheet data/mc.bin --sheet-country mc
 
 The sheet is downloaded from dl.gridpin.dev and checked against the SHA-256 and size pinned in
 `gridpin_mcp.sheets` (the same registry the MCP server and the R package use); a mismatch stops here,
 before any image exists. Prints the build arguments for `docker build` as KEY=VALUE lines.
+
+`--sheet` takes a sheet built locally instead (CI checks the image on the Monaco smoke sheet): from
+0.7.1 the registry names the release being prepared, whose sheets are uploaded only after the tag, so a
+commit-time check cannot download them.
 """
 
 from __future__ import annotations
@@ -48,8 +53,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--binary", type=Path, required=True)
     ap.add_argument("--legal-dir", type=Path, required=True, help="holds LICENSE, THIRDPARTY.yml, ATTRIBUTIONS.md (or ATTRIBUTIONS.en.md)")
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--country", choices=sorted(sheets.SHEETS))
+    source = ap.add_mutually_exclusive_group()
+    source.add_argument("--country", choices=sorted(sheets.SHEETS))
+    source.add_argument("--sheet", type=Path, help="a locally built sheet instead of a registry download")
+    ap.add_argument("--sheet-country", help="country code of --sheet (image label)")
     args = ap.parse_args(argv)
+    if (args.sheet is None) != (args.sheet_country is None):
+        ap.error("--sheet and --sheet-country go together")
     args.out.mkdir(parents=True, exist_ok=True)
     shutil.copy2(args.binary, args.out / "gridpin")
     for name, candidates in LEGAL.items():
@@ -58,6 +68,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"missing {args.legal_dir / candidates[-1]}", file=sys.stderr)
             return 1
         shutil.copy2(source, args.out / name)
+    if args.sheet is not None:
+        dest = args.out / args.sheet.name
+        shutil.copy2(args.sheet, dest)
+        print(f"SHEET={dest.name}")
+        print(f"COUNTRY={args.sheet_country}")
+        print(f"SHEET_SHA256={sha256(dest)}")
+        print("SHEET_RELEASE=local")
+        return 0
     if args.country is None:
         return 0
     sheet = sheets.SHEETS[args.country]
