@@ -184,7 +184,7 @@ def attestation_problems(directory: pathlib.Path, listed: dict[str, str],
     return problems
 
 
-CURRENT_RELEASE = "v0.7.1"
+CURRENT_RELEASE = "v0.8.0"
 # Changed only by the publication step, together with the site country row.
 PUBLISHED_RELEASE = "v0.7.1"
 # One catalogue for the standalone verifier and the private release tools.
@@ -217,6 +217,9 @@ RELEASE_COMPOSITIONS["v0.7.0"] = RELEASE_COMPOSITIONS["v0.6.0"] + (
 )
 # 0.7.1: the same sheets as 0.7.0; the engine registry is written from the sheets receipt (owner 2026-11-03).
 RELEASE_COMPOSITIONS["v0.7.1"] = RELEASE_COMPOSITIONS["v0.7.0"]
+RELEASE_COMPOSITIONS["v0.8.0"] = RELEASE_COMPOSITIONS["v0.7.1"] + (
+    ("australia.bin", "au.bin", "au", "addresses", "au"),
+)
 LEGACY_RELEASE_BINDINGS = {
     "inputs-2026-08-15.manifest.json": "v0.1.0",
     "inputs-2026-08-18.manifest.json": "v0.1.0",

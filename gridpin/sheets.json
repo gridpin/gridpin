@@ -1,8 +1,8 @@
 {
  "_about": "Sheets of the release this engine ships with: size and SHA-256 from the signed sheets receipt (sheets-receipt.json, signed before the engine is built). The copies in gridpin-mcp, the QGIS plugin and the R package are checked equal to this file (tools/test_sheet_registry.py).",
- "release": "v0.7.1",
+ "release": "v0.8.0",
  "base_url": "https://dl.gridpin.dev",
- "receipt_sha256": "de671e39248e41f51635dfdf92d276ea421605aa5a5a1598450aa9a57494c97e",
+ "receipt_sha256": "768ce09edd3705e3b338a4b8f5dadb8de0564839257047f7db95db2c725efb2f",
  "sheets": [
   {
    "code": "us",
@@ -73,6 +73,13 @@
    "name": "Serbia",
    "sha256": "9e358bd6a940b290e01cd52081e476e2799513f16dd934dc6a5bc89ba4fb5388",
    "size": 31998043
+  },
+  {
+   "code": "au",
+   "file": "australia.bin",
+   "name": "Australia",
+   "sha256": "6f19f33536894ff5b0d3444cee6d47ccc57a77a5170a3bcb01244114e68b3867",
+   "size": 130385568
   }
  ]
 }

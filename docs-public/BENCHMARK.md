@@ -14,7 +14,7 @@ answer counts as a miss. Each engine gets the identical query, one answer per qu
 - **Same input for everyone.** GridPin, Photon and Nominatim get the identical query. Nominatim is the public
   service, queried at most once per second. Photon is either the public service or a local instance of the
   country's OpenStreetMap extract — each country below says which.
-- **No small samples as results.** Every set shown has at least 900 rows; empty answers stay in the
+- **No small samples as results.** Every set shown has at least 1,000 rows; empty answers stay in the
   denominator.
 - **Mechanical distortions, not guesses.** Distortion rules are fixed before any engine answers and applied by
   a published hash, so no rule is tuned to a result.
@@ -218,10 +218,10 @@ addresses in 35 states and Census address ranges elsewhere; range answers are in
 
 | Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| clean | gridpin | 3655 | 3469 | 186 | 847 | 1430 | 2096 | 2291 |
+| clean | gridpin | 3655 | 3471 | 184 | 847 | 1430 | 2097 | 2292 |
 | clean | nominatim | 3655 | 3222 | 433 | 991 | 1553 | 2192 | 2338 |
 | clean | photon | 3655 | 3490 | 165 | 1010 | 1510 | 2224 | 2482 |
-| distorted | gridpin | 3655 | 3061 | 594 | 721 | 1204 | 1699 | 1867 |
+| distorted | gridpin | 3655 | 3063 | 592 | 721 | 1204 | 1700 | 1868 |
 | distorted | nominatim | 3655 | 1796 | 1859 | 571 | 889 | 1330 | 1427 |
 | distorted | photon | 3655 | 2864 | 791 | 698 | 1040 | 1601 | 1804 |
 | nrhp | gridpin | 1000 | 895 | 105 | 468 | 641 | 763 | 825 |
@@ -232,8 +232,8 @@ Exact paired two-sided McNemar tests at ≤150 m:
 
 | Set | Comparator | GridPin only | Comparator only | Both | Neither | p | Reading |
 |---|---|---:|---:|---:|---:|---:|---|
-| clean | Nominatim | 347 | 481 | 1,072 | 1,755 | 3.62795e-06 | Nominatim ahead |
-| clean | Photon | 473 | 564 | 946 | 1,672 | 0.00516835 | Photon ahead |
+| clean | Nominatim | 348 | 471 | 1,082 | 1,754 | 1.95005e-05 | Nominatim ahead |
+| clean | Photon | 474 | 554 | 956 | 1,671 | 0.013703 | Photon ahead |
 | distorted | Nominatim | 657 | 342 | 547 | 2,109 | 1.26392e-23 | GridPin ahead |
 | distorted | Photon | 616 | 452 | 588 | 1,999 | 5.82017e-07 | GridPin ahead |
 | nrhp | Nominatim | 176 | 58 | 465 | 301 | 5.22407e-15 | GridPin ahead |
@@ -247,22 +247,22 @@ truth, computed with `wikidata4_regress.py`.
 
 | Artifact | SHA-256 |
 |---|---|
-| Measured GridPin binary | `648482624e93a2f1f5b44f1bf2f7f1a5c00e3dcfdfeba956905b886fcb12e0ce` |
+| Measured GridPin binary | `f2dea2f0b9dc124b9342cb7c404b932c607af92bd77059ce9addb582d9bc5926` |
 | Measured sheet `us.bin` | `8fbdf76105057eab264dd40d37e080eeb506c09f23562718b9173035cae1a258` |
 | Release sheet `usa.bin` (v0.5.0; metadata-only repack of the measured sheet, 2026-10-23) | `4f3422f4d95939aefbcf454ceebc9a8dd16f78f2a13c5e6660028ddfad712cc0` |
 | clean queries | `f5e07a251a447508482fa1b9ead94c4c662d0f6c8f91a28e9eab5b1cf054549e` |
 | clean truth | `a7ba4d3492c63372af5af98f6c791e1fa0eb83e61845f528596a944d7bae3dd9` |
-| clean gridpin raw | `f92faf60837ac7c85edf3cdb8c75ca38b42c48d84f6455744566a802c0935f1a` |
+| clean gridpin raw | `171f3aa9cc0b6add10521b5d79296216a640c5e0875c9fe29b49342c3944d91f` |
 | clean nominatim raw | `b88906d62ac4ba2104ad335e540a1d1d328edcdb9e0eeb924d8bfd4164d9b719` |
 | clean photon raw | `e2d2c6cfdd065177895c7a9829c1e147f6b34115d06cfc869dcf26551dfda642` |
 | distorted queries | `4159ca5da2e1945327268e89d5a7a7470c07b1e31811478887ce57ab4e14fc01` |
 | distorted truth | `5a3e433784eb574b016e72704d4add23013f322cde24e78b5ea5b7e3acc26932` |
-| distorted gridpin raw | `449fedf20900ee3309c306a2fb756cec1d1fd68ed3741eef7bbdcb70e4f5f111` |
+| distorted gridpin raw | `a7371389048d8165129e67f311ae0e602e770dccf775f3361dafbda10ea82b26` |
 | distorted nominatim raw | `1aa04709b79dea7863559cdece240927926f8d8ea38fb9e6dc3078431bab557e` |
 | distorted photon raw | `e5d9d74c3c0f869cf22688c77945259c0725add1d3f4bb2ee6c318192b224c2f` |
 | nrhp queries | `661e364034b7efa66323d7f050840c14ec3013b628ae4b4d924a9e6fff901ce1` |
 | nrhp truth | `d8db31e9c8b7286005589436f41177fca5c3fcfc2da829582cd1cddd88b5ec50` |
-| nrhp gridpin raw | `c108b09f21bb083e2af8e120b08c0d081d78f4d2de8d21dcd9499b019cea04c3` |
+| nrhp gridpin raw | `cca0515929ea29c3ac7005e09e9210e6c8de07585e9c7cd49e5b6ef8b4a39b9c` |
 | nrhp nominatim raw | `45fe8cf55be0df4578061d3c793126fe4cff0d4a329365b7104923560dcdcead` |
 | nrhp photon raw | `e4b3c98476ac16c529117920d3d261f04e42e32ecbb4c82f6b79a1f59266659c` |
 
@@ -275,20 +275,20 @@ truth, computed with `wikidata4_regress.py`.
 from the ISED Technical and Administrative Frequency List, as recorded. These sets are not observed human search
 traffic.
 
-**What it shows.** Distorted addresses: GridPin 55.91% leads Photon 45.21% and Nominatim 32.68%, beyond chance.
+**What it shows.** Distorted addresses: GridPin 55.94% leads Photon 45.21% and Nominatim 32.68%, beyond chance.
 Radio-station sites: GridPin 39.30% and Photon 39.30% are level (not proof of parity), both ahead of Nominatim
 25.20%. Clean addresses: on clean Canadian addresses Photon leads (59.1% vs 57.5%; Nominatim 57.2%); the set cannot tell the three apart beyond chance. One
 nationwide sheet with point addresses in all provinces and territories; answers carry the Canadian postal code.
 
 | Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| clean | gridpin | 2785 | 2697 | 88 | 1060 | 1601 | 1948 | 2044 |
+| clean | gridpin | 2785 | 2698 | 87 | 1060 | 1602 | 1949 | 2045 |
 | clean | nominatim | 2785 | 2587 | 198 | 1011 | 1593 | 1912 | 2035 |
 | clean | photon | 2785 | 2751 | 34 | 1038 | 1646 | 1988 | 2110 |
-| distorted | gridpin | 2785 | 2657 | 128 | 1032 | 1557 | 1896 | 1995 |
+| distorted | gridpin | 2785 | 2658 | 127 | 1032 | 1558 | 1897 | 1996 |
 | distorted | nominatim | 2785 | 1493 | 1292 | 602 | 910 | 1109 | 1185 |
 | distorted | photon | 2785 | 2453 | 332 | 827 | 1259 | 1535 | 1652 |
-| tafl | gridpin | 1000 | 808 | 192 | 184 | 393 | 620 | 697 |
+| tafl | gridpin | 1000 | 810 | 190 | 184 | 393 | 623 | 699 |
 | tafl | nominatim | 1000 | 605 | 395 | 131 | 252 | 425 | 537 |
 | tafl | photon | 1000 | 806 | 194 | 204 | 393 | 607 | 696 |
 
@@ -296,10 +296,10 @@ Exact paired two-sided McNemar tests at ≤150 m:
 
 | Set | Comparator | GridPin only | Comparator only | Both | Neither | p | Reading |
 |---|---|---:|---:|---:|---:|---:|---|
-| clean | Nominatim | 392 | 384 | 1,209 | 800 | 0.801613 | level |
-| clean | Photon | 349 | 394 | 1,252 | 790 | 0.10642 | level |
-| distorted | Nominatim | 866 | 219 | 691 | 1,009 | 1.91702e-91 | GridPin ahead |
-| distorted | Photon | 625 | 327 | 932 | 901 | 2.8455e-22 | GridPin ahead |
+| clean | Nominatim | 393 | 384 | 1,209 | 799 | 0.774135 | level |
+| clean | Photon | 349 | 393 | 1,253 | 790 | 0.114372 | level |
+| distorted | Nominatim | 867 | 219 | 691 | 1,008 | 1.20016e-91 | GridPin ahead |
+| distorted | Photon | 625 | 326 | 933 | 901 | 1.94838e-22 | GridPin ahead |
 | tafl | Nominatim | 200 | 59 | 193 | 548 | 4.10126e-19 | GridPin ahead |
 | tafl | Photon | 120 | 120 | 273 | 487 | 1 | level |
 
@@ -311,48 +311,49 @@ truth, computed with `wikidata4_regress.py`.
 
 | Artifact | SHA-256 |
 |---|---|
-| Measured GridPin binary | `2a894e8efca7377e81eb828384a35636b6634e234ef39bf6922eab53cd3280ea` |
+| Measured GridPin binary | `f2dea2f0b9dc124b9342cb7c404b932c607af92bd77059ce9addb582d9bc5926` |
 | Measured sheet `ca.bin` | `fcd4d9a9d1c5a1540722a66e7cad470ec515525f333df5f9ddfddea337449b44` |
 | Release sheet `canada.bin` (v0.6.0; metadata-only repack of the measured sheet, 2026-10-30) | `234515843c54b6c4feb93ab83c7b023a3e14beec8357c6d570eeed0f66f35400` |
 | clean queries | `401609e84a568e00bd430f2491431d414635988c54b6191df5242d54b7a8be40` |
 | clean truth | `3ff8483c360b597a95b2da76cc29d22311f99bc6b6c2e550b8ee06f92c1e0153` |
-| clean gridpin raw | `af79fb1cdcd2b1b2ae3817a9c26d3bc5ac8b539e16db8ecd033386c5111429a2` |
+| clean gridpin raw | `c6a47b61d14db89d285dde66ac5c901edf8a1f3fcd54af127a950bf255594683` |
 | clean nominatim raw | `222b8a48d3e87f406e0e9b1764e6c79339c7da358d673fba6a111561f8c39477` |
 | clean photon raw | `8609334d60f7cc673d83dde7898f59bccdd46551dea57609439cf9306ffa5568` |
 | distorted queries | `e705a0f57d7423c49c7f66fd4fa06ea5083c744fedae226be46c7ece60557434` |
 | distorted truth | `c06654e2f12da2f88fd1ea6e0e3e3f9c5a485c9f5e6922ff8a0469c0d01e41bb` |
-| distorted gridpin raw | `fffec86d74e4257bfb2a1b743572db570d0e30bec933363547e131e3f9e1aa0d` |
+| distorted gridpin raw | `da526f9c0245a21691d79c3618148621ac60574c237f04783ff2cfcd036b9e0f` |
 | distorted nominatim raw | `ea8dc780de77735515532febb8cfd0cc4c110a085341d844e9958fd914766afb` |
 | distorted photon raw | `eb8517e1452087ea4b622d4b6a558fc4edfb0732731a912f27202ba88af54015` |
 | tafl queries | `f913520c7f93508606b9974a7a9fb6bd40209264ff4a570f111aa8a5c5127262` |
 | tafl truth | `b0e00a314851314ef31720e380025a1dff06e6df9bd4c6aaa1dcbb188d78b605` |
-| tafl gridpin raw | `8c463c509156d6eb388d602597acdc50d97c21a34bb05b446153f8acd1c2a12a` |
+| tafl gridpin raw | `74c865d84f0cf67127983b69d90b7de59b84ddfbcd55fb7ee7ad9e460805646c` |
 | tafl nominatim raw | `33100eeed662f19d33b24981f371993d823cd9bb60faa2befc4ebd374c7bed1c` |
 | tafl photon raw | `2ba010a9bfd13122223d09c2c79d5fd074955f47c9ed686e4ea4c76fdf1e35f3` |
 
 </details>
 
-## Mexico · 2026-11-01 · 3 sets
+## Mexico · 2026-11-04 · 3 sets
 
-**What we tested.** Three retained sets with known coordinates: clean Wikidata and mechanically distorted Wikidata
-(909 rows each; one row outside Mexico excluded equally for all three engines) and 1,000 cultural venues from the
-Sistema de Información Cultural (Secretaría de Cultura), addresses as the venues write them. These sets are not
-observed human search traffic.
+**What we tested.** Three retained sets with known coordinates: 2,000 clean addresses from two independent sources
+(909 places from Wikidata and 1,091 health facilities from the CLUES register of the Secretaría de Salud), the same
+2,000 mechanically distorted, and 1,000 cultural venues from the Sistema de Información Cultural (Secretaría de
+Cultura), addresses as the venues write them. Rows whose point lies outside Mexico were removed before selection.
+These sets are not observed human search traffic.
 
-**What it shows.** Distorted addresses: GridPin 18.37% leads Photon 11.44% and Nominatim 4.84%, beyond chance.
+**What it shows.** Distorted addresses: GridPin 24.05% leads Photon 13.80% and Nominatim 7.65%, beyond chance.
 Cultural venues: GridPin 28.00% leads Photon 17.30% and Nominatim 10.20%, beyond chance. Clean addresses: on clean
-Mexican addresses GridPin leads (23.3% vs Photon 14.6%, Nominatim 9.4%); the set has 909 rows, so the margin of error
-is about ±3 points. Most misses are addresses missing from the 2009–2010 source data. One nationwide sheet; answers
-carry the postal code where the source has one.
+Mexican addresses GridPin leads (29.2% vs Photon 15.9%, Nominatim 10.1%); the set has 2,000 rows, so the margin of error
+is about ±2 points. The address layer was surveyed in 2009–2010, so newer addresses are missing from it. One
+nationwide sheet; answers carry the postal code where the source has one.
 
 | Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| clean | gridpin | 909 | 463 | 446 | 141 | 212 | 288 | 323 |
-| clean | nominatim | 909 | 333 | 576 | 57 | 85 | 126 | 137 |
-| clean | photon | 909 | 461 | 448 | 94 | 133 | 231 | 259 |
-| distorted | gridpin | 909 | 423 | 486 | 115 | 167 | 219 | 248 |
-| distorted | nominatim | 909 | 226 | 683 | 29 | 44 | 69 | 77 |
-| distorted | photon | 909 | 472 | 437 | 71 | 104 | 196 | 219 |
+| clean | gridpin | 2000 | 1247 | 753 | 435 | 585 | 851 | 1012 |
+| clean | nominatim | 2000 | 668 | 1332 | 110 | 202 | 416 | 462 |
+| clean | photon | 2000 | 1046 | 954 | 186 | 318 | 697 | 818 |
+| distorted | gridpin | 2000 | 1079 | 921 | 356 | 481 | 677 | 813 |
+| distorted | nominatim | 2000 | 487 | 1513 | 84 | 153 | 302 | 340 |
+| distorted | photon | 2000 | 1026 | 974 | 154 | 276 | 631 | 757 |
 | sic | gridpin | 1000 | 616 | 384 | 200 | 280 | 422 | 533 |
 | sic | nominatim | 1000 | 202 | 798 | 62 | 102 | 164 | 188 |
 | sic | photon | 1000 | 406 | 594 | 102 | 173 | 324 | 370 |
@@ -361,39 +362,95 @@ Exact paired two-sided McNemar tests at ≤150 m:
 
 | Set | Comparator | GridPin only | Comparator only | Both | Neither | p | Reading |
 |---|---|---:|---:|---:|---:|---:|---|
-| clean | Nominatim | 169 | 42 | 43 | 655 | 2.99539e-19 | GridPin ahead |
-| clean | Photon | 147 | 68 | 65 | 629 | 7.50212e-08 | GridPin ahead |
-| distorted | Nominatim | 144 | 21 | 23 | 721 | 9.55039e-24 | GridPin ahead |
-| distorted | Photon | 127 | 64 | 40 | 678 | 6.03658e-06 | GridPin ahead |
+| clean | Nominatim | 471 | 88 | 114 | 1,327 | 2.99149e-64 | GridPin ahead |
+| clean | Photon | 431 | 164 | 154 | 1,251 | 1.26171e-28 | GridPin ahead |
+| distorted | Nominatim | 411 | 83 | 70 | 1,436 | 3.15518e-53 | GridPin ahead |
+| distorted | Photon | 384 | 179 | 97 | 1,340 | 3.466e-18 | GridPin ahead |
 | sic | Nominatim | 216 | 38 | 64 | 682 | 2.09717e-31 | GridPin ahead |
 | sic | Photon | 200 | 93 | 80 | 627 | 3.80807e-10 | GridPin ahead |
 
-Services: public Nominatim and public Photon, answers collected 2026-10-31 and retained; no new competitor
-requests were made for the GridPin build measured on 2026-11-01. Top-1 great-circle distance to independent
-truth, computed with `wikidata4_regress.py`.
+Services: public Nominatim and public Photon; answers for the clean and distorted sets collected 2026-11-04, for
+cultural venues 2026-10-31; all retained. Top-1 great-circle distance to independent truth, computed with
+`wikidata4_regress.py`.
 
 <details><summary>Data fingerprints (SHA-256)</summary>
 
 | Artifact | SHA-256 |
 |---|---|
 | Measured GridPin binary | `09238e49275faf57e57790a77c10f5426bbef709c7b3893278194edb21483a03` |
-| Measured sheet `mx.bin` | `c87ba719919e37ed80f8a9166d1b13f5e4be7e8a3ed272c923bc3bf653826110` |
-| Release sheet `mexico.bin` (v0.7.0; metadata-only repack of the measured sheet, 2026-11-01) | `6cc9e627bf84cf1126a5d31b71c14504cbbbf56eb5b1835731d85fc2a2ef454c` |
-| clean queries | `e55e08b7210ecf76d829ef217011b8a6c624d3abdaf475859e6cfb6f5dc66c92` |
-| clean truth | `d39edc2ba75f480e01e3d11dfb00dfc659ba7900f7b7899ba61ba8e386d03a85` |
-| clean gridpin raw | `7e24fddd0a53be3bd670e1b7e49d7b6cb0c03db8bfd9260c57267716945c15df` |
-| clean nominatim raw | `0ea9cc8391894016b6cacc190a1cd04ac76c65458872d406391f46b15377abaf` |
-| clean photon raw | `7ba5d1fd5353d9a3ad649f9238a6f42291e5e2182e467fb52b8c2cff663e5d46` |
-| distorted queries | `f1b28dadf3acbb85f4143a4df75d6526d2a49f11727f84fde9091cca7f2440f8` |
-| distorted truth | `a68b0409645aba05c6e99a119590b2cf4a9a5aec3df80fc4ebfcd0077caeb607` |
-| distorted gridpin raw | `b263dc8eaaecdbcc51d6b22ca5e35baea22d95369e5820de873e32268b184470` |
-| distorted nominatim raw | `e72c853979e2abf78fef13880e0fc82560915a3ce5e22c2f92175d4416225075` |
-| distorted photon raw | `ed67dc124b7d233caeb864a54663eb64ff17e35c1562f426c96dd3df6922d3cb` |
+| Release sheet `mexico.bin` (v0.7.0), clean and distorted sets | `6cc9e627bf84cf1126a5d31b71c14504cbbbf56eb5b1835731d85fc2a2ef454c` |
+| Sheet `mx.bin` before the metadata-only repack, cultural venues | `c87ba719919e37ed80f8a9166d1b13f5e4be7e8a3ed272c923bc3bf653826110` |
+| clean queries | `a0a3b182411f5b413d035e08b78472e2639b9e02f1cf3c7a43fb66a1fcaab443` |
+| clean truth | `350a0cd4eb5daf2968fbcf59c12ecb6785622815c4d92f2e6ca8298f682a7f1c` |
+| clean gridpin raw | `96efa22adca3dec94533ee7e26d96ee4d1c8e1a0ef37716ddb068098f182b444` |
+| clean nominatim raw | `a307fbfabac5be3c8e923159ec454cb23807ae9ae1199030cdcbe43eba47c571` |
+| clean photon raw | `6e1377083fa8ad97a1d6b5ffe8b28a2d1bb5d07ab6ee7116a077e9a8de433a27` |
+| distorted queries | `563e57aef3a6297116a6f4dfa779603045c6e388eac57bc3e59cfceec71c0aef` |
+| distorted truth | `0d770b0089961a5c4564f999b42a3b1405f90ee36905eebcea98a4b1953567d6` |
+| distorted gridpin raw | `2b2af02cd9dd75d16ab90c2ead5f3094cb39fb74c72591ee345000b0549bc0fc` |
+| distorted nominatim raw | `8b5f9825cd10ff3321ade1aeddad627390e6d32bf4723ce9419aa9081823308e` |
+| distorted photon raw | `cb747241c64e9d7c4c295d1d96f694c0c2e7204092941a718f35114c7125d59d` |
 | sic queries | `c6b28ada653559a10c756971d48460c1c72a48661aab83a85fc0fca3c2f3a8e7` |
 | sic truth | `e5a70f5fc35fd8e3bfdba0208527821e40cf0ea0309a7a22c6f5e39232ba03ec` |
 | sic gridpin raw | `91b222dd23fb366ae22ae5ae250009f50c32d03f35893a1c24214703e5093bb2` |
 | sic nominatim raw | `6f7e368f7ad30d950b88852fa0459391333a986b1ebfaa0a31e4c549efaf0407` |
 | sic photon raw | `dd05add51b6f8609201df174155812554e44fed6333e1194fa9707bbc1a34ffe` |
+
+</details>
+
+## Australia · 2026-11-05 · 3 sets
+
+**What we tested.** Three sets with known coordinates: 2,000 clean addresses (1,327 regular polling places of the 2025 federal election from the Australian Electoral Commission, 673 places from Wikidata), the same 2,000 with one mechanical distortion each, and 1,000 radio sites from the ACMA licence register, addresses as the licensees write them (New South Wales only). Wikidata rows whose coordinate cites a heritage register are excluded: those registers share their points with the address data. These sets are not observed human search traffic.
+
+**What it shows.** Distorted addresses: GridPin leads both (74.6% vs 50.6% and 42.2%), beyond chance. Radio sites: GridPin leads both (65.8% vs 25.2% and 13.0%), beyond chance. Clean addresses: GridPin leads both (75.0% vs 54.1% and 53.2%), on polling places 83.8% vs 59.0% and 59.6%, on Wikidata 57.5% vs 44.4% and 40.6%. Polling places are mostly schools and halls: the reference point is the building, the sheet's point is the address on the lot, so a correct answer can stand beyond 150 m. The AEC does not document how it places points; independence of the kept points was measured, not documented.
+
+| Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| clean | gridpin | 2000 | 1990 | 10 | 858 | 1499 | 1858 | 1925 |
+| clean | nominatim | 2000 | 1888 | 112 | 494 | 1064 | 1673 | 1824 |
+| clean | photon | 2000 | 1889 | 111 | 525 | 1082 | 1668 | 1828 |
+| distorted | gridpin | 2000 | 1987 | 13 | 854 | 1492 | 1850 | 1921 |
+| distorted | nominatim | 2000 | 1544 | 456 | 373 | 845 | 1358 | 1498 |
+| distorted | photon | 2000 | 1817 | 183 | 479 | 1012 | 1574 | 1740 |
+| acma | gridpin | 1000 | 932 | 68 | 430 | 658 | 857 | 911 |
+| acma | nominatim | 1000 | 230 | 770 | 74 | 130 | 205 | 226 |
+| acma | photon | 1000 | 404 | 596 | 168 | 252 | 354 | 376 |
+
+| Set | Comparator | GridPin only | Comparator only | Both | Neither | p | Reading |
+|---|---|---:|---:|---:|---:|---:|---|
+| clean | Nominatim | 562 | 127 | 937 | 374 | 3.91875e-66 | GridPin ahead |
+| clean | Photon | 553 | 136 | 946 | 365 | 1.73637e-60 | GridPin ahead |
+| distorted | Nominatim | 738 | 91 | 754 | 417 | 1.08071e-126 | GridPin ahead |
+| distorted | Photon | 615 | 135 | 877 | 373 | 5.71364e-74 | GridPin ahead |
+| acma | Nominatim | 540 | 12 | 118 | 330 | 2.05511e-142 | GridPin ahead |
+| acma | Photon | 441 | 35 | 217 | 307 | 1.55601e-90 | GridPin ahead |
+
+Services: public Nominatim and public Photon; answers collected 2026-11-04 and retained. Top-1 great-circle distance to
+independent truth, computed with `wikidata4_regress.py`. Radio sites: Based on Australian Communications and Media
+Authority information.
+
+<details><summary>Data fingerprints (SHA-256)</summary>
+
+| Artifact | SHA-256 |
+|---|---|
+| Measured GridPin binary | `f2dea2f0b9dc124b9342cb7c404b932c607af92bd77059ce9addb582d9bc5926` |
+| Release sheet `australia.bin` (v0.8.0) | `6f19f33536894ff5b0d3444cee6d47ccc57a77a5170a3bcb01244114e68b3867` |
+| Sheet `au.bin` before the metadata-only repack, measured | `04690a2eacdafe663b949dc96f892d1694bf6942331a7199bd7119b9c1679bc5` |
+| clean queries | `a53ec286352c31ef1c388cf6a2900df6d437dc66f6a51a3e9a0c2a5f1b852442` |
+| clean truth | `03f85ca677c3d25e17fcff678b6696f82275fa53911b4f16ee409183d1c43177` |
+| clean gridpin raw | `df952f11d23130723ebd9eb8879178646466e483a9070873fdc4860c8f33e8de` |
+| clean nominatim raw | `699eca36b02113a4d9b0ff605a151bc47d85f39acbbd24b168c2f1f96e6919a1` |
+| clean photon raw | `0bdd3eacf37d33754249286781ca77be642ff0cf0e1252e6620dc84954dd1b67` |
+| distorted queries | `537e49c3c3d703c3bf9dc3d90f52812d20ac14698b247897cdb97eb943e2d547` |
+| distorted truth | `afbdc21f7839dfb0d51f8e1286e4c27575e4a05f74263ebf2aaf81800bdc2b14` |
+| distorted gridpin raw | `77d538afd1f1f0fa0845b2a7899f7944f34f1486f36b4f6ab44fcdfd760111b7` |
+| distorted nominatim raw | `9c7029b36fc0824594a6da82291a6d064fc8138c0adb5dfb8e2da48a6a28abf4` |
+| distorted photon raw | `3cef0ab1bd427fdda2d221a903b1bbb77df71c67a6a7cc89987ddf68b9db059b` |
+| acma queries | `53a548e8b634b90d2b5106797abf38560eddcc29adf62f7e348a7f5727813217` |
+| acma truth | `4719fda3201e3aa19376c94c6be04bb120e66b8bbe5a684aa4a21f9444980f45` |
+| acma gridpin raw | `05713c08f281fd6fa1f4edbc98cb32331fca15b3f035f5b42995e93d03488d41` |
+| acma nominatim raw | `a59b4aa49ae4be830ae84033de7720766e9219e1ddbfb2b269e02eb2b8cf5112` |
+| acma photon raw | `5509c3bd20eece12d3331111332ee72c2151ffc447abc5138107b84b736009b8` |
 
 </details>
 

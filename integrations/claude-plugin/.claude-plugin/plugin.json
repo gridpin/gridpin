@@ -1,0 +1,11 @@
+{
+  "name": "gridpin",
+  "displayName": "GridPin Offline Geocoder",
+  "version": "0.1.0",
+  "description": "Geocode addresses to coordinates and back on your own machine, from one downloadable file per country. No API key, no rate limit, and your addresses never leave the computer.",
+  "author": { "name": "GridPin", "url": "https://gridpin.dev" },
+  "homepage": "https://gridpin.dev/mcp-geocoding",
+  "repository": "https://github.com/gridpin/gridpin",
+  "license": "Apache-2.0",
+  "keywords": ["geocoding", "reverse-geocoding", "addresses", "offline", "gis", "maps"]
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "gridpin": {
+      "command": "uvx",
+      "args": ["gridpin-mcp==0.4.1"]
+    }
+  }
+}

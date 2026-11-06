@@ -54,7 +54,8 @@ def expected_pack(common: Path, overlay: Path, marker: bytes = MARKER) -> dict[s
         config = additions["city_tail"]
         required = {"enabled", "regions", "forms", "postal_digits", "postal_split"}
         optional = {"street_titles", "street_title_aliases", "postal_extension", "street_type_last", "region_names",
-                    "junk_tail", "homonym_prominence", "postal_pattern", "quadrant_suffixes", "direction_trailing", "city_first", "unit_hyphen", "number_first_types", "glue_road_numbers", "type_first_siblings", "fuzzy_short_forms", "saint_communes", "interp_max_gap", "interp_max_km", "bare_street_types", "postal_pad_zero", "number_mark", "postal_prefix", "commaless_restore", "postal_near_digits", "postal_street_suffix", "no_number_marks"}
+                    "junk_tail", "homonym_prominence",
+    "homonym_doubt", "postal_pattern", "quadrant_suffixes", "direction_trailing", "city_first", "unit_hyphen", "number_first_types", "glue_road_numbers", "type_first_siblings", "fuzzy_short_forms", "saint_communes", "interp_max_gap", "interp_max_km", "bare_street_types", "postal_pad_zero", "number_mark", "postal_prefix", "commaless_restore", "postal_near_digits", "postal_street_suffix", "no_number_marks", "unit_slash", "postal_street_typo", "house_spans", "commune_short_words", "silence_to_place"}
         if not isinstance(config, dict) or not required <= set(config) or set(config) - required - optional:
             raise ValueError("city_tail: expected complete tail grammar")
         # postal_pad_zero: "1" restores the leading zero of a postal code written one digit short (query.rs

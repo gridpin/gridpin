@@ -16,6 +16,7 @@ from gridpin_mcp import sheets, tools
 EXAMPLES: Dict[str, str] = {
     "us": "1600 Pennsylvania Avenue NW, Washington, DC 20500",
     "ca": "1001 Rue Sherbrooke Ouest, Montréal, QC H3A 1G5",
+    "au": "1 Martin Place, Sydney NSW 2000",
     "mx": "Av. Paseo de la Reforma 222, Juárez, Cuauhtémoc, 06600 Ciudad de México",
     "rs": "Knez Mihailova 5, Beograd",
     "nl": "Damrak 1, Amsterdam",
@@ -29,6 +30,7 @@ EXAMPLES: Dict[str, str] = {
 POINTS: Dict[str, tuple] = {
     "us": (38.8977, -77.0365),
     "ca": (45.5025, -73.5764),
+    "au": (-33.8678, 151.2077),
     "mx": (19.4290, -99.1622),
     "rs": (44.8155, 20.4594), "nl": (52.3771, 4.8980), "es": (40.4194, -3.6916), "de": (50.1107, 8.6819),
     "fr": (49.8974, 2.2901), "it": (41.9056, 12.4785), "br": (-23.5620, -46.6557),

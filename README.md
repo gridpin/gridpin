@@ -32,7 +32,7 @@ g.geocode("1 rue de la Paix, Paris", 1)
 No install: [try it in Colab](https://colab.research.google.com/github/gridpin/gridpin/blob/main/examples/colab_quickstart.ipynb)
 — the Serbia sheet, forward, reverse and batch geocoding in five minutes.
 
-Countries: `us` `ca` `de` `fr` `it` `es` `mx` `nl` `br` `rs` (`gridpin-fetch --list`). For AI agents there is an
+Countries: `us` `ca` `de` `fr` `it` `es` `au` `mx` `nl` `br` `rs` (`gridpin-fetch --list`). For AI agents there is an
 MCP server — `claude mcp add gridpin -- uvx gridpin-mcp`, details in [mcp/README.md](mcp/README.md).
 Everything after the download runs offline.
 
@@ -177,6 +177,7 @@ A country in a file — most countries are a single file (a few regional dataset
 | France      | 365 MB    | 26.1 M    | BAN (national registry) | Licence Ouverte   | ✓ (231 MB, optional) |
 | Italy       | 247 MB    | 25.9 M    | Overture / ANNCSU   | CC BY 4.0             | — |
 | Spain       | 185 MB    | 15.27M    | Overture / CartoCiudad (IGN/CNIG), all 52 postal provinces | CC BY 4.0 | — |
+| Australia | 130 MB | 11.92M | Overture / G-NAF (Geoscape Australia) | Open G-NAF EULA | — |
 | Mexico | 156 MB | 14.14M | Overture / INEGI address layer, Correos de México postal codes | open data (per source) | — |
 | Netherlands | 103 MB    | 9.9 M     | Overture / NGR (BAG) | Public Domain Mark 1.0 | — |
 | Brazil | 677 MB | 67.19M | Overture / IBGE CNEFE 2022, nationwide | CC0 1.0 (IBGE public data) | — |
@@ -213,19 +214,24 @@ order-sensitive POI *name* (splitting "54 Studio" into `street:"studio", number:
 
 Sizes are for v7 builds (August 2026; Germany repacked 2026-09-10; Spain added 2026-09-28; Brazil added 2026-10-11; the United States added 2026-10-24; Canada added 2026-10-31); the exact byte sizes are checked against a pinned source of truth in CI. A sheet is smaller than its own raw source: France's registry download is an 885 MB gzip that unpacks to 4.9 GB of CSV, while the finished sheet — the same 26.1M addresses plus every index (typo automata, spatial cells, ranking) — is 365 MB, ready to query.
 
-**Download sheets.** Free builds of all available countries are served as individual files —
-there is no directory listing, so link straight to the object you want:
-[`usa.bin`](https://dl.gridpin.dev/v0.7.1/usa.bin) (1.45 GB),
-[`canada.bin`](https://dl.gridpin.dev/v0.7.1/canada.bin) (183 MB),
-[`germany.bin`](https://dl.gridpin.dev/v0.7.1/germany.bin) (213 MB),
-[`france.bin`](https://dl.gridpin.dev/v0.7.1/france.bin) (365 MB),
-[`italy.bin`](https://dl.gridpin.dev/v0.7.1/italy.bin) (247 MB),
-[`spain.bin`](https://dl.gridpin.dev/v0.7.1/spain.bin) (185 MB),
-[`mexico.bin`](https://dl.gridpin.dev/v0.7.1/mexico.bin) (156 MB),
-[`netherlands.bin`](https://dl.gridpin.dev/v0.7.1/netherlands.bin) (103 MB),
-[`brazil.bin`](https://dl.gridpin.dev/v0.7.1/brazil.bin) (677 MB),
-[`serbia.bin`](https://dl.gridpin.dev/v0.7.1/serbia.bin) (32 MB), plus the optional France POI layer
-[`fr_poi.bin`](https://dl.gridpin.dev/v0.7.1/fr_poi.bin) (231 MB). The matching `SHA256SUMS` manifest (covering the
+**Download sheets.** Free builds of all available countries are served as individual files; download only the file of
+the country your addresses are in:
+
+| File | What's inside | Size |
+|---|---|---|
+| [`usa.bin`](https://dl.gridpin.dev/v0.7.1/usa.bin) | **United States.** 95.33M point addresses plus 34.52M points from address ranges, in 50 states and the District of Columbia. 7 states have address ranges only. | 1.45 GB |
+| [`canada.bin`](https://dl.gridpin.dev/v0.7.1/canada.bin) | **Canada.** 16.94M addresses in all provinces and territories. | 183 MB |
+| [`germany.bin`](https://dl.gridpin.dev/v0.7.1/germany.bin) | **Germany.** 19.27M addresses in 15 of 16 Länder. Bavaria is not covered. | 213 MB |
+| [`france.bin`](https://dl.gridpin.dev/v0.7.1/france.bin) | **France.** 26.1M addresses from the national registry (BAN). | 365 MB |
+| [`italy.bin`](https://dl.gridpin.dev/v0.7.1/italy.bin) | **Italy.** 25.9M addresses. | 247 MB |
+| [`spain.bin`](https://dl.gridpin.dev/v0.7.1/spain.bin) | **Spain.** 15.27M addresses in all 52 postal provinces, including Ceuta and Melilla. | 185 MB |
+| [`mexico.bin`](https://dl.gridpin.dev/v0.7.1/mexico.bin) | **Mexico.** 14.14M addresses in all 32 states, from an address layer surveyed in 2009–2010. | 156 MB |
+| [`netherlands.bin`](https://dl.gridpin.dev/v0.7.1/netherlands.bin) | **Netherlands.** 9.9M addresses. | 103 MB |
+| [`brazil.bin`](https://dl.gridpin.dev/v0.7.1/brazil.bin) | **Brazil.** 67.19M addresses in 26 states and the Federal District. | 677 MB |
+| [`serbia.bin`](https://dl.gridpin.dev/v0.7.1/serbia.bin) | **Serbia.** 2.6M addresses. | 32 MB |
+| [`fr_poi.bin`](https://dl.gridpin.dev/v0.7.1/fr_poi.bin) | **France, places.** Optional add-on to `france.bin`: places by name, such as "pharmacie gare de Lyon". Not needed to geocode addresses. | 231 MB |
+
+The matching `SHA256SUMS` manifest (covering the
 engine binary and every sheet) is on the [GitHub release](https://github.com/gridpin/gridpin/releases).
 Subscribers fetch fresh monthly builds from a keyed URL instead — see
 [gridpin.dev/docs](https://gridpin.dev/docs).
@@ -245,8 +251,10 @@ independent reference coordinate (empty answers count as misses):
 | Germany · distorted addresses | 2,000 | **82.1%** | 46.9% | 15.8% |
 | Germany · clean addresses | 2,000 | **82.8%** | 83.2% | 81.2% |
 | Spain · distorted addresses | 1,590 | **33.8%** | 29.6% | 20.8% |
-| Mexico · distorted addresses | 909 | **18.4%** | 11.4% | 4.8% |
+| Mexico · distorted addresses | 2,000 | **24.1%** | 13.8% | 7.7% |
 | Mexico · cultural venues (as recorded) | 1,000 | **28.0%** | 17.3% | 10.2% |
+| Australia · distorted addresses | 2,000 | **74.6%** | 50.6% | 42.2% |
+| Australia · radio sites (as recorded) | 1,000 | **65.8%** | 25.2% | 13.0% |
 | Brazil · distorted addresses | 2,376 | **20.7%** | 19.8% | 9.6% |
 | Brazil · health-facility register (as typed) | 1,000 | **36.8%** | 28.2% | 20.7% |
 
@@ -255,7 +263,7 @@ coordinate kept byte for byte. On German and Spanish distorted addresses GridPin
 on Brazilian distorted addresses GridPin and Photon are level, both well ahead of Nominatim; on clean
 German addresses GridPin and Photon are level (p=0.6691367 — not proof of parity). We show the sets
 where GridPin leads or is level; on the other Spanish sets Photon leads, and on clean Brazilian
-addresses Photon leads too; on clean Canadian addresses Photon leads (59.1% vs 57.5%; Nominatim 57.2%); on clean Mexican addresses GridPin leads (23.3% vs Photon 14.6%, Nominatim 9.4%). Counts, paired tests and data fingerprints for every set are in
+addresses Photon leads too; on clean Canadian addresses Photon leads (59.1% vs 57.5%; Nominatim 57.2%); on clean Mexican addresses GridPin leads (29.2% vs Photon 15.9%, Nominatim 10.1%). Counts, paired tests and data fingerprints for every set are in
 [docs-public/BENCHMARK.md](docs-public/BENCHMARK.md); the summary lives on the
 [test bench page](https://gridpin.dev/bench).
 
@@ -351,6 +359,7 @@ The engine is Apache-2.0. Each sheet carries the license of its source data:
 - **United States** — National Address Database (USDOT) and 19 state and county open datasets via Overture/OpenAddresses, each under its own permissive licence (U.S. Government work, CC0, PDDL, CC BY 4.0, open-data terms — listed per source in the sheet manifest); address ranges from U.S. Census Bureau TIGER/Line 2025 (U.S. Government work); postal codes from GeoNames (CC BY 4.0).
 - **Canada** — Statistics Canada National Address Register under the [Statistics Canada Open Licence](https://www.statcan.gc.ca/en/terms-conditions/open-licence) (required notice: "Adapted from Statistics Canada, National Address Register, 2024. This does not constitute an endorsement by Statistics Canada of this product."); Adresses Québec (MRNF) under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); Yukon civic addresses under the [Open Government Licence – Yukon](https://yukon.ca/en/your-government/open-government/open-government-licence-yukon) ("Contains information licensed under the Open Government Licence – Yukon"); all via Overture/OpenAddresses; settlement names from GeoNames (CC BY 4.0).
 - **Mexico** — "Fuente: INEGI, Vectorial de localidades amanzanadas y números exteriores (actualización 2009-2010), via AddressForAll"; postal codes: Correos de México (Libre Uso MX). GridPin's sheet is a derived work, not an INEGI product, and INEGI does not endorse it.
+- **Australia** — "Incorporates or developed using G-NAF © Geoscape Australia licensed by the Commonwealth of Australia under the Open Geo-coded National Address File (G-NAF) End User Licence Agreement." Adapted by GridPin. That licence does not allow using this data to compile addresses for sending mail unless each address is verified against a second source.
 - **France** — BAN, under [Licence Ouverte 2.0](https://www.etalab.gouv.fr/licence-ouverte-open-licence/).
 - **Italy** — ANNCSU via Overture/OpenAddresses, under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 - **Netherlands** — Nationaal Georegister (BAG) via Overture, under [Public Domain Mark 1.0](https://creativecommons.org/publicdomain/mark/1.0/).
@@ -364,6 +373,8 @@ All of these licenses let you **store geocoding results indefinitely**. This is 
 This also matters for GDPR: the addresses you geocode are often customer data, and with GridPin they never leave your infrastructure.
 
 ## Status & roadmap
+
+**v0.8.0: Australia added. Client update required.** One nationwide sheet (`australia.bin`, 130 MB): 11.92M addresses from G-NAF, August 2026 edition, including the external territories. Engine rules for Australian addresses (see docs). Also: a long dash in a house range reads like a hyphen, and a place name before an address is read past, in every country.
 
 **v0.7.1: the engine knows the sheets of its own release.** In 0.7.0, `gridpin sheets`, `gridpin.sheets.fetch`, the npm `sheets.fetch` and the Docker images listed the previous release and had no Mexico; in 0.7.1 they list all ten countries, and the Mexico image `ghcr.io/gridpin/gridpin:mx` is published. The sheets are byte-for-byte the same as in 0.7.0; the new `sheets-receipt.json` (with its `.sig`) is the signed list of sheets, signed before the engine is built, and the engine pins it by SHA-256.
 
@@ -379,15 +390,15 @@ For an existing Python installation, use `pip install --upgrade gridpin==0.7.1`,
 
 Interfaces and file formats may still change before v1.0. Sheets are tied to the engine's format major version — keep the engine build that shipped alongside your sheets; before v1.0 a newer engine may require newer sheets.
 
-Planned distribution:
+Distribution:
 
 - **Free** — static builds of all available countries, with no update schedule. Free builds carry the same curated rules section subscribers get — you trade freshness, not quality; fresh monthly sheets are what subscriptions are for.
-- **Starter, $59/mo** — a subscription: one country of your choice, a fresh sheet every month.
+- **Starter, $59/mo** (in preparation) — a subscription: one country of your choice, a fresh sheet every month.
 - **Pro, $149/mo** — a subscription: the full atlas (all available countries), fresh sheets monthly, provenance journal per build, invoice billing, priority email support.
 - **Snapshot, $199 one-time** — *this month's* fresh build of all available countries (the same sheets subscribers get), with an invoice, without a subscription. No updates afterwards. It costs more than one month of Pro on purpose: it is the no-subscription option — one invoice for procurement, no card on file, nothing to cancel. If a subscription works for you, a month of Pro is cheaper.
 - **OEM / embedding** — from $1,500/yr.
 
-Prices above describe what is planned; they are not binding and nothing is on sale yet.
+Pro and Snapshot can be bought in USDC: see [pricing](https://gridpin.dev/#pricing) and [how buying works](https://gridpin.dev/docs#paid).
 
 ## License
 

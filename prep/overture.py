@@ -84,6 +84,10 @@ ADDRESS_LICENSE = {
                        "amanzanadas y numeros exteriores, via AddressForAll and OpenAddresses; postcodes "
                        "Correos de Mexico (datos.gob.mx)",
            "license": "mixed permissive: Terminos de Libre Uso de la Informacion del INEGI, Libre Uso MX"},
+    # AU (owner decisions ANSWERS §225): one dataset, G-NAF; the EULA of 26.02.2016 is CC BY 4.0 plus a restriction on
+    # compiling addresses for sending mail (2(a)2), read at data.gov.au on 2026-11-04.
+    "au": {"provider": "Geoscape Australia, Geocoded National Address File (G-NAF), via OpenAddresses",
+           "license": "Open G-NAF End User Licence Agreement (CC BY 4.0 terms plus a mail-use restriction)"},
 }
 S3 = f"s3://overturemaps-us-west-2/release/{RELEASE}/theme=addresses/type=*/*.parquet"
 
@@ -106,6 +110,9 @@ CA_DATASETS = ("ca/countrywide", "ca/qc/province", "ca/yt/province")
 # MX: the release pinned by the owner (ANSWERS §186) and the one Mexican dataset (30 726 687 rows, 2026-10-31).
 MX_RELEASE = "2026-10-21.0"
 MX_DATASETS = ("mx/countrywide",)
+# AU: the release pinned by the owner (ANSWERS §225) and the one Australian dataset (15 739 608 rows, 2026-11-04).
+AU_RELEASE = "2026-10-21.0"
+AU_DATASETS = ("au/countrywide",)
 US_STATES = (
     "AK", "AL", "AR", "AZ", "CA", "CO", "CT", "DC", "DE", "FL", "GA", "HI", "IA", "ID", "IL", "IN",
     "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO", "MS", "MT", "NC", "ND", "NE", "NH", "NJ",
@@ -127,6 +134,8 @@ def release_for_country(cc: str) -> str:
         return CA_RELEASE
     if cc.lower() == "mx":  # ANSWERS §186
         return MX_RELEASE
+    if cc.lower() == "au":  # ANSWERS §225
+        return AU_RELEASE
     return DE_RELEASE if cc.lower() == "de" else RELEASE
 
 
@@ -141,6 +150,8 @@ BOUNDED_STORAGE = {
     "CA": ("ca_build", 8, "4GiB"),
     # MX streams 30.7 M rows (15 M with a number), about 1.8x CA.
     "MX": ("mx_build", 10, "4GiB"),
+    # AU streams 15.7 M rows, about CA's size.
+    "AU": ("au_build", 8, "4GiB"),
 }
 
 
@@ -256,6 +267,19 @@ def address_manifest(cc: str, geonames: bool = False, release: str | None = None
             "filtered and re-keyed); this product is not produced, endorsed or sponsored by INEGI or the "
             f"Government of Mexico; via Overture Maps / OpenAddresses, release {selected_release}; "
             "address normalization applied" + geonames_credit
+        )
+    if country == "au":
+        # The preferred notice for adapted material on the data.gov.au catalogue page, the EULA 3(a)(1)B mark of
+        # modification and its link, the catalogue's privacy condition, and the 2(a)2 restriction passed on as a
+        # notice: 2(a)6B forbids adding terms of our own (read 2026-11-04). GeoNames feeds the rule pack's place table.
+        result["attribution"] = (
+            "Incorporates or developed using G-NAF (c) Geoscape Australia licensed by the Commonwealth of Australia "
+            "under the Open Geo-coded National Address File (G-NAF) End User Licence Agreement "
+            "(https://data.gov.au/data/dataset/geocoded-national-address-file-g-naf/resource/"
+            "09f74802-08b1-4214-a6ea-3591b2753d30). Adapted by GridPin (normalized, filtered and re-keyed). Notice: that "
+            "licence does not allow using this data to compile addresses for sending mail unless each address is "
+            "verified against a second source; use it consistently with the Australian Privacy Principles. "
+            f"Via Overture Maps / OpenAddresses, release {selected_release}; place reference (c) GeoNames (CC BY 4.0)"
         )
     return result
 
@@ -455,6 +479,15 @@ def select_src_sql(cc: str, s3: str) -> str:
         province = MX_STATE_SQL
         evidence_columns = ""
         where_clause = MX_WHERE_SQL
+    elif cc == "AU":
+        # Every row carries both levels (survey 2026-11-04): the state code first, the locality second.
+        city = "coalesce(address_levels[2].value, '')"
+        province = "coalesce(address_levels[1].value, '')"
+        evidence_columns = ""
+        where_clause = (
+            f"country = 'AU' AND sources[1].dataset IN ({_sql_list(AU_DATASETS)}) "
+            "AND street IS NOT NULL AND number IS NOT NULL"
+        )
     else:
         city = "coalesce(address_levels[-1].value, '')"
         province = (
@@ -692,7 +725,7 @@ def canon_sql(insee_order: str, prov_alias: str, keys_table: str | None = None,
 
 # Countries extracted in two streamed passes over an S3 view: the source never sits in memory
 # (BR 74M rows, US 100M). `canon` is then a view over the written Parquet, not a table.
-STREAMED = frozenset({"BR", "US", "CA", "MX"})
+STREAMED = frozenset({"BR", "US", "CA", "MX", "AU"})
 # Streamed countries whose source leaves the city empty on part of the rows (US survey 2026-10-19:
 # about 4.7 M green rows, Texas 1.7 M and New York State 0.97 M first). With a GeoNames dump the
 # adapter fills those cities in a zero pass (fill_missing_cities) before the shared base_sql filter
@@ -750,7 +783,8 @@ def fill_missing_cities(con, geonames_file: str, source: str = "src",
 # Countries whose source repeats whole rows verbatim under different feature ids (US survey
 # 2026-10-19: one point three times). Only these get the merge: the accepted row counts of the
 # other sheets stay as measured. The merge rewrites the Parquet, so `canon` must be the view.
-EXACT_DUPLICATE_MERGE = frozenset({"US"})
+# AU: 4.7 M of the 15.7 M rows are units of a house, and the unit is not in the key.
+EXACT_DUPLICATE_MERGE = frozenset({"US", "AU"})
 assert EXACT_DUPLICATE_MERGE <= STREAMED
 # Every canon column but the feature id: two rows equal on all of them are one address.
 CANON_KEY = ("numero", "rep", "nom_voie", "nom_voie_norm", "code_postal", "code_postal_display",

@@ -1,6 +1,6 @@
 [package]
 name = "gridpin-ffi"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "C interface to the GridPin offline geocoder, shared by the DuckDB extension and the R package"

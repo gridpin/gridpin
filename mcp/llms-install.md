@@ -9,7 +9,7 @@ a country sheet once.
 - Python 3.10 or newer, and `uv` (preferred) or `pip`.
 - A platform with a prebuilt `gridpin` wheel: macOS on Apple Silicon, Linux x86_64 (glibc 2.34+),
   Windows x86_64. On other platforms `pip` builds the engine from source and needs a Rust toolchain.
-- Free disk space for the sheets the user needs: Serbia 32 MB, Netherlands 103 MB, Spain 185 MB, Mexico 156 MB,
+- Free disk space for the sheets the user needs: Serbia 32 MB, Netherlands 103 MB, Spain 185 MB, Australia 130 MB, Mexico 156 MB,
   Germany 213 MB (no Bavaria), Italy 247 MB, France 365 MB, Brazil 677 MB, Canada 183 MB, United States 1452 MB (1.45 GB).
 
 ## 2. Add the server to the MCP settings
@@ -37,7 +37,7 @@ only a few environment variables, so a `GRIDPIN_HOME` exported in the user's she
 
 ## 3. Verify
 
-1. Call `list_countries`. It returns ten countries (`us`, `ca`, `de`, `fr`, `it`, `es`, `mx`, `nl`, `br`, `rs`), each
+1. Call `list_countries`. It returns eleven countries (`us`, `ca`, `de`, `fr`, `it`, `es`, `au`, `mx`, `nl`, `br`, `rs`), each
    with its size and whether it is downloaded.
 2. Ask the user which countries they need, then call `download_sheet` once per country. The download is
    checked against the signed release; a mismatch is discarded. A large sheet can take longer than the

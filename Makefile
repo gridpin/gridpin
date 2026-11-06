@@ -14,7 +14,7 @@ GEONAMES_MX=data/geonames_mx.txt
 # All recipes are phony (not files). Without this, a file named like a target (e.g. `smoke`)
 # in the working dir makes `make` consider the target up to date and silently skip the recipe — which
 # let the release check skip its provenance verification.
-.PHONY: engine bindings duckdb-ext third-party-licenses fr nl it rs es br us mx de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb test-node langchain-venv test-langchain test-qgis qgis-plugin-zip http public-bench-contract public-bench
+.PHONY: engine bindings duckdb-ext third-party-licenses fr nl it rs es br us mx au de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb test-node langchain-venv test-langchain test-qgis qgis-plugin-zip http public-bench-contract public-bench
 
 engine:
 	cargo build --release --manifest-path gridpin/Cargo.toml
@@ -223,6 +223,15 @@ mx: engine
 	$(if $(wildcard rules),python3 prep/mx_rules.py,)
 	GRIDPIN_MEM=6GB nice -n 19 python3 prep/export_build.py data/mx_norm.parquet data/build_mx.csv.gz
 	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_mx.csv.gz data/mx.bin $(MODELS) --meta data/mx_manifest.json
+
+# Australia (ANSWERS §225): Overture 2026-10-21.0, the G-NAF dataset au/countrywide; every row has a locality and a
+# state, so no GeoNames umbrella (the rule pack's place table comes from eval/reference/au).
+au: RULES=$(if $(wildcard rules),--rules rules/au,)
+au: engine
+	nice -n 19 python3 prep/overture.py AU
+	$(if $(wildcard rules),python3 prep/au_rules.py,)
+	GRIDPIN_MEM=6GB nice -n 19 python3 prep/export_build.py data/au_norm.parquet data/build_au.csv.gz
+	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_au.csv.gz data/au.bin $(MODELS) --meta data/au_manifest.json
 
 rs: engine
 	test -f $(GEONAMES_RS) || python3 prep/fetch_zip.py https://download.geonames.org/export/dump/RS.zip RS.txt $(GEONAMES_RS)

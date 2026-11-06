@@ -46,6 +46,19 @@ def test_tools_are_listed_with_read_only_hints(app):
     assert {"lat", "lon", "precision", "confidence"} <= set(hit["required"])
 
 
+def test_every_tool_states_title_and_destructive_hint(app):
+    # Required of a directory listing: Anthropic Software Directory Policy, section 5.E.
+    async def go():
+        async with Client(app) as client:
+            return (await client.list_tools()).tools
+    tools_listed = run(go())
+    assert len(tools_listed) == 5
+    for tool in tools_listed:
+        name = tool.name
+        assert tool.annotations.title, name
+        assert tool.annotations.destructive_hint is False, name
+
+
 def test_geocode_through_mcp_returns_structured_results(app):
     async def go():
         async with Client(app) as client:
@@ -63,7 +76,8 @@ def test_anticipated_error_reaches_the_model_verbatim(app):
     assert result.is_error
     text = result.content[0].text
     # The SDK prefixes the tool name; a crash would carry nothing after it.
-    assert text.startswith("Error executing tool geocode: unknown country 'Poland'; available: br (Brazil)")
+    assert text.startswith("Error executing tool geocode: unknown country 'Poland'; available: ")
+    assert "br (Brazil)" in text
 
 
 def test_instructions_name_every_country_and_the_offline_promise():

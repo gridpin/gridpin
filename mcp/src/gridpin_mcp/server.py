@@ -23,7 +23,9 @@ No API key, no rate limit, and no query leaves the machine. Results carry precis
 the answer needs a check before use. Treat street- or city-level results as approximate.
 """
 
-READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+
+def _read_only(title: str) -> ToolAnnotations:
+    return ToolAnnotations(title=title, read_only_hint=True, destructive_hint=False, open_world_hint=False)
 
 
 class Hit(TypedDict):
@@ -111,7 +113,7 @@ def build_server(session: Optional[tools.Session] = None) -> MCPServer:
         version=__version__,
     )
 
-    @server.tool(annotations=READ_ONLY)
+    @server.tool(annotations=_read_only("List countries"))
     @_agent_errors
     def list_countries() -> CountriesOut:
         """List covered countries, their sheet sizes and whether each sheet is downloaded."""
@@ -119,7 +121,11 @@ def build_server(session: Optional[tools.Session] = None) -> MCPServer:
 
     @server.tool(
         annotations=ToolAnnotations(
-            read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=True
+            title="Download a country sheet",
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
         )
     )
     @_agent_errors
@@ -131,7 +137,7 @@ def build_server(session: Optional[tools.Session] = None) -> MCPServer:
         """
         return tools.download_sheet(country)
 
-    @server.tool(annotations=READ_ONLY)
+    @server.tool(annotations=_read_only("Geocode an address"))
     @_agent_errors
     def geocode(query: str, country: str, k: int = 1) -> GeocodeOut:
         """Geocode one address or place: text -> coordinates, offline.
@@ -142,7 +148,7 @@ def build_server(session: Optional[tools.Session] = None) -> MCPServer:
         """
         return session.geocode(query, country, k)
 
-    @server.tool(annotations=READ_ONLY)
+    @server.tool(annotations=_read_only("Reverse geocode a point"))
     @_agent_errors
     def reverse(lat: float, lon: float, country: str, k: int = 1) -> ReverseOut:
         """Reverse geocode: coordinates -> nearest indexed addresses, offline.
@@ -150,7 +156,7 @@ def build_server(session: Optional[tools.Session] = None) -> MCPServer:
         """
         return session.reverse(lat, lon, country, k)
 
-    @server.tool(annotations=READ_ONLY)
+    @server.tool(annotations=_read_only("Geocode many addresses"))
     @_agent_errors
     def batch(queries: List[str], country: str, k: int = 1) -> BatchOut:
         """Geocode up to 1000 addresses of one country in a single call, in input order."""
