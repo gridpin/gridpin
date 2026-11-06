@@ -16,7 +16,7 @@ Try it after installing:
 
 ## What it runs, downloads and sends
 
-- **Runs:** `uvx gridpin-mcp==0.4.1`, the open-source [GridPin MCP server](https://github.com/gridpin/gridpin/tree/main/mcp). On first start, `uv` downloads that package and its dependencies from PyPI.
+- **Runs:** `uvx gridpin-mcp==0.5.0`, the open-source [GridPin MCP server](https://github.com/gridpin/gridpin/tree/main/mcp). On first start, `uv` downloads that package and its dependencies from PyPI.
 - **Downloads:** when `download_sheet` is called, one country file from `dl.gridpin.dev`, checked against the SHA-256 in the signed release. Files are kept in `~/.cache/gridpin` unless you set `GRIDPIN_HOME` in the server's environment.
 - **Sends:** the plugin has no telemetry and no account, and its tools send addresses and coordinates nowhere. As with any download, the file host and PyPI see the request itself, not your addresses.
 

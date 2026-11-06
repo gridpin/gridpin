@@ -1,6 +1,6 @@
 Package: gridpin
 Title: Offline Geocoding with One File per Country
-Version: 0.7.1
+Version: 0.8.0
 Authors@R: c(
     person("GridPin", email = "contact@gridpin.dev", role = c("aut", "cre", "cph")),
     person("Authors of the dependency Rust crates", role = c("aut", "cph"),

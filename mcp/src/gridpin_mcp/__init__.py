@@ -8,4 +8,4 @@ Python use without MCP:
     gridpin.Geocoder(str(path)).geocode("1 rue de la Paix, Paris", 1)
 """
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
