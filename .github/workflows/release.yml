@@ -525,7 +525,10 @@ jobs:
       - name: Package (tar.gz / zip) with LICENSE and the third-party license texts
         run: |
           cd integrations/sqlite
-          ext=$(ls gridpin_sqlite.so gridpin_sqlite.dylib gridpin_sqlite.dll 2>/dev/null)
+          # The one library this platform built. Not `ls a b c`: ls exits 2 when any operand is missing, and under
+          # `bash -e` that killed this step on every platform (v0.9.0; the step runs only on a tag, not in ci.yml).
+          ext=""; for c in gridpin_sqlite.so gridpin_sqlite.dylib gridpin_sqlite.dll; do [ -f "$c" ] && ext="$c"; done
+          test -n "$ext"
           cp "$GITHUB_WORKSPACE/LICENSE" .
           cp "$GITHUB_WORKSPACE/gridpin-ffi/THIRDPARTY.yml" .
           if [[ "${{ runner.os }}" == "Windows" ]]; then
