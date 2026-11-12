@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-RELEASE = "v0.8.0"
+RELEASE = "v0.9.0"
 BASE_URL = "https://dl.gridpin.dev"
 CHUNK = 1 << 20
 DISK_MARGIN = 512 << 20

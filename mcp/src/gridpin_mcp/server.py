@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import functools
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -21,6 +21,9 @@ Workflow: call list_countries; if the country is not downloaded, call download_s
 No API key, no rate limit, and no query leaves the machine. Results carry precision
 (house, interp, street, city, ...), confidence and weak; weak is true when the engine itself says
 the answer needs a check before use. Treat street- or city-level results as approximate.
+geocode also says kind: "clarify" means the address exists in several far-apart places and the query named
+none of them; ask the user which one (clarify.options) and call geocode again with that city or region added.
+"none" comes with a reason (no_street, no_house, city_unknown, outside_sheet, unparsed); tell the user what to add.
 """
 
 
@@ -45,12 +48,35 @@ class Hit(TypedDict):
     distance_m: NotRequired[float]
     # true when the answer needs a check before use (engine 0.7 and later)
     weak: NotRequired[bool]
+    # how far the answer reaches, on the Esri Addr_type scale, and M/T (T when weak); engine 0.9 and later
+    match_level: NotRequired[str]
+    match_status: NotRequired[str]
+    # only when the extras argument asks for them (engine 0.9 and later): h3, geohash, placekey_where,
+    # plus_code, mgrs, dms, street_point, street_point_m, links, provenance
+    extras: NotRequired[Dict[str, Any]]
+
+
+class Choice(TypedDict):
+    label: str
+    city: str
+    region: NotRequired[str]
+    lat: float
+    lon: float
+
+
+class Clarify(TypedDict):
+    missing: str
+    options: List[Choice]
 
 
 class GeocodeOut(TypedDict):
     country: str
     query: str
     results: List[Hit]
+    # engine 0.9 and later: "answer", "clarify" (ask the user which place) or "none" (see reason)
+    kind: NotRequired[str]
+    clarify: NotRequired[Clarify]
+    reason: NotRequired[str]
 
 
 class ReverseOut(TypedDict):
@@ -139,22 +165,26 @@ def build_server(session: Optional[tools.Session] = None) -> MCPServer:
 
     @server.tool(annotations=_read_only("Geocode an address"))
     @_agent_errors
-    def geocode(query: str, country: str, k: int = 1) -> GeocodeOut:
+    def geocode(query: str, country: str, k: int = 1, extras: Optional[str] = None) -> GeocodeOut:
         """Geocode one address or place: text -> coordinates, offline.
 
         query: the address as a person would write it, e.g. "1 rue de la Paix, Paris".
         country: ISO code or English name of the country the address is in.
         k: number of ranked candidates, 1-10.
+        extras: optional comma-separated extra fields per result: h3 (or h3:8), geohash, placekey, codes
+            (Plus Code, MGRS, DMS), street_point, links (five map links), provenance (the sheet's source,
+            date and licence).
         """
-        return session.geocode(query, country, k)
+        return session.geocode(query, country, k, extras)
 
     @server.tool(annotations=_read_only("Reverse geocode a point"))
     @_agent_errors
-    def reverse(lat: float, lon: float, country: str, k: int = 1) -> ReverseOut:
+    def reverse(lat: float, lon: float, country: str, k: int = 1, extras: Optional[str] = None) -> ReverseOut:
         """Reverse geocode: coordinates -> nearest indexed addresses, offline.
         Approximate: each result carries distance_m from the given point.
+        extras: optional extra fields per result, as in geocode.
         """
-        return session.reverse(lat, lon, country, k)
+        return session.reverse(lat, lon, country, k, extras)
 
     @server.tool(annotations=_read_only("Geocode many addresses"))
     @_agent_errors

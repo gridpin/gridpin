@@ -8,13 +8,23 @@
 Helpers that need other packages load only when used:
 
     gridpin.geocode_df(df, "address", "us")      # pandas: pip install "gridpin[pandas]"
+
+A sheet of one's own places (a campus, sites, depots), asked before the country's sheet:
+
+    gridpin.build_places("places.csv", "own.bin")  # name, lat, lon[, group][, code][, aliases]
+    g = gridpin.Geocoder(path, also="own.bin")
     from gridpin.geopy import GridPin            # geopy/GeoPandas: pip install "gridpin[geopy]"
 """
 
 from . import sheets
 from ._gridpin import Geocoder
 
-__all__ = ["Geocoder", "sheets", "geocode_df", "reverse_df"]
+try:  # engine 0.9 and later
+    from ._gridpin import build_places
+except ImportError:  # pragma: no cover - an older engine wheel under this package
+    pass
+
+__all__ = ["Geocoder", "build_places", "sheets", "geocode_df", "reverse_df"]
 
 
 def __getattr__(name):

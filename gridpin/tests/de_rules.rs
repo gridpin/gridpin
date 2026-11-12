@@ -1103,7 +1103,7 @@ fn house_suffix_fused_and_spaced_forms_are_equivalent() {
 fn house_range_words_preserve_the_source_tail() {
     let symbol = top("Cäcilienstraße 29-33 50676 Köln");
     assert_close(&symbol, 50.93471389, 6.95143889);
-    assert_eq!(symbol.housenumber.as_deref(), Some("2933"));
+    assert_eq!(symbol.housenumber.as_deref(), Some("29/33"));
     assert!(
         symbol.flags.contains(&"de_house_range"),
         "HOUSE_RANGE_SYMBOL_OBSERVER: punctuation range retry did not win"
@@ -1121,7 +1121,7 @@ fn house_range_words_preserve_the_source_tail() {
 fn house_fraction_shorthand_maps_to_live_mixed_fraction_suffixes() {
     let fraction = top("Hauptstraße 17/2");
     assert_close(&fraction, 48.058200, 10.184400);
-    assert_eq!(fraction.housenumber.as_deref(), Some("1712"));
+    assert_eq!(fraction.housenumber.as_deref(), Some("17/12"));
     assert!(
         fraction.flags.contains(&"de_house_slash"),
         "HOUSE_SLASH_OBSERVER: mixed-fraction retry did not win"
@@ -1129,7 +1129,7 @@ fn house_fraction_shorthand_maps_to_live_mixed_fraction_suffixes() {
 
     let half = top("Krahnstraße 1/2");
     assert_close(&half, 52.27720000, 8.04118000);
-    assert_eq!(half.housenumber.as_deref(), Some("112"));
+    assert_eq!(half.housenumber.as_deref(), Some("1/12"));
     assert!(
         half.flags.contains(&"de_house_slash"),
         "HOUSE_SLASH_OBSERVER: 1/2 retry did not win"
@@ -1394,7 +1394,7 @@ fn house_range_and_slash_inputs_freeze_out_only_postal_tail() {
             "38",
             "Postallee 20-38 12345 Unbekannt",
             "de_house_range",
-            "2038",
+            "20/38",
         ),
         (
             "slash-freeze",
@@ -1402,7 +1402,7 @@ fn house_range_and_slash_inputs_freeze_out_only_postal_tail() {
             "12",
             "Postallee 17/2 12345 Unbekannt",
             "de_house_slash",
-            "1712",
+            "17/12",
         ),
     ] {
         let index = Index::open(&build_postal_tail_house_effect_fixture(tag, number, rep)).unwrap();

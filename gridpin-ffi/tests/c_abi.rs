@@ -48,6 +48,9 @@ fn static_library() -> (PathBuf, Vec<String>) {
             "--manifest-path",
         ])
         .arg(&manifest)
+        // the profile of this test run: `cargo test --release` linked a stale release library built by an
+        // earlier run, while this step had rebuilt only the debug one (08.11.2026)
+        .args((!cfg!(debug_assertions)).then_some("--release"))
         .args(["--", "--print", "native-static-libs"])
         .output()
         .unwrap();

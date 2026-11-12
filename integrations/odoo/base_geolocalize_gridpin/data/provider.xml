@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="geoprovider_gridpin" model="base.geo_provider">
+        <field name="tech_name">gridpin</field>
+        <field name="name">GridPin (your own server)</field>
+    </record>
+    <record id="param_gridpin_url" model="ir.config_parameter">
+        <field name="key">base_geolocalize_gridpin.url</field>
+        <field name="value">http://127.0.0.1:8080</field>
+    </record>
+</odoo>

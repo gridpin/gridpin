@@ -35,6 +35,10 @@ environment variables (clients built on the MCP Python SDK pass `HOME`, `LOGNAME
 `SHELL`, `TERM` and `USER` on macOS and Linux), so `GRIDPIN_HOME` and `XDG_CACHE_HOME` from
 your shell never reach it and sheets go to `~/.cache/gridpin`.
 
+A sheet of your own places (a campus, sites, depots; `gridpin build --places places.csv own.bin`)
+is asked before the country's sheet when `GRIDPIN_OWN_SHEET` names it in the same `env` block
+(GridPin engine 0.9 or later); answers from it carry the flag `own_sheet`.
+
 `download_sheet` fetches a whole sheet in one tool call, and the larger sheets can take longer
 than a client allows for one call (mcp-haystack's `MCPToolset`, for example, stops after 30 s
 by default). Raise the client's tool timeout, or download the sheet beforehand in a terminal,

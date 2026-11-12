@@ -128,8 +128,59 @@ pub fn decide(a: Reading, b: Reading) -> Same {
     }
 }
 
+/// A stable identifier of an address across releases of a sheet: the first 16 hex digits of BLAKE2b-512 over the
+/// country code, the commune, the street and the house number (each normalized), joined by 0x1F. The names are the
+/// key, so an address keeps its id while it keeps its name; a renamed street is a new id. The country is in the
+/// key: one street name in two countries has two ids.
+pub fn address_id(country: &str, commune: &str, street: &str, number: &str) -> String {
+    use blake2::{Blake2b512, Digest};
+    let mut h = Blake2b512::new();
+    for (i, part) in [
+        country.to_ascii_lowercase(),
+        normalize(commune),
+        normalize(street),
+        normalize(number),
+    ]
+    .iter()
+    .enumerate()
+    {
+        if i > 0 {
+            h.update([0x1f]);
+        }
+        h.update(part.as_bytes());
+    }
+    h.finalize()[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 pub fn same_address(addr: &Index, poi: Option<&Index>, a: &str, b: &str) -> Same {
     decide(read(addr, poi, a), read(addr, poi, b))
+}
+
+#[cfg(test)]
+mod id_tests {
+    use super::address_id;
+
+    #[test]
+    fn the_id_reads_names_as_the_engine_does_and_holds_the_country() {
+        let a = address_id("rs", "Novi Sad", "Bulevar Oslobođenja", "100");
+        assert_eq!(a.len(), 16);
+        assert_eq!(
+            a,
+            address_id("RS", "novi sad", "bulevar oslobodenja", "100"),
+            "case and diacritics fold"
+        );
+        assert_ne!(
+            a,
+            address_id("ba", "Novi Sad", "Bulevar Oslobođenja", "100")
+        );
+        assert_ne!(
+            a,
+            address_id("rs", "Novi Sad", "Bulevar Oslobođenja", "102")
+        );
+    }
 }
 
 #[cfg(test)]

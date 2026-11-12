@@ -1,0 +1,19 @@
+# Words that open a post office box, followed by its number ("P.O. Box 123", "Postfach 1234"): data of the engine, read
+# for every sheet alike. Matched on normalized text (lower case, marks and dots removed), as one or two words.
+po box
+pobox
+p o box
+post office box
+box
+postfach
+postbus
+bp
+boite postale
+apartado
+apartado de correos
+apdo
+caixa postal
+cp
+postanski fah
+casilla
+casella postale

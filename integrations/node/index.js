@@ -37,22 +37,22 @@ class Geocoder {
     return this._state;
   }
 
-  /** Up to k answers for one address, best first; [] when nothing matches. */
-  geocode(query, { k = 10 } = {}) {
-    return this.geocodeMany([query], { k })[0];
+  /** Up to k answers for one address, best first; [] when nothing matches. `with` adds `extras` to each answer. */
+  geocode(query, { k = 10, with: fields } = {}) {
+    return this.geocodeMany([query], { k, with: fields })[0];
   }
 
   /** One list of up to k answers per query, in input order; null or undefined queries give []. */
-  geocodeMany(queries, { k = 1 } = {}) {
+  geocodeMany(queries, { k = 1, with: fields } = {}) {
     if (!Number.isInteger(k) || k < 1) throw new RangeError('gridpin: k must be an integer >= 1');
-    const rows = native.text(this._live(), OP.geocode, k, Array.from(queries, (q) => (q == null ? null : String(q))));
+    const rows = native.text(this._live(), OP.geocode, k, Array.from(queries, (q) => (q == null ? null : String(q))), fields);
     return rows.map((row) => (row == null ? [] : JSON.parse(row)));
   }
 
   /** Up to k nearest addresses to a WGS84 point. */
-  reverse(lat, lon, { k = 1 } = {}) {
+  reverse(lat, lon, { k = 1, with: fields } = {}) {
     if (!Number.isInteger(k) || k < 1) throw new RangeError('gridpin: k must be an integer >= 1');
-    const [row] = native.reverse(this._live(), k, [Number(lat)], [Number(lon)]);
+    const [row] = native.reverse(this._live(), k, [Number(lat)], [Number(lon)], fields);
     return row == null ? [] : JSON.parse(row);
   }
 

@@ -37,6 +37,7 @@ BUILD_ONLY = {
     "pyo3-build-config": "build script of pyo3 (finds the Python interpreter)",
     "target-lexicon": "dependency of pyo3-build-config",
     "version_check": "build script of generic-array (probes the rustc version)",
+    "autocfg": "build script of num-traits, a dependency of h3o (probes the rustc version)",
 }
 
 ROOT = re.compile(r"^root_name: (\S+)$")

@@ -14,6 +14,7 @@ eval/control/*.csv
 data/wof/
 duckdb-ext/target/
 gridpin-ffi/target/
+gridpin-pro/target/
 .r-lib
 .r-lib-src/
 # R package: the 1 KB test sheet ships with it; build leftovers do not
@@ -37,4 +38,5 @@ duckdb-ext/*.duckdb_extension
 .wrangler/
 public-bench-work/
 .venv-langchain/
+.venv-spark/
 integrations/qgis/gridpin_geocoder.zip

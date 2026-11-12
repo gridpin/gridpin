@@ -14,7 +14,7 @@ GEONAMES_MX=data/geonames_mx.txt
 # All recipes are phony (not files). Without this, a file named like a target (e.g. `smoke`)
 # in the working dir makes `make` consider the target up to date and silently skip the recipe — which
 # let the release check skip its provenance verification.
-.PHONY: engine bindings duckdb-ext third-party-licenses fr nl it rs es br us mx au de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb test-node langchain-venv test-langchain test-qgis qgis-plugin-zip http public-bench-contract public-bench
+.PHONY: spark-venv test-spark engine bindings duckdb-ext third-party-licenses fr nl it rs es br us mx au de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb test-node langchain-venv test-langchain test-qgis qgis-plugin-zip http public-bench-contract public-bench
 
 engine:
 	cargo build --release --manifest-path gridpin/Cargo.toml
@@ -68,6 +68,17 @@ langchain-venv:
 test-langchain: mc
 	test -x $(LANGCHAIN_PY) || { echo 'Run make langchain-venv first'; exit 1; }
 	GRIDPIN_TEST_SHEET=$$PWD/data/mc.bin $(LANGCHAIN_PY) -m pytest integrations/langchain/tests -q -p no:cacheprovider -p no:benchmark
+
+# gridpin-spark (integrations/spark) on local Spark, against the Monaco smoke sheet, in its own venv: pyspark is 600 MB
+# and needs Java 17 or newer. The engine wheel comes from this tree (make bindings builds it).
+SPARK_PY := .venv-spark/bin/python
+spark-venv:
+	python3 -m venv .venv-spark
+	$(SPARK_PY) -m pip install --quiet -r integrations/spark/requirements-test.txt
+
+test-spark: mc
+	test -x $(SPARK_PY) || { echo 'Run make spark-venv first'; exit 1; }
+	PYTHONPATH=integrations/spark/src PYSPARK_PYTHON=$$PWD/$(SPARK_PY) $(SPARK_PY) -m pytest integrations/spark/tests -q -p no:cacheprovider
 
 # GridPin Geocoder for QGIS (integrations/qgis): tests inside the official QGIS images
 # (LTR and current release, pinned tags in the script), against the Monaco smoke sheet.

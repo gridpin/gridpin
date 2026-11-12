@@ -73,6 +73,13 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          # Static musl builds: the gnu binary needs the glibc of ubuntu-latest (2.39) and does
+          # not start on older systems — the ClickHouse 25.8 image has 2.35. The engine is pure Rust, so the
+          # musl target links without musl-tools; aarch64 builds natively on the arm runner.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: windows-latest
@@ -124,6 +131,12 @@ jobs:
           # ... and the third-party license texts, byte for byte the committed (checked) file
           cmp -s THIRDPARTY.yml "$GITHUB_WORKSPACE/gridpin/THIRDPARTY.yml" \
             || { echo "::error::packaged archive lacks gridpin/THIRDPARTY.yml or carries another copy"; exit 1; }
+          # a musl archive is the one for old systems: it must not ask the loader for any shared library
+          if [[ "${{ matrix.target }}" == *-musl ]]; then
+            file gridpin
+            file gridpin | grep -Eq 'static(ally|-pie) linked' \
+              || { echo "::error::the musl binary is not statically linked"; exit 1; }
+          fi
       - name: Attach to release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -474,8 +487,112 @@ jobs:
   # on the GitHub release — the owner's signature over attestation.json, that the document covers
   # the whole public sheet set, and that it names a concrete public snapshot. Missing or unsigned
   # means the release fails here, before SHA256SUMS is attached.
+  # The loadable SQLite extension (integrations/sqlite) — ANSWERS §304 p. 2. The same build.sh and the same pinned
+  # header as the CI job `sqlite`, which runs on every pull request first (PRINCIPLES 5.4-bis, sixth source).
+  sqlite:
+    needs: [check, ci-passed]
+    permissions:
+      contents: write  # attaches the extension archives to the draft release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-22.04: glibc 2.35, so the .so loads on systems older than the runner of the day
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.93.0"  # pinned: a floating input can change the build between runs
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: SQLite header (amalgamation 3.54.1, pinned by checksum)
+        run: python3 .github/sqlite_header.py "$RUNNER_TEMP/sqlite"
+      - name: Build the extension
+        run: SQLITE_INCLUDE="$RUNNER_TEMP/sqlite" sh integrations/sqlite/build.sh
+      - name: Package (tar.gz / zip) with LICENSE and the third-party license texts
+        run: |
+          cd integrations/sqlite
+          ext=$(ls gridpin_sqlite.so gridpin_sqlite.dylib gridpin_sqlite.dll 2>/dev/null)
+          cp "$GITHUB_WORKSPACE/LICENSE" .
+          cp "$GITHUB_WORKSPACE/gridpin-ffi/THIRDPARTY.yml" .
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            7z a gridpin_sqlite-${{ matrix.target }}.zip "$ext" LICENSE THIRDPARTY.yml README.md
+          else
+            tar czf gridpin_sqlite-${{ matrix.target }}.tar.gz "$ext" LICENSE THIRDPARTY.yml README.md
+          fi
+      - name: Smoke — the packaged extension loads into SQLite and its engine answers
+        run: |
+          cd integrations/sqlite && mkdir -p _smoke && cd _smoke
+          if [[ "${{ runner.os }}" == "Windows" ]]; then 7z x ../gridpin_sqlite-*.zip; else tar xzf ../gridpin_sqlite-*.tar.gz; fi
+          cmp -s THIRDPARTY.yml "$GITHUB_WORKSPACE/gridpin-ffi/THIRDPARTY.yml" && test -f LICENSE
+          python3 "$GITHUB_WORKSPACE/.github/sqlite_smoke.py" .
+      - name: Attach to release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          draft: true
+          overwrite_files: false  # never replace an attached asset (see the cli job)
+          files: |
+            integrations/sqlite/gridpin_sqlite-*.tar.gz
+            integrations/sqlite/gridpin_sqlite-*.zip
+
+  # Linux packages of the CLI: .deb and .rpm of the static musl binary (no library dependencies) — ANSWERS §304 p. 3.
+  # The CI job `linux-packages` builds and installs the same packages on every pull request first.
+  linux-packages:
+    needs: [check, ci-passed]
+    permissions:
+      contents: write  # attaches the packages to the draft release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.93.0"  # pinned: a floating input can change the build between runs
+          targets: ${{ matrix.target }}
+      - name: Packaging tools (pinned)
+        run: cargo install --locked cargo-deb@3.8.0 cargo-generate-rpm@0.21.1
+      - name: Build and package
+        run: sh .github/linux_packages.sh ${{ matrix.target }}
+      - name: Smoke — the .deb installs, the binary reports the tag version, the license files are in place
+        run: |
+          sudo dpkg -i gridpin/target/${{ matrix.target }}/debian/gridpin_*.deb
+          v=$(/usr/bin/gridpin --version); echo "$v"
+          [[ "$v" == *"${GITHUB_REF_NAME#v}"* ]] || { echo "::error::package reports '$v', tag is $GITHUB_REF_NAME"; exit 1; }
+          cmp -s /usr/share/doc/gridpin/THIRDPARTY.yml gridpin/THIRDPARTY.yml && test -f /usr/share/doc/gridpin/LICENSE
+          command -v rpm >/dev/null || sudo apt-get install -y -qq rpm
+          rpm -qlp gridpin/target/${{ matrix.target }}/generate-rpm/gridpin-*.rpm | tee rpm.txt
+          grep -qx /usr/bin/gridpin rpm.txt && grep -q LICENSE rpm.txt && grep -q THIRDPARTY.yml rpm.txt
+      - name: Attach to release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          draft: true
+          overwrite_files: false  # never replace an attached asset (see the cli job)
+          files: |
+            gridpin/target/${{ matrix.target }}/debian/gridpin_*.deb
+            gridpin/target/${{ matrix.target }}/generate-rpm/gridpin-*.rpm
+
   provenance:
-    needs: [cli, wheels, duckdb-extension]
+    needs: [cli, wheels, duckdb-extension, sqlite, linux-packages]
     runs-on: ubuntu-latest
     permissions:
       contents: read

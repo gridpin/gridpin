@@ -15,7 +15,7 @@ from . import engine, sheets
 
 PER_SHEET = 3
 # Half-size of the box shown around a result, in degrees, by precision.
-SPAN = {"house": 0.001, "interp": 0.001, "near": 0.002, "street": 0.004, "postcode": 0.02}
+SPAN = {"house": 0.001, "interp": 0.001, "near": 0.002, "intersection": 0.002, "street": 0.004, "postcode": 0.02}
 
 
 def downloaded():

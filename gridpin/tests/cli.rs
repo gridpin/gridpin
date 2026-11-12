@@ -222,8 +222,16 @@ fn batch_blank_line_is_not_silently_dropped() {
         "a blank line makes the batch malformed, not silently dropped"
     );
     assert!(!output.exists(), "a malformed batch publishes nothing");
+    // revision 0.9.0 (ANSWERS §308): the rows before the bad line stay in the partial file, cut at that line, so a
+    // fixed input continues with --resume instead of losing them; nothing after the bad line is kept
+    let partial = dir.join("out.jsonl.partial");
+    assert_eq!(
+        std::fs::read_to_string(&partial).unwrap().lines().count(),
+        1,
+        "the partial file is cut at the blank line"
+    );
 
-    // and a clean 3-line file yields exactly 3 output lines (cardinality preserved)
+    // and a clean 3-line file yields exactly 3 output lines (cardinality preserved), continuing the kept row
     std::fs::write(
         &input,
         "{\"q\":\"rue a 1 ville\"}\n{\"q\":\"rue a 1 ville\"}\n{\"q\":\"rue a 1 ville\"}\n",
@@ -235,10 +243,12 @@ fn batch_blank_line_is_not_silently_dropped() {
             bin.to_str().unwrap(),
             input.to_str().unwrap(),
             output.to_str().unwrap(),
+            "--resume",
         ])
         .output()
         .unwrap();
     assert!(st.status.success());
+    assert!(!partial.exists(), "the partial file became the output");
     assert_eq!(
         std::fs::read_to_string(&output).unwrap().lines().count(),
         3,

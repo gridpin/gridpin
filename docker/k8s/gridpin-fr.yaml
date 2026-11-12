@@ -1,0 +1,29 @@
+# The chart's output for one country (fr), flat: kubectl apply -f gridpin-fr.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gridpin-fr
+  labels: {app: gridpin, country: "fr"}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: gridpin, country: "fr"}
+  template:
+    metadata:
+      labels: {app: gridpin, country: "fr"}
+    spec:
+      containers:
+        - name: gridpin
+          image: "ghcr.io/gridpin/gridpin:fr-0.9.0"
+          ports: [{containerPort: 8080}]
+          readinessProbe:
+            exec: {command: ["/usr/local/bin/gridpin", "serve", "--probe", "http://127.0.0.1:8080/health"]}
+          resources: {requests: {cpu: 250m, memory: 512Mi}, limits: {memory: 2Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gridpin-fr
+spec:
+  selector: {app: gridpin, country: "fr"}
+  ports: [{port: 8080, targetPort: 8080}]

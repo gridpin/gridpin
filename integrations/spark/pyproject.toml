@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gridpin-spark"
+version = "0.1.0"
+description = "Offline geocoding in Spark and Databricks with GridPin: an iterator pandas UDF over one local file per country, no API key, no network"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["spark", "pyspark", "databricks", "geocoding", "geocoder", "offline", "pandas-udf", "gis"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: GIS",
+]
+# pyspark is the cluster's own; the engine and the batch function come from the gridpin wheel.
+dependencies = ["gridpin[pandas]>=0.9,<0.10", "pyarrow>=11"]
+
+[project.optional-dependencies]
+local = ["pyspark>=3.5"]
+
+[project.urls]
+Homepage = "https://gridpin.dev"
+Documentation = "https://gridpin.dev/docs"
+Repository = "https://github.com/gridpin/gridpin"
+Issues = "https://github.com/gridpin/gridpin/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]

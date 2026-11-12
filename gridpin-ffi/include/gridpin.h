@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-#define GRIDPIN_ABI_VERSION 1
+#define GRIDPIN_ABI_VERSION 2
 
 /* Operations for gridpin_invoke and gridpin_invoke_k. */
 #define GRIDPIN_OP_LOAD 0     /* texts: sheet path, the same in every non-null row */
@@ -42,7 +42,8 @@ void gridpin_state_drop(GridpinState *state);
 
 /* geocode / reverse rows: the best hit as a JSON object, "{}" when nothing matches. Every hit carries
  * "weak": true when the answer needs a check before use (city level, low confidence, or a fuzzy
- * street with middling confidence). */
+ * street with middling confidence), and "match_level" / "match_status": how far the answer reaches
+ * (PointAddress, StreetAddress, StreetAddressExt, StreetName, Postal, Locality, POI) and M or T. */
 GridpinResponse *gridpin_invoke(const GridpinState *state, uint32_t operation, const GridpinText *texts,
                                 const double *lats, const double *lons, const uint8_t *nulls, size_t len);
 
@@ -50,6 +51,13 @@ GridpinResponse *gridpin_invoke(const GridpinState *state, uint32_t operation, c
 GridpinResponse *gridpin_invoke_k(const GridpinState *state, uint32_t operation, size_t k,
                                   const GridpinText *texts, const double *lats, const double *lons,
                                   const uint8_t *nulls, size_t len);
+
+/* As gridpin_invoke_k, with extra answer fields: `with` holds the spec of `gridpin batch --with`
+ * ("h3,geohash,placekey,codes,street_point,links,provenance"; null or empty: none), and every hit gets an
+ * "extras" object. An engine built without them fails the call with a message. ABI version 2. */
+GridpinResponse *gridpin_invoke_with(const GridpinState *state, uint32_t operation, size_t k,
+                                     const GridpinText *with, const GridpinText *texts, const double *lats,
+                                     const double *lons, const uint8_t *nulls, size_t len);
 
 /* Writes row `row` into *output. Returns 0 for a value, 1 if the whole call failed (*output then
  * holds the error message), 2 for an invalid response or output pointer. A null row has

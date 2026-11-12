@@ -38,6 +38,9 @@ pub struct Sheet {
     pub file: String,
     pub size: u64,
     pub sha256: String,
+    /// DOI of the sheet's deposit (Zenodo), when one is recorded; `gridpin cite` prints it
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub doi: String,
 }
 
 pub fn registry() -> &'static Registry {
@@ -261,6 +264,25 @@ mod tests {
         }
     }
 
+    /// A DOI goes into every citation `gridpin cite` prints, so a wrong one spreads into papers: it is the bare
+    /// name `10.<registrant>/<suffix>`, without a resolver prefix or spaces.
+    #[test]
+    fn a_recorded_doi_is_a_bare_doi_name() {
+        for s in registry().sheets.iter().filter(|s| !s.doi.is_empty()) {
+            let (prefix, suffix) = s.doi.split_once('/').unwrap_or(("", ""));
+            let registrant = prefix.strip_prefix("10.").unwrap_or("");
+            assert!(
+                (4..=9).contains(&registrant.len())
+                    && registrant.bytes().all(|b| b.is_ascii_digit())
+                    && !suffix.is_empty()
+                    && !s.doi.chars().any(char::is_whitespace),
+                "{}: {:?} is not a DOI name like 10.5281/zenodo.1",
+                s.code,
+                s.doi
+            );
+        }
+    }
+
     #[test]
     fn countries_resolve_by_code_or_name_in_any_case() {
         let first = &registry().sheets[0];
@@ -317,6 +339,7 @@ mod tests {
             file: "x.bin".into(),
             size,
             sha256: sha256.into(),
+            doi: String::new(),
         };
         assert_eq!(verify(&file, &sheet(3, abc)).unwrap(), Verdict::Ok);
         assert_eq!(

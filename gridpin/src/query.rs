@@ -63,16 +63,23 @@ struct NamedLocality {
 /// Owns a file mapping so it is freed on Drop: opening a sheet no longer permanently
 /// leaks the mmap, so repeated open/close (Python/DuckDB churn) reclaims memory. The Index holds it
 /// in an `Arc`, so a test can assert the Index dropped its reference deterministically.
-struct Mapping(Mmap);
+/// A sheet held in memory (`Index::from_bytes`) owns its bytes the same way: in WebAssembly there are no files.
+enum Mapping {
+    Mapped(Mmap),
+    Owned(Vec<u8>),
+}
 impl std::ops::Deref for Mapping {
-    type Target = Mmap;
-    fn deref(&self) -> &Mmap {
-        &self.0
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Mapping::Mapped(m) => m,
+            Mapping::Owned(v) => v,
+        }
     }
 }
 impl Mapping {
     fn new(m: Mmap) -> Self {
-        Mapping(m)
+        Mapping::Mapped(m)
     }
 }
 
@@ -103,6 +110,34 @@ pub fn hit_is_weak(h: &Hit) -> bool {
         || h.confidence < 0.30
         || (h.flags.contains(&"street_fuzzy") && h.confidence < 0.60)
 }
+
+/// How far the answer reaches, in the words of the Esri `Addr_type` scale, and the match status of
+/// the same scale: `M` matched, `T` tied (`weak`: the engine itself says check it before use). `U`
+/// (unmatched) belongs to a query without an answer, so no hit ever carries it.
+///
+/// Computed from what the answer already says, never stored. `Subaddress`, `StreetMidBlock` and
+/// `PostalExt` of the Esri scale are not produced: a sheet has no units, no block midpoints and no
+/// ZIP+4.
+pub fn match_level(h: &Hit) -> (&'static str, char) {
+    let level = if h.flags.contains(&"poi_layer") {
+        "POI"
+    } else {
+        match h.precision {
+            "house" => "PointAddress",
+            "interp" => "StreetAddress",
+            // the neighbour's number on the asked street, not the asked number
+            "near" => "StreetAddressExt",
+            "street" => "StreetName",
+            "intersection" => "StreetInt",
+            "city" if h.flags.contains(&POSTAL_PLACE) => "Postal",
+            _ => "Locality", // "city", and "approximate": a reverse point far from any house
+        }
+    };
+    (level, if hit_is_weak(h) { 'T' } else { 'M' })
+}
+
+/// Marks a place answer read from a postcode alone (`place_of_code`), so `match_level` can say so.
+const POSTAL_PLACE: &str = "postal_place";
 
 /// Query with an optional POI layer. Without `poi` the behavior is identical to
 /// `addr.query()` (the cascade is strictly opt-in). POI answers carry a "poi_layer" flag.
@@ -299,11 +334,309 @@ pub(crate) fn de_five_digit_postcode_trace(raw: &str) -> Option<String> {
         .map(|token| format!("PLZ token preserved: {token}"))
 }
 
+/// How a country calls itself in the queries we see, normalized.
+fn own_country_names(country: Option<&str>) -> &'static [&'static str] {
+    match country {
+        Some("es") => &["espana", "espanya", "spain"],
+        Some("br") => &["brasil", "brazil"],
+        _ => &[],
+    }
+}
+
+/// `raw` without its last comma segment, and that segment normalized, when the segment is one of `names`
+/// as a whole and something stands before it.
+fn closing_country_segment<'a>(raw: &'a str, names: &[&str]) -> Option<(&'a str, String)> {
+    let (head, tail) = raw.rsplit_once(',')?;
+    let tail = normalize(tail);
+    (!head.trim().is_empty() && names.contains(&tail.as_str())).then_some((head, tail))
+}
+
 pub fn query_cascade(addr: &Index, poi: Option<&Index>, q: &str, k: usize) -> Vec<Hit> {
     let k = bound_k(k); // cap result count at the public boundary
     let q = bound_query(q); // and the input length, before either index normalizes it
+    if let Some(hits) = own_answer(addr, q, k) {
+        return hits;
+    }
+    // a town of another country, named with its country ("Berlin, Germany" on the sheet of Spain): only the world
+    // sheet can answer it, and only with a town of that country (09.11.2026, ANSWERS §294: "Toronto, Canada" got a
+    // Spanish "Cañada", "Berlin, Germany" nothing)
+    if let Some(hits) = foreign_town(addr, q, k) {
+        return hits;
+    }
+    let q = addr.without_country_segment(q);
+    let exonym = exonym_rewrite(addr, q);
+    let q = exonym.as_deref().unwrap_or(q);
+    if let Some(hits) = addr.query_by_form(q, k) {
+        return hits;
+    }
     let hits = addr.query(q, k);
-    escalate_to_poi(poi, hits, q, k)
+    if let Some(crossing) = addr.crossing_answer(q, &hits) {
+        return crossing;
+    }
+    let hits = escalate_to_poi(poi, hits, q, k);
+    match addr.also_after() {
+        // the country's own town wins when the sheet names it exactly (every town answer is weak by rule)
+        Some(world)
+            if hits
+                .first()
+                .is_none_or(|h| h.precision == "city" && !h.flags.contains(&"place_exact")) =>
+        {
+            world_answer(world, q, k, None).unwrap_or(hits)
+        }
+        _ => hits,
+    }
+}
+
+/// Exonyms of towns (`exonyms.tsv`): a place name as people of another language write it -> its local name.
+const EXONYMS: &str = include_str!("exonyms.tsv");
+
+/// The query with its last comma segment put in the local name, when that segment is an exonym ("Marienplatz 1,
+/// Munich"), is not itself a commune of this sheet, and its local name is one. Data, read for every sheet alike;
+/// None for every other query, so the path of all other queries is untouched.
+fn exonym_rewrite(addr: &Index, q: &str) -> Option<String> {
+    let (head, tail) = q.rsplit_once(',')?;
+    let key = normalize(tail);
+    if key.is_empty() || head.trim().is_empty() || addr.has_commune(&key) {
+        return None;
+    }
+    let local = EXONYMS
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.split_once('\t'))
+        .find(|(e, _)| normalize(e) == key)
+        .map(|(_, local)| local)?;
+    addr.has_commune(&normalize(local))
+        .then(|| format!("{head}, {local}"))
+}
+
+/// A query whose last comma segment names a country other than the sheet's, on a sheet with a world sheet after it:
+/// the towns of that country in the world sheet, or no answer at all; never an answer of the address sheet, which
+/// cannot hold a place of another country. None for every other query, so their path is untouched.
+fn foreign_town(addr: &Index, q: &str, k: usize) -> Option<Vec<Hit>> {
+    let world = addr.also_after()?;
+    let cc = crate::country_names::named_at_end(q)?;
+    if addr
+        .country()
+        .is_some_and(|own| own.eq_ignore_ascii_case(&cc))
+    {
+        return None;
+    }
+    let (head, _) = q.rsplit_once(',')?;
+    Some(world_answer(world, head, k, Some(&cc)).unwrap_or_default())
+}
+
+/// A town of the sheet asked after the address sheet: the query as its exact name, answered as a town; with a
+/// country, only the towns whose region (ISO 3166-2, or the country code itself) is of that country.
+fn world_answer(world: &Index, q: &str, k: usize, country: Option<&str>) -> Option<Vec<Hit>> {
+    let mut hits = world.query(q.trim(), MAX_K);
+    hits.retain(|h| h.precision == "street" && h.flags.contains(&"street_exact"));
+    // namesakes tie on the name: the one known by more names (other languages) is the one meant ("Paris" is Paris,
+    // not a village of Nepal); the sheet holds no population, its names are the measure (09.11.2026: 32 of 32
+    // capitals and big cities right on the table, 16 of 32 before)
+    let mut named: Vec<(usize, Hit)> = hits
+        .into_iter()
+        .map(|h| (world.names_at(h.lat, h.lon), h))
+        .collect();
+    named.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut hits: Vec<Hit> = named.into_iter().map(|(_, h)| h).collect();
+    if let Some(cc) = country {
+        let cc = cc.to_ascii_uppercase();
+        hits.retain(|h| {
+            let region = h.commune.to_ascii_uppercase();
+            region == cc || region.starts_with(&format!("{cc}-"))
+        });
+    }
+    hits.truncate(k);
+    if hits.is_empty() {
+        return None;
+    }
+    for h in &mut hits {
+        h.precision = "city";
+        h.flags = vec!["world_place", "place_exact"];
+        h.confidence = 0.6;
+    }
+    Some(hits)
+}
+
+/// How much the answer may differ from the query: `--strict` keeps only answers that match the query as
+/// written, `--lenient` lets a street of 9-11 letters be two edits away instead of one. A parameter of the
+/// path, not of a country's rules; set for one call with `with_tolerance`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tolerance {
+    #[default]
+    Default,
+    Strict,
+    Lenient,
+}
+
+thread_local! { static TOLERANCE: std::cell::Cell<Tolerance> = const { std::cell::Cell::new(Tolerance::Default) }; }
+
+fn tolerance() -> Tolerance {
+    TOLERANCE.with(|t| t.get())
+}
+
+/// Run `f` with a tolerance on this thread; the previous one comes back even if `f` unwinds. Strict also
+/// drops what it does not keep (`strict_keeps`) from the answers.
+pub fn with_tolerance(t: Tolerance, f: impl FnOnce() -> Vec<Hit>) -> Vec<Hit> {
+    struct Restore(Tolerance);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TOLERANCE.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(TOLERANCE.with(|c| c.replace(t)));
+    let mut hits = f();
+    if t == Tolerance::Strict {
+        hits.retain(strict_keeps);
+    }
+    hits
+}
+
+/// What `--strict` keeps: no fuzzy street, no commune read from the start of its name, no interpolated or
+/// neighbour's point, nothing the engine itself calls weak.
+pub fn strict_keeps(h: &Hit) -> bool {
+    !h.flags
+        .iter()
+        .any(|f| matches!(*f, "street_fuzzy" | "commune_prefix"))
+        && !matches!(h.precision, "interp" | "near")
+        && !hit_is_weak(h)
+}
+
+impl Index {
+    /// A query that is a coordinate or a special address, answered without the address path; `None` for
+    /// every other query, which then goes the old way untouched (`forms`).
+    pub(crate) fn query_by_form(&self, q: &str, k: usize) -> Option<Vec<Hit>> {
+        if let Some((lat, lon, kind)) = crate::forms::point(q) {
+            let mut hits = self.reverse_lenient(lat, lon, k);
+            for h in &mut hits {
+                h.flags.push("coords_in");
+                h.flags.push(kind.flag());
+            }
+            return Some(hits);
+        }
+        if let Some(middle) = crate::forms::block(q) {
+            let mut hits = self.query(&middle, k);
+            for h in &mut hits {
+                h.flags.push("block");
+            }
+            return Some(hits);
+        }
+        let special = crate::forms::special(q)?;
+        let flag = special.kind.flag();
+        let whole = self.query(q, k);
+        if let Some(top) = whole.first() {
+            // "Apartado 13, entrada por ..." in Mexico City: Calle Apartado is a street, and the line is its address
+            let word = normalize(special.lead);
+            if normalize(&top.street).split_whitespace().any(|w| w == word) {
+                return None;
+            }
+            // "c/o Reception, via Cura 1 - Ravenna": the line read whole already reaches a house
+            if special.kind == crate::forms::SpecialKind::CareOf && top.precision == "house" {
+                let mut hits = whole;
+                hits.iter_mut().for_each(|h| h.flags.push(flag));
+                return Some(hits);
+            }
+        }
+        if special.rest.trim().is_empty() {
+            return Some(Vec::new());
+        }
+        let mut hits = self.query(&special.rest, k);
+        // "c/o Jacobs University Bremen Campusring 1 Bremen, 28759Bremen": what follows the first comma is not
+        // always the address, and a weak answer to it ("Bremen" street 190 km away) is worse than the old way,
+        // which answers the line whole or stays silent (PRINCIPLES 1.3-bis; pin 0.9.0, DE 5k dirty row 3271)
+        if special.kind == crate::forms::SpecialKind::CareOf && hits.first().is_none_or(hit_is_weak)
+        {
+            return None;
+        }
+        if special.kind != crate::forms::SpecialKind::CareOf {
+            // a box, a military post, a milepost or an exit has no door: only the place it names stands, and a
+            // place answer is weak by itself (`hit_is_weak`)
+            hits.retain(|h| h.precision == "city");
+        }
+        for h in &mut hits {
+            h.flags.push(flag);
+        }
+        Some(hits)
+    }
+
+    /// "Main St & 2nd Ave, Springfield": when the whole line is not itself a street the answer names, the two
+    /// streets are looked up in one commune and the point is the middle of the closest pair of their houses,
+    /// if they come within `CROSSING_GAP_M`. A street not found, or two streets that never come that close:
+    /// `None`, and the old answer stands.
+    pub(crate) fn crossing_answer(&self, q: &str, hits: &[Hit]) -> Option<Vec<Hit>> {
+        let c = crate::forms::crossing(q)?;
+        // "Calle de Ramón y Cajal" is one street when the name found has the two words around the connector
+        // side by side with one word between them ("avenida ramon y cajal")
+        let one_street = hits.first().is_some_and(|h| {
+            let name = normalize(&h.street);
+            let words: Vec<&str> = name.split_whitespace().collect();
+            let (a, b) = (normalize(&c.first), normalize(&c.second));
+            match (a.split_whitespace().last(), b.split_whitespace().next()) {
+                (Some(last), Some(first)) => {
+                    words.windows(3).any(|w| w[0] == last && w[2] == first)
+                }
+                _ => false,
+            }
+        });
+        if one_street {
+            return None;
+        }
+        let streets = |name: &str| -> Vec<Hit> {
+            let line = if c.place.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name}, {}", c.place)
+            };
+            self.query(&line, 5)
+                .into_iter()
+                .filter(|h| matches!(h.precision, "street" | "house" | "interp" | "near"))
+                .collect()
+        };
+        let (first, second) = (streets(&c.first), streets(&c.second));
+        let pairs: Vec<(&Hit, &Hit)> = first
+            .iter()
+            .flat_map(|a| second.iter().map(move |b| (a, b)))
+            .filter(|(a, b)| a.commune == b.commune && a.street != b.street)
+            .collect();
+        if pairs.is_empty() {
+            return None;
+        }
+        let best = pairs
+            .iter()
+            .filter_map(|(a, b)| {
+                self.crossing_point((&a.street, &a.commune), (&b.street, &b.commune))
+                    .map(|p| (p, *a, *b))
+            })
+            .min_by(|x, y| x.0 .2.total_cmp(&y.0 .2));
+        // both streets there but apart: the old answer stands (the line may be one street the sheet writes
+        // another way, "Calle de Ramón y Cajal" as "Avenida Ramon Y Cajal")
+        let ((lat, lon, _gap), a, b) = best?;
+        let mut flags = vec!["intersection"];
+        for f in ["street_exact", "street_fuzzy"] {
+            if a.flags.contains(&f) || b.flags.contains(&f) {
+                flags.push(f);
+                break;
+            }
+        }
+        Some(vec![Hit {
+            lat,
+            lon,
+            precision: "intersection",
+            score: a.score.min(b.score),
+            confidence: a.confidence.min(b.confidence),
+            street: format!("{} & {}", a.street, b.street),
+            housenumber: None,
+            commune: a.commune.clone(),
+            postcode: if a.postcode == b.postcode {
+                a.postcode.clone()
+            } else {
+                String::new()
+            },
+            flags,
+            region: self.admin_at(lat, lon),
+            distance_m: None,
+        }])
+    }
 }
 
 /// Forward cascade with an explicit location hint. The address candidate set is widened with
@@ -319,6 +652,7 @@ pub fn query_cascade_near(
 ) -> std::result::Result<Vec<Hit>, String> {
     let k = bound_k(k);
     let q = bound_query(q);
+    let q = addr.without_country_segment(q);
     let hits = addr.query_near(q, k, lat, lon)?;
     Ok(escalate_to_poi(poi, hits, q, k))
 }
@@ -375,8 +709,149 @@ pub fn query_structured_cascade(
     escalate_to_poi(poi, hits, &poi_q, k)
 }
 
+/// An address already split into fields (CSV `--columns`, `POST /v1/geocode`, Python mapping).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AddressFields<'a> {
+    pub street: &'a str,
+    pub number: Option<&'a str>,
+    pub city: &'a str,
+    pub region: Option<&'a str>,
+    pub postcode: Option<&'a str>,
+}
+
+impl AddressFields<'_> {
+    /// The fields as one line in the order the sheet's country writes them: "123 Main St, City, ST 12345"
+    /// where the street type trails the name, "Calle Mayor, 5, 28001 Madrid" elsewhere.
+    fn line(&self, number_first: bool) -> String {
+        let join = |parts: &[&str], sep: &str| {
+            parts
+                .iter()
+                .copied()
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join(sep)
+        };
+        let (number, region, postcode) = (
+            self.number.unwrap_or(""),
+            self.region.unwrap_or(""),
+            self.postcode.unwrap_or(""),
+        );
+        if number_first {
+            let street = join(&[number, self.street], " ");
+            let tail = join(&[region, postcode], " ");
+            join(&[&street, self.city, &tail], ", ")
+        } else {
+            let place = join(&[postcode, self.city], " ");
+            join(&[self.street, number, &place, region], ", ")
+        }
+    }
+}
+
+/// The field reading stands on its own only at an exact door or a range on an exact street.
+fn fields_settle_it(h: &Hit) -> bool {
+    matches!(h.precision, "house" | "interp")
+        && h.flags.contains(&"street_exact")
+        && !hit_is_weak(h)
+}
+
+/// The field reading has no region: a named one is checked here. A written postcode that matched already says
+/// where the answer is; otherwise it stands near a place of that name in that region, and a city the table does
+/// not place leaves the question to the line, which reads the region itself ("100 Main St, Springfield, IL").
+fn field_answer_in_region(h: &Hit, fields: &AddressFields) -> bool {
+    let Some(region) = fields.region else {
+        return true;
+    };
+    if h.flags.contains(&"pc_exact") {
+        return true;
+    }
+    let code = region_code(&crate::rules::rules().city_tail, region);
+    let points = code.map_or_else(Vec::new, |c| {
+        commune_region_points(&normalize(fields.city), &c)
+    });
+    points
+        .iter()
+        .any(|&(lat, lon)| Index::dist_km(lat, lon, h.lat, h.lon) <= COMMUNE_REGION_RADIUS_KM)
+}
+
+/// Answer an address given as fields. The fields are read as such first, and that reading is kept only
+/// when it lands on an exact house of an exact street: the field path has no parsing fallbacks (particles,
+/// region and umbrella rules, street-form variants), and by itself it answered fewer addresses than the
+/// same fields joined (07.11.2026, clean sets: Spain 473 against 505, United States 520 against 608).
+/// Otherwise the joined line decides, and the field reading is the answer only when the line finds nothing.
+pub fn query_fields_cascade(
+    addr: &Index,
+    poi: Option<&Index>,
+    fields: AddressFields,
+    k: usize,
+) -> Vec<Hit> {
+    let by_fields = query_structured_cascade(
+        addr,
+        poi,
+        fields.street,
+        fields.number,
+        fields.city,
+        fields.postcode,
+        k,
+    );
+    let _rules = crate::rules::scope(addr.rules);
+    if by_fields
+        .first()
+        .is_some_and(|h| fields_settle_it(h) && field_answer_in_region(h, &fields))
+    {
+        return by_fields;
+    }
+    let number_first = street_type_last();
+    let by_line = query_cascade(addr, poi, &fields.line(number_first), k);
+    if by_line.is_empty() {
+        by_fields
+    } else {
+        by_line
+    }
+}
+
 /// Shared cascade tail: if `hits` from the address index is weak/empty and a POI layer exists,
 /// query it with `poi_q` and prefer the POI answer when it is more confident.
+/// The answer of the sheet of one's own places (`set_also`), when the query names one of them.
+///
+/// A place of that sheet is a street without houses, so the engine's own confidence there is the one of a street
+/// without a town (≈ 0.1); here the name decides: the name as written gives 0.90, a name one or two letters off
+/// (`OWN_FUZZY_EDITS`, the whole name) gives 0.55, which the engine calls weak (a person confirms it). The town of the query is often not a group of
+/// the sheet ("Ensimag, Saint-Martin-d'Hères"): the trailing segments are dropped one by one, the first stays.
+pub const OWN_FUZZY_EDITS: usize = 2;
+
+fn own_answer(addr: &Index, q: &str, k: usize) -> Option<Vec<Hit>> {
+    let own = addr.also()?;
+    let segments: Vec<&str> = q.split(',').collect();
+    (1..=segments.len()).rev().find_map(|n| {
+        let part = segments[..n].join(",");
+        let mut hits = own.query(part.trim(), k);
+        hits.retain(|h| h.precision == "street");
+        let exact = hits.first()?.flags.contains(&"street_exact");
+        // a fuzzy answer is the whole name a few letters off, not one word of a long name ("l'accueil" is not
+        // "Accueil Étudiant de l'Université", 08.11.2026)
+        let near = |h: &Hit| {
+            let (a, b): (Vec<char>, Vec<char>) = (
+                normalize(&part).chars().collect(),
+                normalize(&h.street).chars().collect(),
+            );
+            lev(&a, &b) <= OWN_FUZZY_EDITS
+        };
+        let fuzzy = hits[0].flags.contains(&"street_fuzzy") && near(&hits[0]);
+        if !(exact || fuzzy) {
+            return None;
+        }
+        for h in &mut hits {
+            h.confidence = if h.flags.contains(&"street_exact") {
+                0.90
+            } else {
+                0.55
+            };
+            h.flags.push("own_sheet");
+        }
+        Some(hits)
+    })
+}
+
 fn escalate_to_poi(poi: Option<&Index>, hits: Vec<Hit>, poi_q: &str, k: usize) -> Vec<Hit> {
     let Some(p) = poi else { return hits };
     if !hits.first().is_none_or(hit_is_weak) {
@@ -655,6 +1130,15 @@ fn region_name_words(entry: &str) -> Vec<String> {
 /// The code of the region a tail segment names: the code itself (any case) when it is listed in
 /// `regions`, or the CODE of a `region_names` entry written "name=CODE". A name without a code
 /// is a region for the grammar but anchors nothing.
+/// Does this comma segment name a region of the sheet — a code ("CA"), a name ("California") or a code with its postal
+/// code ("CA 90005")? A server of several sheets asks it before reading the segment as a country: "…, Los Angeles, CA"
+/// names California, not Canada (revision 0.9.0, 11.11.2026).
+pub fn names_region_of(idx: &Index, segment: &str) -> bool {
+    let cfg = &idx.rule_set().city_tail;
+    !segment.trim().is_empty()
+        && (region_code(cfg, segment).is_some() || split_region_postal(cfg, segment).is_some())
+}
+
 fn region_code(cfg: &HashMap<String, String>, segment: &str) -> Option<String> {
     let trimmed = segment.trim();
     if !trimmed.contains(' ')
@@ -871,7 +1355,11 @@ fn glued_city_region(
     end: usize,
     has_form: &dyn Fn(&str) -> bool,
 ) -> Option<String> {
-    if !has_form("region_postal") || end == 0 {
+    // "233 S Wacker Dr Chicago IL 60606": no comma at all (end 0), the one segment holds the street, the city and
+    // the tail. The region and the code split off here as for "…, Chicago IL 60606"; street_glued_to_city then
+    // cuts the city from the street, and only on a sheet whose type trails the name and for a segment opened by
+    // the house number — any other rebuilt query puts the city first and the grammar refuses it (ANSWERS §300).
+    if !has_form("region_postal") {
         return None;
     }
     let words: Vec<&str> = parts[end].split_whitespace().collect();
@@ -2956,7 +3444,14 @@ fn city_tail_choose_region(
     city_tail_choose(original, city, retry)
 }
 
-/// One answer. Serialized by hand (below) so every JSON surface also carries `weak`.
+mod houses;
+pub use houses::{
+    cell_corner, distance_m, parse_circle, Area, BBox, HouseFilter, HouseRow, PolygonSet,
+    RegionSet, StreetHouse, Suggestion, WalkStats, SUGGEST_MIN_CHARS,
+};
+
+/// One answer. Serialized by hand (below) so every JSON surface also carries `weak`, `match_level`
+/// and `match_status`.
 #[derive(Clone)]
 pub struct Hit {
     pub lat: f64,
@@ -2977,7 +3472,8 @@ pub struct Hit {
     /// match flags for output (explainability): street_exact/street_fuzzy,
     /// commune_exact/commune_prefix, house_rep, pc_exact/pc_dept, ml.
     /// City-only provenance: place_exact (exact commune name) or
-    /// place_prefix_group (prefix commune group); exactly one per city_hit.
+    /// place_prefix_group (prefix commune group); exactly one per city_hit. A place read from a
+    /// postcode alone also carries postal_place.
     pub flags: Vec<&'static str>,
     /// administrative region (Who's on First, reverse point-in-polygon).
     pub region: Option<String>,
@@ -2987,14 +3483,15 @@ pub struct Hit {
 /// Field for field what `#[derive(Serialize)]` wrote, then `weak`: the engine's own verdict that
 /// the answer needs a check before use (`hit_is_weak`, the rule of the POI cascade). It is computed
 /// at output, never stored, so a later change of `confidence` or `flags` cannot leave it stale, and
-/// it comes last so that dropping it gives back the bytes of earlier releases.
+/// it comes after them so that dropping it gives back the bytes of earlier releases. `match_level`
+/// and `match_status` follow on the same terms (`match_level`), so dropping the three gives those bytes.
 impl Serialize for Hit {
     fn serialize<S: serde::Serializer>(
         &self,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut out = serializer.serialize_struct("Hit", 13)?;
+        let mut out = serializer.serialize_struct("Hit", 15)?;
         out.serialize_field("lat", &self.lat)?;
         out.serialize_field("lon", &self.lon)?;
         out.serialize_field("precision", &self.precision)?;
@@ -3021,6 +3518,9 @@ impl Serialize for Hit {
             None => out.skip_field("distance_m")?,
         }
         out.serialize_field("weak", &hit_is_weak(self))?;
+        let (level, status) = match_level(self);
+        out.serialize_field("match_level", level)?;
+        out.serialize_field("match_status", &status)?;
         out.end()
     }
 }
@@ -6260,6 +6760,9 @@ pub struct Index {
     admin: Vec<AdminRegion>,
     /// SEC_META (v6): provenance + identity pairs; empty on sheets built without --meta.
     meta: Vec<(String, String)>,
+    /// A sheet of one's own places asked before this one (`--also`; `gridpin build --places`).
+    also: Option<Box<Index>>,
+    also_after: Option<Box<Index>>,
 }
 
 impl Index {
@@ -6314,6 +6817,21 @@ impl Index {
             Self::open_mapped(mmap, data, path)
         }))
         .map_err(|_| anyhow::anyhow!("{path:?}: corrupt index (panic while reading sections)"))?
+    }
+
+    /// A sheet from bytes already in memory (WebAssembly, a sheet read from a network or a database): the same
+    /// checks and the same answers as `open` on a file with these bytes; `name` stands for the file in messages.
+    /// No sidecar file is read beside it.
+    pub fn from_bytes(bytes: Vec<u8>, name: &str) -> Result<Index> {
+        let owned = Arc::new(Mapping::Owned(bytes));
+        // SAFETY: as in `open`: the Vec's heap buffer does not move while the Arc lives, and the Index owns the Arc.
+        let data: &'static [u8] =
+            unsafe { std::mem::transmute::<&[u8], &'static [u8]>(&owned[..]) };
+        let path = Path::new(name).to_path_buf();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            Self::open_mapped(owned, data, &path)
+        }))
+        .map_err(|_| anyhow::anyhow!("{name:?}: corrupt index (panic while reading sections)"))?
     }
 
     fn open_mapped(mmap: Arc<Mapping>, data: &'static [u8], path: &Path) -> Result<Index> {
@@ -6716,6 +7234,8 @@ impl Index {
             area_prominence,
             admin: load_admin(path),
             meta: decode_meta(sl(SEC_META)).unwrap_or_default(),
+            also: None,
+            also_after: None,
         };
         if index.country() == Some("de") {
             index.de_postcode_streets = index.build_de_postcode_streets()?;
@@ -6725,9 +7245,50 @@ impl Index {
         Ok(index)
     }
 
+    /// Ask `own` (a sheet of one's own places) before this sheet: a free-text query that names one of its
+    /// places is answered from it (`own_sheet` among the flags), every other query goes the old way.
+    pub fn set_also(&mut self, own: Index) {
+        self.also = Some(Box::new(own));
+    }
+
+    /// Open `path` as the sheet of one's own places for `set_also`: a POI-layer or lab sheet, never an
+    /// address sheet (that one is the main index or a second `--poi`).
+    pub fn open_also(path: &Path) -> Result<Index> {
+        let idx = Index::open(path)?;
+        if matches!(idx.layer(), Some(l) if l != "poi") {
+            anyhow::bail!(
+                "{path:?} is a '{}' sheet; --also takes a sheet of one's own places (gridpin build --places)",
+                idx.layer().unwrap_or("")
+            );
+        }
+        Ok(idx)
+    }
+
+    /// Ask `places` AFTER this sheet: only when this sheet has no answer, or a town it does not name exactly, a query that is
+    /// exactly the name of one of its places is answered from it as a town (`world_place` among the flags). For
+    /// the world sheet of towns: it never takes a house or a street from the country's sheet.
+    pub fn set_also_after(&mut self, places: Index) {
+        self.also_after = Some(Box::new(places));
+    }
+
+    /// The sheet of places asked after this one, if any.
+    pub fn also_after(&self) -> Option<&Index> {
+        self.also_after.as_deref()
+    }
+
+    /// The sheet of one's own places, if any.
+    pub fn also(&self) -> Option<&Index> {
+        self.also.as_deref()
+    }
+
     /// Provenance/identity pairs from SEC_META (empty on pre-v6-style sheets).
     pub fn meta(&self) -> &[(String, String)] {
         &self.meta
+    }
+
+    /// The bytes of the sheet file as mapped (for its SHA-256 in the provenance card).
+    pub fn file_bytes(&self) -> &[u8] {
+        &self._mmap[..]
     }
 
     /// Whether this sheet carries a usable trained parser / ranking: the build now
@@ -6755,6 +7316,68 @@ impl Index {
     /// Layer kind carried by the sheet: "addresses" or "poi" (v6 identity).
     pub fn layer(&self) -> Option<&str> {
         self.meta_get("layer")
+    }
+
+    /// Is `norm` (already normalized) the exact name of a commune of this sheet?
+    pub fn has_commune(&self, norm: &str) -> bool {
+        self.communes_fst.get(norm.as_bytes()).is_some()
+    }
+
+    /// Does `norm` (already normalized) name a commune of this sheet: its exact name, or the leading words of
+    /// one ("marseille" of "marseille 2e arrondissement")?
+    pub fn names_commune(&self, norm: &str) -> bool {
+        if norm.is_empty() {
+            return false;
+        }
+        if self.has_commune(norm) {
+            return true;
+        }
+        let lo = format!("{norm} ");
+        let hi = format!("{norm}!");
+        self.communes_fst
+            .range()
+            .ge(lo.as_bytes())
+            .lt(hi.as_bytes())
+            .into_stream()
+            .next()
+            .is_some()
+    }
+
+    /// Is the point within NAMED_LOCALITY_RADIUS_KM of a commune that `norm` names (its exact name or the
+    /// leading words of one)? The same radius the engine keeps an answer near a named place with: a city
+    /// split into districts ("Brooklyn" → "Park Slope") is near, another town of the same street is not.
+    pub fn near_commune_named(&self, norm: &str, lat: f64, lon: f64) -> bool {
+        if norm.is_empty() {
+            return false;
+        }
+        let mut ids = self.communes_by_name_raw(norm);
+        let lo = format!("{norm} ");
+        let hi = format!("{norm}!");
+        let mut stream = self
+            .communes_fst
+            .range()
+            .ge(lo.as_bytes())
+            .lt(hi.as_bytes())
+            .into_stream();
+        while let Some((name, _)) = stream.next() {
+            if let Ok(name) = std::str::from_utf8(name) {
+                ids.extend(self.communes_by_name_raw(name));
+            }
+        }
+        ids.into_iter().any(|id| {
+            let (clat, clon) = self.commune_coord(id);
+            Self::dist_km(clat, clon, lat, lon) <= NAMED_LOCALITY_RADIUS_KM
+        })
+    }
+
+    /// The rule set this sheet carries (its own SEC_RULES, else the built-in defaults).
+    pub fn rule_set(&self) -> &'static crate::rules::Rules {
+        self.rules
+    }
+
+    /// Is `word` (already normalized) a street-type word in this sheet's own rules?
+    pub fn is_street_type(&self, word: &str) -> bool {
+        self.rules.is_street_type(word)
     }
 
     /// Administrative region of a point (lat,lon) via WOF polygons — bbox filter + ray-cast PIP.
@@ -7503,6 +8126,43 @@ impl Index {
     /// communes). A run that is part of a longer street of the answer names no place ("6 Place
     /// de l'Iris"); a street that IS the city name is the defect itself ("Berlin 1" for
     /// "Alexanderplatz 1, Berlin"). Without a named commune — no check.
+    /// Does `hit` lie in a city the query `q` names that the sheet records by its districts? `None` when the query
+    /// names no commune of the sheet. True when a commune spelt by the longest name in the tail lies within
+    /// NAMED_LOCALITY_RADIUS_KM of the answer and holds fewer addresses than the answer's own commune: "Berlin" holds
+    /// 17 houses and its district Mitte 6 125, "New York" 5 and Chinatown 4 538, so the house of the district is in
+    /// the city named. Two towns of their own ("bourg" next to "ville") stay apart. `gridpin exists` reads it
+    /// (ANSWERS §284 p.5). The looser parts of `near_named_locality` are left out: the town's words leading the
+    /// answer's commune or standing in its street let "Mont-ral" pass as "Mont-ras" 183 km away and "…, Napoli" as
+    /// the street "Borgo Napoli" 290 km away (09.11.2026, 22 596 rows of ten countries).
+    pub fn hit_in_named_city_of_districts(&self, q: &str, hit: &Hit) -> Option<bool> {
+        let q = normalize(q);
+        let toks: Vec<&str> = q.split(' ').filter(|t| !t.is_empty()).collect();
+        let anchor = self.named_locality_anchor(&toks);
+        let longest = anchor
+            .communes
+            .iter()
+            .map(|&(_, start, end)| end - start)
+            .max()?;
+        let near = |id: u32| {
+            let (lat, lon) = self.commune_coord(id);
+            Self::dist_km(lat, lon, hit.lat, hit.lon) <= NAMED_LOCALITY_RADIUS_KM
+        };
+        let own = self
+            .communes_by_name(&normalize(&hit.commune))
+            .into_iter()
+            .filter(|&id| near(id))
+            .map(|id| self.commune_prominence(id))
+            .max()
+            .unwrap_or(0);
+        Some(
+            anchor
+                .communes
+                .iter()
+                .filter(|&&(_, start, end)| end - start == longest)
+                .any(|&(id, _, _)| near(id) && self.commune_prominence(id) < own),
+        )
+    }
+
     fn near_named_locality(&self, hit: &Hit, anchor: &NamedLocality) -> bool {
         if anchor.communes.is_empty()
             || hit.flags.contains(&"commune_exact")
@@ -8200,8 +8860,11 @@ impl Index {
             .rep_suffixes
             .get(rep as usize)
             .map_or("", String::as_str);
-        if house_spans() && suffix.bytes().all(|b| b.is_ascii_digit()) && !suffix.is_empty() {
-            return format!("{number}-{suffix}");
+        if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
+            // A digit suffix is a second number: a span under `house_spans` ("452-456"), otherwise a
+            // fraction house ("36/1", ANSWERS §303). Glued ("361") it would name another house.
+            let sep = if house_spans() { '-' } else { '/' };
+            return format!("{number}{sep}{suffix}");
         }
         format!("{number}{suffix}")
     }
@@ -8782,6 +9445,7 @@ impl Index {
             let street_phrase = rest[..rest.len() - c].join(" ");
             let dist = match street_phrase.chars().count() {
                 0..=4 => continue,
+                9..=11 if tolerance() == Tolerance::Lenient => 2,
                 5..=11 => 1,
                 _ => 2,
             };
@@ -9125,6 +9789,43 @@ impl Index {
         Self::strip_deferred_locality_drop(&mut hits);
         Self::monotone_confidence(&mut hits);
         hits
+    }
+
+    /// A query closing with its own country as a whole segment asks for what stands before it:
+    /// "Calle Muro, 13, 47004 Valladolid, España" is a street of Valladolid, not Plaza España. A word table
+    /// (`countries_tail`) cannot say this: it drops the word anywhere at the end, and "Plaza España" would
+    /// lose its name, which is why the Spanish and Brazilian rules hold no such word. A commune of that
+    /// name keeps its segment.
+    pub(crate) fn without_country_segment<'a>(&self, raw: &'a str) -> &'a str {
+        let _rules = crate::rules::scope(self.rules);
+        let own = own_country_names(self.country());
+        match closing_country_segment(raw, own) {
+            Some((head, name)) if self.communes_by_name_raw(&name).is_empty() => head,
+            _ => self.place_before_country_words(raw, own).unwrap_or(raw),
+        }
+    }
+
+    /// "Chicago USA", "Madrid España", "Toronto Canada": a place and its country written without a comma. Read
+    /// as an address the words go looking for a street ("Plaza España", "Canada Olympic Road", or nothing); the
+    /// place alone is what is asked. The country words are the sheet's (`countries_tail`) and its own names, the
+    /// words before them must be a commune of the sheet, so "Plaza España" keeps its name (10.11.2026, ANSWERS
+    /// §297: six sheets of eleven failed this form, the European ones read it).
+    fn place_before_country_words<'a>(&self, raw: &'a str, own: &[&str]) -> Option<&'a str> {
+        if raw.contains(',') {
+            return None;
+        }
+        let mut end = raw.trim_end();
+        let mut cut = false;
+        while let Some((head, last)) = end.rsplit_once(char::is_whitespace) {
+            let word = normalize(last);
+            if !(is_country_word(&word) || own.contains(&word.as_str())) {
+                break;
+            }
+            end = head.trim_end();
+            cut = true;
+        }
+        (cut && !end.is_empty() && !self.communes_by_name_raw(&normalize(end)).is_empty())
+            .then_some(end)
     }
 
     fn query_feats_near(
@@ -11130,12 +11831,14 @@ impl Index {
         let (&commune, &(count, lat, lon)) = addresses
             .iter()
             .max_by_key(|&(&id, &(count, _, _))| (count, std::cmp::Reverse(id)))?;
-        Some(Self::city_hit(
+        let mut answer = Self::city_hit(
             lat / count as f64,
             lon / count as f64,
             self.commune_name(commune).to_owned(),
             false,
-        ))
+        );
+        answer[0].0.flags.push(POSTAL_PLACE);
+        Some(answer)
     }
 
     /// Recover separators only from an exact indexed street boundary and existing
@@ -11644,19 +12347,24 @@ impl Index {
         drop(slot);
         let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         let chunk = names.len().div_ceil(threads).max(1);
-        let keys: Vec<Option<String>> = std::thread::scope(|scope| {
-            let workers: Vec<_> = names
-                .chunks(chunk)
-                .map(|part| {
-                    let key = &key;
-                    scope.spawn(move || part.iter().map(|name| key(name)).collect::<Vec<_>>())
-                })
-                .collect();
-            workers
-                .into_iter()
-                .flat_map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-                .collect()
-        });
+        // one thread (WebAssembly has no threads to spawn): the same keys, in place
+        let keys: Vec<Option<String>> = if threads <= 1 {
+            names.iter().map(|name| key(name)).collect()
+        } else {
+            std::thread::scope(|scope| {
+                let workers: Vec<_> = names
+                    .chunks(chunk)
+                    .map(|part| {
+                        let key = &key;
+                        scope.spawn(move || part.iter().map(|name| key(name)).collect::<Vec<_>>())
+                    })
+                    .collect();
+                workers
+                    .into_iter()
+                    .flat_map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+                    .collect()
+            })
+        };
         let mut out: HashMap<String, Vec<u32>> = HashMap::new();
         let mut merged = Vec::new();
         for (key, ids) in keys.into_iter().zip(by_name) {
@@ -14808,6 +15516,93 @@ impl Index {
         }
     }
 
+    /// Decode the stored points of one street, in stored order (numbers ascending). A corrupt value ends
+    /// the street there, never panics: house blocks are file data.
+    fn street_houses(&self, sid: u32, m: &StreetMeta, mut visit: impl FnMut(StreetHouse)) {
+        let Some((mut pos, postcode_dictionary, postcode_count, house_end)) =
+            self.house_block_layout(sid, m)
+        else {
+            return;
+        };
+        let bounded_houses = &self.houses[..house_end];
+        let mut cur = 0u32;
+        for i in 0..m.house_count {
+            if pos >= self.houses.len() {
+                break; // truncated house block
+            }
+            let Some(d) =
+                strict_varint(bounded_houses, &mut pos).and_then(|value| u32::try_from(value).ok())
+            else {
+                break;
+            };
+            let Some(next_cur) = (if i == 0 { Some(d) } else { cur.checked_add(d) }) else {
+                break;
+            };
+            cur = next_cur;
+            let Some(rid) =
+                strict_varint(bounded_houses, &mut pos).and_then(|value| u32::try_from(value).ok())
+            else {
+                break;
+            };
+            let Some(dlat_raw) = strict_varint(bounded_houses, &mut pos) else {
+                break;
+            };
+            let Some(dlon_raw) = strict_varint(bounded_houses, &mut pos) else {
+                break;
+            };
+            let dlat = unzigzag(dlat_raw);
+            let dlon = unzigzag(dlon_raw);
+            let postcode_off =
+                if self.format_version >= 7 && m.postcode_disp_off == PC_DISP_AMBIGUOUS {
+                    let Some(id) = strict_varint(bounded_houses, &mut pos)
+                        .and_then(|value| u32::try_from(value).ok())
+                    else {
+                        break;
+                    };
+                    self.house_postcode_offset(postcode_dictionary, postcode_count, id)
+                } else {
+                    0
+                };
+            let Some(hla_e7) = (m.lat_c as i64).checked_add(dlat) else {
+                break;
+            };
+            let Some(hlo_e7) = (m.lon_c as i64).checked_add(dlon) else {
+                break;
+            };
+            if !(-900_000_000..=900_000_000).contains(&hla_e7)
+                || !(-1_800_000_000..=1_800_000_000).contains(&hlo_e7)
+            {
+                break;
+            }
+            visit(StreetHouse {
+                street_id: sid,
+                number: cur,
+                rep: rid,
+                lat: hla_e7 as f64 / 1e7,
+                lon: hlo_e7 as f64 / 1e7,
+                postcode_off,
+            });
+        }
+    }
+
+    /// How many records of the sheet stand exactly at this point. On a sheet of places every name of a place (its
+    /// name, code and aliases) is a record at the place's point, so this is the number of names the place goes by:
+    /// a capital has dozens in other languages, a village of the same name none (09.11.2026, ANSWERS §294).
+    pub fn names_at(&self, lat: f64, lon: f64) -> usize {
+        let (la, lo) = ((lat * 1e7).round() as i32, (lon * 1e7).round() as i32);
+        let cell_la = (((lat + 90.0) / 0.01).floor() as i64).clamp(0, 17999) as u32;
+        let cell_lo = (((lon + 180.0) / 0.01).floor() as i64).clamp(0, 35999) as u32;
+        let mut streets = Vec::new();
+        self.streets_in_cell(cell_la * 36000 + cell_lo, &mut streets);
+        streets
+            .into_iter()
+            .filter(|&sid| {
+                let m = self.street_meta(sid);
+                m.lat_c == la && m.lon_c == lo
+            })
+            .count()
+    }
+
     /// Street ids in a square of spatial cells around a point, in deterministic id order.
     fn streets_in_square(&self, lat: f64, lon: f64, ring: i64) -> Vec<u32> {
         let base_la = ((lat + 90.0) / 0.01).floor() as i64;
@@ -14895,68 +15690,20 @@ impl Index {
         let mut all: Vec<(f64, u32, u32, u32, f64, f64, u32)> = Vec::new(); // + postcode name offset
         for &sid in &streets {
             let m = self.street_meta(sid);
-            let Some((mut pos, postcode_dictionary, postcode_count, house_end)) =
-                self.house_block_layout(sid, &m)
-            else {
-                continue; // corrupt house offset/dictionary: skip, never panic
-            };
-            let bounded_houses = &self.houses[..house_end];
-            let mut cur = 0u32;
-            for i in 0..m.house_count {
-                if pos >= self.houses.len() {
-                    break; // truncated house block
-                }
-                let Some(d) = strict_varint(bounded_houses, &mut pos)
-                    .and_then(|value| u32::try_from(value).ok())
-                else {
-                    break;
-                };
-                let Some(next_cur) = (if i == 0 { Some(d) } else { cur.checked_add(d) }) else {
-                    break;
-                };
-                cur = next_cur;
-                let Some(rid) = strict_varint(bounded_houses, &mut pos)
-                    .and_then(|value| u32::try_from(value).ok())
-                else {
-                    break;
-                };
-                let Some(dlat_raw) = strict_varint(bounded_houses, &mut pos) else {
-                    break;
-                };
-                let Some(dlon_raw) = strict_varint(bounded_houses, &mut pos) else {
-                    break;
-                };
-                let dlat = unzigzag(dlat_raw);
-                let dlon = unzigzag(dlon_raw);
-                let postcode_off =
-                    if self.format_version >= 7 && m.postcode_disp_off == PC_DISP_AMBIGUOUS {
-                        let Some(id) = strict_varint(bounded_houses, &mut pos)
-                            .and_then(|value| u32::try_from(value).ok())
-                        else {
-                            break;
-                        };
-                        self.house_postcode_offset(postcode_dictionary, postcode_count, id)
-                    } else {
-                        0
-                    };
-                let Some(hla_e7) = (m.lat_c as i64).checked_add(dlat) else {
-                    break;
-                };
-                let Some(hlo_e7) = (m.lon_c as i64).checked_add(dlon) else {
-                    break;
-                };
-                if !(-900_000_000..=900_000_000).contains(&hla_e7)
-                    || !(-1_800_000_000..=1_800_000_000).contains(&hlo_e7)
-                {
-                    break;
-                }
-                let hla = hla_e7 as f64 / 1e7;
-                let hlo = hlo_e7 as f64 / 1e7;
-                let dy = (hla - lat) * 111_320.0;
-                let dx = (hlo - lon) * 111_320.0 * coslat;
+            self.street_houses(sid, &m, |house| {
+                let dy = (house.lat - lat) * 111_320.0;
+                let dx = (house.lon - lon) * 111_320.0 * coslat;
                 let dist = (dx * dx + dy * dy).sqrt();
-                all.push((dist, sid, cur, rid, hla, hlo, postcode_off));
-            }
+                all.push((
+                    dist,
+                    sid,
+                    house.number,
+                    house.rep,
+                    house.lat,
+                    house.lon,
+                    house.postcode_off,
+                ));
+            });
         }
         all.sort_by(|a, b| a.0.total_cmp(&b.0));
 
@@ -19337,7 +20084,7 @@ mod tests {
         let city = hit("city", 0.05, vec!["place_exact"]);
         assert_eq!(
             serde_json::to_string(&city).unwrap(),
-            r#"{"lat":0.0,"lon":0.0,"precision":"city","score":0.0,"confidence":0.05,"street":"","commune":"","postcode":"","flags":["place_exact"],"weak":true}"#
+            r#"{"lat":0.0,"lon":0.0,"precision":"city","score":0.0,"confidence":0.05,"street":"","commune":"","postcode":"","flags":["place_exact"],"weak":true,"match_level":"Locality","match_status":"T"}"#
         );
         let mut house = hit("house", 0.2, vec!["street_exact"]);
         house.housenumber = Some("27".into());
@@ -19345,17 +20092,105 @@ mod tests {
         house.distance_m = Some(1.5);
         assert_eq!(
             serde_json::to_string(&house).unwrap(),
-            r#"{"lat":0.0,"lon":0.0,"precision":"house","score":0.0,"confidence":0.2,"street":"","housenumber":"27","commune":"","postcode":"","flags":["street_exact"],"region":"R","distance_m":1.5,"weak":false}"#
+            r#"{"lat":0.0,"lon":0.0,"precision":"house","score":0.0,"confidence":0.2,"street":"","housenumber":"27","commune":"","postcode":"","flags":["street_exact"],"region":"R","distance_m":1.5,"weak":false,"match_level":"PointAddress","match_status":"M"}"#
         );
         // Low confidence alone makes a street answer weak; the field follows the rule, not a constant.
         assert!(serde_json::to_string(&hit("street", 0.2, vec![]))
             .unwrap()
-            .ends_with(r#""weak":true}"#));
+            .ends_with(r#""weak":true,"match_level":"StreetName","match_status":"T"}"#));
         assert!(
             serde_json::to_string(&hit("street", 0.8, vec!["street_exact"]))
                 .unwrap()
-                .ends_with(r#""weak":false}"#)
+                .ends_with(r#""weak":false,"match_level":"StreetName","match_status":"M"}"#)
         );
+    }
+
+    #[test]
+    fn only_an_exact_door_on_an_exact_street_settles_the_field_reading() {
+        let exact = vec!["street_exact"];
+        assert!(fields_settle_it(&hit("house", 0.9, exact.clone())));
+        assert!(fields_settle_it(&hit("interp", 0.9, exact.clone())));
+        // every other precision the engine has, on the exact street
+        for precision in ["near", "street", "city", "approximate"] {
+            assert!(
+                !fields_settle_it(&hit(precision, 0.9, exact.clone())),
+                "{precision}"
+            );
+        }
+        // the near misses of the street: fuzzy, or no street evidence at all
+        assert!(!fields_settle_it(&hit("house", 0.9, vec!["street_fuzzy"])));
+        assert!(!fields_settle_it(&hit("house", 0.9, vec![])));
+        // an exact range that the engine itself calls weak (low confidence) does not settle it
+        assert!(!fields_settle_it(&hit("interp", 0.2, exact)));
+    }
+
+    #[test]
+    fn fields_join_in_the_order_the_country_writes_an_address() {
+        let f = AddressFields {
+            street: "Main St",
+            number: Some("12"),
+            city: "Springfield",
+            region: Some("IL"),
+            postcode: Some("62704"),
+        };
+        assert_eq!(f.line(true), "12 Main St, Springfield, IL 62704");
+        assert_eq!(f.line(false), "Main St, 12, 62704 Springfield, IL");
+        let bare = AddressFields {
+            street: "Main St",
+            ..AddressFields::default()
+        };
+        assert_eq!(bare.line(true), "Main St");
+        assert_eq!(bare.line(false), "Main St");
+    }
+
+    #[test]
+    fn the_match_level_of_an_answer_follows_its_precision_and_flags() {
+        // Every value `precision` takes in this file (constructors: "house", "interp", "near",
+        // "street", "city", and "approximate" in reverse), each with its own expected level.
+        for (precision, level) in [
+            ("house", "PointAddress"),
+            ("interp", "StreetAddress"),
+            ("near", "StreetAddressExt"),
+            ("street", "StreetName"),
+            ("city", "Locality"),
+            ("approximate", "Locality"),
+        ] {
+            assert_eq!(
+                match_level(&hit(precision, 0.9, vec![])).0,
+                level,
+                "{precision}"
+            );
+        }
+        // A postcode-only place is Postal; a place by name is not, whichever provenance it has.
+        let postal = hit("city", 0.05, vec!["place_prefix_group", POSTAL_PLACE]);
+        assert_eq!(match_level(&postal), ("Postal", 'T'));
+        assert_eq!(
+            match_level(&hit("city", 0.05, vec!["place_prefix_group"])).0,
+            "Locality"
+        );
+        // A POI answer is POI even though the POI sheet calls its point a house.
+        assert_eq!(match_level(&hit("house", 0.9, vec!["poi_layer"])).0, "POI");
+    }
+
+    #[test]
+    fn the_match_status_is_the_weak_verdict_and_nothing_else() {
+        // T exactly when weak: the three weak forms and the two that are not.
+        for (h, status) in [
+            (hit("city", 0.9, vec![]), 'T'),
+            (hit("street", 0.29, vec![]), 'T'),
+            (hit("street", 0.59, vec!["street_fuzzy"]), 'T'),
+            (hit("street", 0.6, vec!["street_fuzzy"]), 'M'),
+            (hit("house", 0.1, vec!["street_exact"]), 'M'),
+        ] {
+            assert_eq!(hit_is_weak(&h), status == 'T');
+            assert_eq!(
+                match_level(&h).1,
+                status,
+                "{} {}",
+                h.precision,
+                h.confidence
+            );
+        }
     }
 
     #[test]
@@ -22644,6 +23479,84 @@ mod tests {
             assert_eq!(hits[0].precision, "house", "{query}");
         }
     }
+    /// A sheet of `country` with communes Chicago, Denver and Madrid and a street in each, rules `countries_tail`.
+    fn place_country_fixture(country: &str, countries_tail: &str) -> (Scratch, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "gridpin-place-country-{country}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = Scratch::keep(&dir);
+        let mut rows = [
+            "main street,001,chicago,60601,1,,-87.6,41.8,Main Street,Chicago".to_string(),
+            "united states highway,002,denver,80201,1,,-104.9,39.7,United States Highway,Denver"
+                .to_string(),
+            "plaza espana,003,madrid,28001,1,,-3.7,40.4,Plaza España,Madrid".to_string(),
+        ];
+        rows.sort();
+        std::fs::write(
+            dir.join("rows.csv"),
+            format!(
+                "nom_voie_norm,code_insee,nom_commune_norm,code_postal,numero,rep,lon,lat,nom_voie,nom_commune\n{}\n",
+                rows.join("\n")
+            ),
+        )
+        .unwrap();
+        let rules = dir.join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("countries_tail.tsv"), countries_tail).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            format!(r#"{{"country":"{country}","layer":"addresses","license":"test","source_release":"test"}}"#),
+        )
+        .unwrap();
+        let bin = dir.join("test.bin");
+        crate::builder::build(
+            &dir.join("rows.csv"),
+            &bin,
+            None,
+            None,
+            Some(&rules),
+            None,
+            Some(&dir.join("manifest.json")),
+        )
+        .unwrap();
+        (scratch, bin)
+    }
+
+    #[test]
+    fn a_place_and_its_country_without_a_comma_ask_for_the_place() {
+        let (_d, bin) = place_country_fixture("us", "usa\nunited\nstates\namerica\n");
+        let idx = Index::open(&bin).unwrap();
+        for (q, want) in [
+            ("Chicago USA", "Chicago"),
+            ("DENVER UNITED STATES", "DENVER"),
+            (
+                "Chicago United States of America",
+                "Chicago United States of America",
+            ),
+            // not a place before the country words, a comma, no country words, nothing before them: as written
+            ("Springfield USA", "Springfield USA"),
+            ("Main Street Chicago USA", "Main Street Chicago USA"),
+            ("Chicago, USA", "Chicago, USA"),
+            ("Chicago", "Chicago"),
+            ("USA", "USA"),
+        ] {
+            assert_eq!(idx.without_country_segment(q), want, "{q}");
+        }
+        let hits = query_cascade(&idx, None, "Denver United States", 1);
+        assert_eq!(
+            (hits[0].precision, hits[0].commune.as_str()),
+            ("city", "Denver"),
+            "the place, not the street named like the country"
+        );
+        // the own names of a sheet with no country word in its rules (Spain): "Plaza España" keeps its name
+        let (_e, es) = place_country_fixture("es", "francia\n");
+        let es = Index::open(&es).unwrap();
+        assert_eq!(es.without_country_segment("Madrid España"), "Madrid");
+        assert_eq!(es.without_country_segment("Plaza España"), "Plaza España");
+    }
+
     #[test]
     fn es_particles_preserve_requested_city_at_every_precision() {
         let idx = es_particle_fixture("es", "calle major");
@@ -25582,6 +26495,58 @@ mod tests {
     }
 
     #[test]
+    fn a_query_with_no_comma_at_all_is_read_as_street_city_region_on_a_trailing_type_sheet() {
+        // ANSWERS §300: "233 S Wacker Dr Chicago IL 60606" — no comma anywhere — had no tail at all and no answer.
+        let rules = |type_last: bool| {
+            let mut entries = vec![
+                (23, "enabled".to_owned(), "1".to_owned()),
+                (23, "regions".to_owned(), "RI DC CA".to_owned()),
+                (23, "forms".to_owned(), "comma region_postal".to_owned()),
+                (23, "postal_digits".to_owned(), "5".to_owned()),
+                (23, "postal_split".to_owned(), "5".to_owned()),
+                (16, "street".to_owned(), String::new()),
+                (16, "st".to_owned(), String::new()),
+                (24, "nw".to_owned(), "northwest".to_owned()),
+                (24, "northwest".to_owned(), "nw".to_owned()),
+            ];
+            if type_last {
+                entries.push((23, "street_type_last".to_owned(), "1".to_owned()));
+            }
+            crate::rules::from_section(&crate::rules::serialize_entries(&entries))
+        };
+        {
+            let _scope = crate::rules::scope(rules(true));
+            for (q, city, retry) in [
+                (
+                    "20 North Main Street Providence RI 02903",
+                    "providence",
+                    Some("20 North Main Street, Providence, 02903"),
+                ),
+                (
+                    "201 18th Street NW Washington DC 20006",
+                    "washington",
+                    Some("201 18th Street NW, Washington, 20006"),
+                ),
+                // without the code the tail reads the city and the region all the same
+                ("20 North Main Street Providence RI", "providence", None),
+            ] {
+                let tail = city_tail(q).unwrap_or_else(|| panic!("{q}"));
+                assert_eq!(tail.city, city, "{q}");
+                assert!(tail.region.is_some(), "{q}");
+                assert_eq!(tail.retry.as_deref(), retry, "{q}");
+            }
+            // Not opened by a house number: a place or a street without its number keeps no tail here.
+            assert!(city_tail("Providence RI 02903").is_none());
+            assert!(city_tail("North Main Street Providence RI 02903").is_none());
+            // A closing word that is no region keeps the query whole.
+            assert!(city_tail("20 North Main Street Providence 02903").is_none());
+        }
+        // A sheet whose type comes first (ES, FR, MX) does not read it so.
+        let _scope = crate::rules::scope(rules(false));
+        assert!(city_tail("20 North Main Street Providence RI 02903").is_none());
+    }
+
+    #[test]
     fn dotted_initialisms_and_semicolons_are_read_past_by_the_tail_grammar() {
         assert_eq!(
             tidy_tail_punctuation("…, Washington, D.C. 20037"),
@@ -27782,9 +28747,38 @@ mod tests {
     fn house_spans_are_read_only_under_the_sheet_key() {
         let idx = house_span_index(false);
         let hits = idx.query("452 George St, Sydney NSW 2000", 1);
-        assert_eq!(hits[0].housenumber.as_deref(), Some("452456"));
+        assert_eq!(hits[0].housenumber.as_deref(), Some("452/456"));
         let hits = idx.query("455 George St, Sydney NSW 2000", 1);
         assert_ne!(hits[0].precision, "house");
+    }
+
+    /// ANSWERS §303: without `house_spans` a digit suffix is a fraction house («36/1» in Baden-Württemberg)
+    /// and is shown with a slash, never glued («361» names another house); a letter suffix stays glued.
+    /// Mutations: glue the digit suffix again; a hyphen without the key; the slash also for a letter.
+    #[test]
+    fn a_digit_house_suffix_is_shown_with_a_slash_and_a_letter_stays_glued() {
+        let idx = house_span_index(false);
+        let top = |q: &str| {
+            let hits = idx.query(q, 1);
+            (hits[0].housenumber.clone().unwrap(), hits[0].precision)
+        };
+        assert_eq!(
+            top("452/456 George St, Sydney NSW 2000"),
+            ("452/456".to_owned(), "house")
+        );
+        assert_eq!(
+            top("600 George St, Sydney NSW 2000"),
+            ("600a".to_owned(), "house")
+        );
+        assert_eq!(
+            top("500 George St, Sydney NSW 2000"),
+            ("500".to_owned(), "house")
+        );
+        // the slash form answers the leading number the way the written number does
+        assert_eq!(
+            numeric_house_prefix(&top("452 George St, Sydney NSW 2000").0),
+            Some(452)
+        );
     }
 
     #[test]
@@ -28264,11 +29258,160 @@ mod tests {
     }
 
     #[test]
+    fn only_a_whole_closing_segment_with_something_before_it_is_taken_for_the_country() {
+        let names = own_country_names(Some("es"));
+        for (raw, kept) in [
+            (
+                "Calle Muro, 13, Valladolid, España",
+                "Calle Muro, 13, Valladolid",
+            ),
+            (
+                "Calle Muro, 13, Valladolid,  ESPAÑA ",
+                "Calle Muro, 13, Valladolid",
+            ),
+            ("a, Espanya", "a"),
+            ("a, Spain", "a"),
+        ] {
+            assert_eq!(
+                closing_country_segment(raw, names).unwrap().0,
+                kept,
+                "{raw}"
+            );
+        }
+        // nothing before the comma, no comma, more than the name in the segment, another country
+        for raw in [
+            ", España",
+            "España",
+            "Calle Muro 13 España",
+            "Valladolid, Plaza España",
+            "a, Brasil",
+            "a, France",
+        ] {
+            assert!(closing_country_segment(raw, names).is_none(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_country_is_its_own_only_on_its_own_sheet() {
+        assert!(own_country_names(Some("br")).contains(&"brasil"));
+        assert!(own_country_names(Some("br")).contains(&"brazil"));
+        assert!(!own_country_names(Some("es")).contains(&"brasil"));
+        assert!(!own_country_names(Some("br")).contains(&"espana"));
+        // the United States has a town called Brazil, and a sheet without a name for its country strips nothing
+        assert!(own_country_names(Some("us")).is_empty());
+        assert!(own_country_names(None).is_empty());
+    }
+
+    #[test]
+    fn a_region_named_beside_the_fields_decides_between_towns_of_one_name() {
+        let mut idx = forward_postcode_index_for_country(
+            "fields-twin",
+            "main street,001,twin,1000,1000,5,,151.0,-33.0,Main Street,Twin\n\
+             main street,002,twin,3000,3000,5,,145.0,-37.0,Main Street,Twin\n",
+            "xx",
+        );
+        let tsv = [
+            (23, "enabled", "1"),
+            (23, "regions", "NSW VIC"),
+            (23, "forms", "comma region_postal"),
+            (23, "postal_digits", "4"),
+            (23, "postal_split", "4"),
+            (23, "street_type_last", "1"),
+            (16, "street", ""),
+            (27, "twin", "NSW -33.0 151.0;VIC -37.0 145.0"),
+        ]
+        .iter()
+        .map(|&(section, key, value)| (section, key.to_owned(), value.to_owned()))
+        .collect::<Vec<_>>();
+        idx.rules = crate::rules::from_section(&crate::rules::serialize_entries(&tsv));
+        for (region, lat) in [("NSW", -33.0), ("VIC", -37.0)] {
+            let hits = query_fields_cascade(
+                &idx,
+                None,
+                AddressFields {
+                    street: "Main Street",
+                    number: Some("5"),
+                    city: "Twin",
+                    region: Some(region),
+                    postcode: None,
+                },
+                1,
+            );
+            assert_eq!(hits[0].lat, lat, "{region}");
+        }
+    }
+
+    #[test]
+    fn a_field_answer_stands_in_the_region_named_or_gives_way_to_the_line() {
+        let idx = next_door_index();
+        let _rules = crate::rules::scope(idx.rules);
+        let in_pagewood = |flags: Vec<&'static str>| {
+            let mut h = hit("house", 0.9, flags);
+            h.lat = -33.9413;
+            h.lon = 151.2249;
+            h
+        };
+        let fields = |city, region| AddressFields {
+            street: "Anzac Parade",
+            number: Some("7"),
+            city,
+            region,
+            postcode: None,
+        };
+        let exact = vec!["street_exact"];
+        // no region named: nothing to check
+        assert!(field_answer_in_region(
+            &in_pagewood(exact.clone()),
+            &fields("Pagewood", None)
+        ));
+        // the table places the town in that region, near the answer, under a code or a name
+        assert!(field_answer_in_region(
+            &in_pagewood(exact.clone()),
+            &fields("Pagewood", Some("NSW"))
+        ));
+        assert!(field_answer_in_region(
+            &in_pagewood(exact.clone()),
+            &fields("PAGEWOOD", Some("nsw"))
+        ));
+        // the near misses: another region, a town the table does not place, an unknown region
+        assert!(!field_answer_in_region(
+            &in_pagewood(exact.clone()),
+            &fields("Pagewood", Some("QLD"))
+        ));
+        assert!(!field_answer_in_region(
+            &in_pagewood(exact.clone()),
+            &fields("Nowhere", Some("NSW"))
+        ));
+        assert!(!field_answer_in_region(
+            &in_pagewood(exact.clone()),
+            &fields("Pagewood", Some("XX"))
+        ));
+        // the right town and region, but the answer is far from it
+        let mut far = in_pagewood(exact);
+        far.lat = -19.26;
+        far.lon = 146.8;
+        assert!(!field_answer_in_region(
+            &far,
+            &fields("Pagewood", Some("NSW"))
+        ));
+        // a written postcode that matched says where the answer is; one that only nearly matched does not
+        assert!(field_answer_in_region(
+            &in_pagewood(vec!["street_exact", "pc_exact"]),
+            &fields("Nowhere", Some("XX"))
+        ));
+        assert!(!field_answer_in_region(
+            &in_pagewood(vec!["street_exact", "pc_dept"]),
+            &fields("Nowhere", Some("XX"))
+        ));
+    }
+
+    #[test]
     fn a_code_alone_or_after_its_region_answers_the_commune_holding_most_of_it() {
         let idx = next_door_index();
         let hits = idx.query("4101", 1);
         assert_eq!(hits[0].commune, "West End", "two addresses against one");
         assert_eq!(hits[0].precision, "city");
+        assert_eq!(match_level(&hits[0]), ("Postal", 'T'));
         assert!((hits[0].lat + 27.48).abs() < 1e-6, "{}", hits[0].lat);
         assert!((hits[0].lon - 153.00).abs() < 1e-6, "{}", hits[0].lon);
         assert_eq!(idx.query("Nowhere Plce QLD 4101", 1)[0].commune, "West End");

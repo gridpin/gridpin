@@ -1068,11 +1068,6 @@ pub fn build(
 mod tests {
     use super::*;
 
-    /// Serializes the tests that mutate the PROCESS-GLOBAL `GRIDPIN_MAX_UNCOMPRESSED_BYTES` env var
-    /// (the decompression-bomb test) against the large under-cap build test, so the tiny cap set by
-    /// one never leaks into the other's concurrent build.
-    static CAP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     const HDR: &str = "nom_voie_norm,code_insee,nom_commune_norm,code_postal,numero,rep,lon,lat,nom_voie,nom_commune\n";
 
     // Every build_csv call gets a GLOBALLY-unique temp file via an atomic counter: keying
@@ -1594,47 +1589,10 @@ mod tests {
     }
 
     #[test]
-    fn gz_decompression_bomb_is_rejected_streaming() {
-        // a .gz that expands past the cap must be an ERROR, streamed — not buffered
-        // into GBs of RSS first. A tiny cap (env) trips on a modest but over-cap decompressed CSV.
-        use std::io::Write as _;
-        let dir = std::env::temp_dir().join(format!("gridpin-bomb-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let _scratch = crate::scratch::Scratch::keep(&dir);
-        let src = dir.join("bomb.csv.gz");
-        let mut enc = flate2::write::GzEncoder::new(
-            std::fs::File::create(&src).unwrap(),
-            flate2::Compression::best(),
-        );
-        enc.write_all(b"nom_voie_norm,code_insee,nom_commune_norm,code_postal,numero,rep,lon,lat,nom_voie,nom_commune\n").unwrap();
-        for _ in 0..1000 {
-            enc.write_all(b"rue a,001,ville,10000,1,,7.42,43.73,Rue A,Ville\n")
-                .unwrap();
-        }
-        enc.finish().unwrap();
-        let out = dir.join("bomb.bin");
-        // GRIDPIN_MAX_UNCOMPRESSED_BYTES is PROCESS-GLOBAL, so setting it here would flake any
-        // concurrent build test that reads it (the large under-cap test builds ~960KB). Serialize
-        // the two env-mutating cap tests on CAP_ENV_LOCK so they never overlap.
-        let _cap_guard = CAP_ENV_LOCK.lock().unwrap();
-        std::env::set_var("GRIDPIN_MAX_UNCOMPRESSED_BYTES", "4096");
-        let res = build(&src, &out, None, None, None, None, None);
-        std::env::remove_var("GRIDPIN_MAX_UNCOMPRESSED_BYTES");
-        let err = res.expect_err("an over-cap decompressed stream must fail the build");
-        assert!(
-            err.to_string().contains("decompress") || err.to_string().contains("cap"),
-            "{err}"
-        );
-    }
-
-    #[test]
     fn a_large_under_cap_gz_input_still_builds() {
-        // the streaming guard rejects a bomb (gz_decompression_bomb_is_rejected_streaming);
+        // the streaming guard rejects a bomb (tests/build_cap_env.rs, its own process);
         // a genuinely large but UNDER-cap .gz must still build — the cap must not fire on legit data.
         use std::io::Write as _;
-        // hold CAP_ENV_LOCK so the bomb test cannot have GRIDPIN_MAX_UNCOMPRESSED_BYTES=4096 set
-        // during THIS ~960KB build (process-global env var would otherwise flake this test).
-        let _cap_guard = CAP_ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("gridpin-m10-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let _scratch = crate::scratch::Scratch::keep(&dir);
@@ -2635,9 +2593,17 @@ mod tests {
         // crate, but it unwinds and is caught — the host survives. This test fails loudly
         // if any variant causes an abort/segfault (process dies) — e.g. a future
         // panic="abort" release profile would break host protection.
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {})); // silence the expected caught panics
-                                                // input MUST be sorted by street name (FST key order): avenue < rue
+        // The hook is process-wide and tests run in parallel: silence this thread's expected panics only,
+        // or a real failure in a neighbouring test loses its message.
+        let prev_hook = std::sync::Arc::new(std::panic::take_hook());
+        let others = std::sync::Arc::clone(&prev_hook);
+        let this_thread = std::thread::current().id();
+        std::panic::set_hook(Box::new(move |info| {
+            if std::thread::current().id() != this_thread {
+                others(info);
+            }
+        }));
+        // input MUST be sorted by street name (FST key order): avenue < rue
         let out = build_csv(
             "avenue des champs,001,paris,75008,10,,2.307,48.872,Avenue des Champs,Paris\n\
              rue de la paix,001,paris,75002,1,,2.331,48.869,Rue de la Paix,Paris\n\
@@ -2683,7 +2649,7 @@ mod tests {
             // Either is acceptable; an abort/segfault would instead kill this test process.
             let _ = (r, i);
         }
-        std::panic::set_hook(prev_hook);
+        std::panic::set_hook(Box::new(move |info| prev_hook(info)));
     }
 
     #[test]

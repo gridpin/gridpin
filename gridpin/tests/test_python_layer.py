@@ -212,9 +212,53 @@ def test_geocode_df_keeps_every_row_in_order_with_the_engine_answer(pd, gp, geo)
     assert (row.gp_street, row.gp_housenumber, row.gp_commune, row.gp_postcode) == (
         top["street"], top["housenumber"], top["commune"], top["postcode"])
     assert (row.gp_precision, row.gp_confidence, bool(row.gp_weak)) == (top["precision"], top["confidence"], top["weak"])
+    assert (row.gp_match_level, row.gp_match_status) == (top["match_level"], top["match_status"])
     for label in "ecba":
         assert pd.isna(out.loc[label, "gp_lat"]) and pd.isna(out.loc[label, "gp_weak"])
+        assert out.loc[label, "gp_match_status"] == "U" and pd.isna(out.loc[label, "gp_match_level"])
     assert "address" in df.columns and "gp_lat" not in df.columns, "the input frame is not changed"
+
+
+ALL_EXTRAS = "h3,geohash,placekey,codes,street_point,links,provenance"
+
+
+def test_extras_columns_are_those_of_the_cli_csv_with_the_cli_values(pd, gp, geo, tmp_path):
+    cli = CRATE / "target" / "release" / "gridpin"
+    if not cli.exists():
+        pytest.skip("CLI not built (make engine)")
+    src = tmp_path / "in.csv"
+    pd.DataFrame({"address": [ADDRESS, NOWHERE]}).to_csv(src, index=False)
+    out = tmp_path / "out.csv"
+    subprocess.run([str(cli), "batch", str(SHEET), str(src), str(out), "--with", ALL_EXTRAS], check=True,
+                   capture_output=True)
+    theirs = pd.read_csv(out, dtype=str, keep_default_na=False)
+    ours = gp.geocode_df(pd.DataFrame({"address": [ADDRESS, NOWHERE]}), "address", SHEET, extras=ALL_EXTRAS)
+    assert list(ours.columns) == list(theirs.columns)
+    extra = [c for c in theirs.columns if c not in ("address", *gp.GP_COLUMNS)]
+    assert extra and extra[0] == "gp_h3"
+    for col in extra:
+        got = ["" if pd.isna(v) else (format(v, "g") if isinstance(v, float) else str(v)) for v in ours[col]]
+        assert got == list(theirs[col]), col
+    assert "gp_h3" not in gp.geocode_df(pd.DataFrame({"address": [ADDRESS]}), "address", SHEET).columns
+    with pytest.raises(ValueError, match="unknown field"):
+        gp.geocode_df(pd.DataFrame({"address": [ADDRESS]}), "address", SHEET, extras="zip")
+
+
+def test_the_engine_adds_extras_only_when_asked(geo):
+    assert "extras" not in geo.geocode(ADDRESS, 1)[0]
+    top = geo.geocode(ADDRESS, 1, extras="h3:8,placekey")[0]
+    assert set(top["extras"]) == {"h3", "placekey_where"} and top["extras"]["h3"].startswith("88")
+    assert geo.geocode_many([ADDRESS], 1, extras="geohash:5")[0][0]["extras"]["geohash"].__len__() == 5
+    back = geo.reverse(top["lat"], top["lon"], 1, extras="codes")[0]
+    assert {"plus_code", "mgrs", "dms"} == set(back["extras"])
+
+
+def test_geocode_or_ask_gives_the_answer_of_geocode_and_says_its_kind(geo):
+    out = geo.geocode_or_ask(ADDRESS, 1)
+    assert out["kind"] == "answer" and out["results"] == geo.geocode(ADDRESS, 1)
+    silent = geo.geocode_or_ask(NOWHERE, 1)
+    assert silent["kind"] == "none"
+    assert silent["reason"] in ("no_street", "no_house", "city_unknown", "outside_sheet", "unparsed")
 
 
 def test_k_gives_one_row_per_candidate_numbered_by_gp_rank(pd, gp, geo):
@@ -226,6 +270,84 @@ def test_k_gives_one_row_per_candidate_numbered_by_gp_rank(pd, gp, geo):
     assert list(out["gp_lat"].iloc[:len(hits)]) == [h["lat"] for h in hits]
     assert len(out) == len(hits) + 1 and pd.isna(out["gp_rank"].iloc[-1])
     assert "gp_rank" not in gp.geocode_df(df, "address", SHEET, k=1).columns
+
+
+def test_a_mapping_sends_the_cells_as_fields(pd, gp, geo):
+    df = pd.DataFrame({"s": ["boulevard des moulins", "27 boulevard des moulins monaco", None, None],
+                       "n": ["27", None, None, None], "c": ["monaco", None, "monaco", None]})
+    out = gp.geocode_df(df, {"street": "s", "number": "n", "city": "c"}, SHEET)
+    top = geo.geocode("boulevard des moulins 27 monaco", 1)[0]
+    assert (out.gp_street[0], out.gp_housenumber[0]) == (top["street"], top["housenumber"])
+    # a street cell the field reading cannot use falls to the line; a blank street asks the other cells
+    assert out.gp_lat[1] == geo.geocode("27 boulevard des moulins monaco", 1)[0]["lat"]
+    assert out.gp_precision[2] == geo.geocode("monaco", 1)[0]["precision"]
+    assert pd.isna(out.gp_lat[3]) and out.gp_match_status[3] == "U"
+    with pytest.raises(ValueError, match="street"):
+        gp.geocode_df(df, {"city": "c"}, SHEET)
+    with pytest.raises(ValueError, match="unknown"):
+        gp.geocode_df(df, {"street": "s", "zip": "c"}, SHEET)
+    with pytest.raises(KeyError):
+        gp.geocode_df(df, {"street": "nope"}, SHEET)
+
+
+def test_the_faker_provider_gives_real_addresses_of_the_sheet(geo):
+    from gridpin.faker import GridPinProvider
+
+    fake = GridPinProvider(str(SHEET), n=50, seed=3)
+    row = fake.real_address_row()
+    assert any(h["lat"] == row["lat"] and h["lon"] == row["lon"]
+               for h in geo.houses(street=row["street"], city=row["commune"]))
+    assert all(fake.street_address() and fake.city() and fake.address() for _ in range(20))
+    lat, lon = fake.latlng()
+    assert isinstance(lat, float) and isinstance(lon, float)
+    # the same seed, the same addresses in the same order
+    again = GridPinProvider(str(SHEET), n=50, seed=3)
+    first = GridPinProvider(str(SHEET), n=50, seed=3)
+    assert [first.address() for _ in range(10)] == [again.address() for _ in range(10)]
+    assert GridPinProvider(str(SHEET), n=5, seed=3, city="monaco").real_address_row()["commune"]
+    with pytest.raises(ValueError):
+        GridPinProvider(str(SHEET), n=5, seed=3, bbox=(0.0, 0.0, 0.1, 0.1))
+
+
+def test_faker_takes_the_provider_by_its_public_methods():
+    # what Faker's add_provider does with an instance: every public callable becomes a formatter
+    from gridpin.faker import GridPinProvider
+
+    names = [n for n in dir(GridPinProvider(str(SHEET), n=3, seed=1)) if not n.startswith("_")]
+    assert {"address", "street_address", "city", "postcode", "latlng"} <= set(names)
+    assert all(callable(getattr(GridPinProvider, n)) for n in names)
+
+
+def test_the_batch_function_of_a_data_platform_keeps_every_row(pd, geo):
+    from gridpin.pandas import GP_COLUMNS
+    from gridpin.udf import SPARK_SCHEMA, geocode_iter
+
+    batches = [pd.Series([ADDRESS, None, "", NOWHERE]), pd.Series([ADDRESS]), pd.Series([], dtype="object")]
+    out = list(geocode_iter(str(SHEET))(iter(batches)))
+    assert [len(f) for f in out] == [4, 1, 0], "a batch keeps its length"
+    assert list(out[0].columns) == list(GP_COLUMNS)
+    top = geo.geocode(ADDRESS, 1)[0]
+    assert out[0].gp_lat[0] == top["lat"] and out[1].gp_street[0] == top["street"]
+    assert list(out[0].gp_match_status[1:]) == ["U", "U", "U"]
+    assert out[0].gp_lat[1:].isna().all()
+    assert [c.split()[0] for c in SPARK_SCHEMA.split(", ")] == list(GP_COLUMNS)
+    geocode_iter("/no/such/sheet.bin")  # nothing opens until the first batch reaches a worker
+    assert "gp_weak boolean" in SPARK_SCHEMA and "gp_lat double" in SPARK_SCHEMA
+
+
+def test_a_missing_cell_is_not_sent_to_the_engine_as_text(pd, monkeypatch):
+    import gridpin.udf as udf
+
+    asked = []
+
+    class Spy:
+        def geocode_many(self, queries, k):
+            asked.extend(queries)
+            return [[] for _ in queries]
+
+    monkeypatch.setattr(udf, "geocoder", lambda sheet, poi: Spy())
+    list(udf.geocode_iter("any.bin")(iter([pd.Series([ADDRESS, None, float("nan"), "  "])])))
+    assert asked == [ADDRESS]
 
 
 def test_several_columns_join_like_the_cli(pd, gp, geo):

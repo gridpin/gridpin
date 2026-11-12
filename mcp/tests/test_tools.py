@@ -37,7 +37,28 @@ def test_geocode_returns_engine_results_with_coordinates(session):
     assert isinstance(top["lat"], float) and isinstance(top["lon"], float)
     assert {"precision", "confidence", "street", "commune", "weak"} <= set(top)
     assert isinstance(top["weak"], bool)
+    assert isinstance(top["match_level"], str) and top["match_status"] in ("M", "T")
     assert len(out["results"]) <= 3
+
+
+def test_extras_are_passed_to_the_engine_only_when_asked(session):
+    plain = session.geocode(ADDRESS, "fr")["results"][0]
+    assert "extras" not in plain
+    top = session.geocode(ADDRESS, "fr", extras="h3,codes")["results"][0]
+    assert set(top["extras"]) == {"h3", "plus_code", "mgrs", "dms"}
+    back = session.reverse(top["lat"], top["lon"], "fr", extras="geohash:6")["results"][0]
+    assert len(back["extras"]["geohash"]) == 6
+    with pytest.raises(tools.ToolError, match="unknown field"):
+        session.geocode(ADDRESS, "fr", extras="zip")
+
+
+def test_geocode_says_what_kind_of_answer_it_is(session):
+    if not hasattr(session.geocoder("fr")[1], "geocode_or_ask"):
+        pytest.skip("engine before 0.9: no outcome")
+    assert session.geocode(ADDRESS, "fr")["kind"] == "answer"
+    silent = session.geocode("xyzzy plugh nonexistent street 999", "fr")
+    assert silent["results"] == [] and silent["kind"] == "none" and silent["reason"] in (
+        "no_street", "no_house", "city_unknown", "outside_sheet", "unparsed")
 
 
 def test_sheet_is_opened_once_per_country(session):
@@ -99,3 +120,34 @@ def test_countries_reports_download_state(tmp_path, monkeypatch):
     assert out["release"] == sheets.RELEASE
     assert {c["code"] for c in out["countries"]} == set(sheets.SHEETS)
     assert not any(c["downloaded"] for c in out["countries"])
+
+
+def test_the_own_sheet_setting_puts_ones_places_before_the_country(session, tmp_path, monkeypatch):
+    engine = pytest.importorskip("gridpin")
+    if not hasattr(engine, "build_places"):
+        pytest.skip("engine before 0.9: no own sheets")
+    places = tmp_path / "site.csv"
+    places.write_text("name,lat,lon\nNorth Depot,43.7400,7.4200\n")
+    engine.build_places(str(places), str(tmp_path / "site.bin"))
+    monkeypatch.setenv(tools.OWN_SHEET, str(tmp_path / "site.bin"))
+    top = session.geocode("North Depot", "fr")["results"][0]
+    assert "own_sheet" in top["flags"] and top["street"] == "North Depot"
+    monkeypatch.setenv(tools.OWN_SHEET, str(tmp_path / "missing.bin"))
+    with pytest.raises(tools.ToolError, match="GRIDPIN_OWN_SHEET"):
+        tools.Session(open_sheet=lambda code: SHEET).geocode("North Depot", "fr")
+
+
+def test_extract_finds_the_address_or_says_the_engine_is_too_old(session):
+    text = f"Please deliver to {ADDRESS} tomorrow."
+    _, geo = session.geocoder("fr")
+    if not hasattr(geo, "extract"):
+        with pytest.raises(tools.ToolError, match="upgrade"):
+            session.extract(text, "fr")
+        return
+    out = session.extract(text, "fr")
+    assert [r["hit"]["housenumber"] for r in out["results"]] == ["27"]
+
+
+def test_extract_refuses_an_empty_text(session):
+    with pytest.raises(tools.ToolError, match="non-empty"):
+        session.extract("  ", "fr")

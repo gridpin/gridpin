@@ -21,10 +21,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-RELEASE = "v0.8.0"
+RELEASE = "v0.9.0"
 BASE_URL = "https://dl.gridpin.dev"
 # SHA-256 of sheets-receipt.json for RELEASE; the pins below are taken from that file.
-RECEIPT_SHA256 = "768ce09edd3705e3b338a4b8f5dadb8de0564839257047f7db95db2c725efb2f"
+RECEIPT_SHA256 = "4870456f4396f1fd0457491fa3fc9eedbf2507fd38e6c40a837c986912fd5d41"
 
 CHUNK = 1 << 20
 # Free space required beyond the sheet itself, so a download never fills the disk.

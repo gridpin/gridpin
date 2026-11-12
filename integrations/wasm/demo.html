@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GridPin in the browser</title>
+<style>body{font-family:sans-serif;max-width:760px;margin:2em auto;padding:0 16px}input[type=text]{width:100%}pre{white-space:pre-wrap}</style>
+</head><body>
+<h1>GridPin in the browser</h1>
+<p>Pick a sheet (<code>.bin</code>), type an address. Everything runs in this page.</p>
+<p><input type="file" id="sheet" accept=".bin"></p>
+<p><input type="text" id="q" placeholder="boulevard des moulins 27, monaco" disabled></p>
+<pre id="out"></pre>
+<script type="module">
+import { GridPin } from "./gridpin.js";
+let gp;
+const wasm = fetch("gridpin_wasm.wasm").then((r) => r.arrayBuffer());
+document.getElementById("sheet").onchange = async (e) => {
+  gp = await GridPin.load(await wasm, await e.target.files[0].arrayBuffer());
+  const q = document.getElementById("q"); q.disabled = false; q.focus();
+};
+document.getElementById("q").onkeydown = (e) => {
+  if (e.key === "Enter" && gp) document.getElementById("out").textContent = JSON.stringify(gp.geocode(e.target.value, 3), null, 2);
+};
+</script>
+</body></html>

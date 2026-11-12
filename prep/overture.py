@@ -124,8 +124,31 @@ NORM = ("trim(regexp_replace(regexp_replace(replace(strip_accents(lower({col})),
         " '[-''’`./,;()ʻʼ‘]', ' ', 'g'), ' +', ' ', 'g'))")  # đ→d: strip_accents does not strip it
 
 
+def paid_release() -> str | None:
+    """The Overture release of a paid rebuild (ANSWERS §264, §294): GRIDPIN_PAID_RELEASE=<release> builds every country
+    from that release instead of its pin. Free sheets are frozen, so the pins below stay as they are and the
+    rebuild runs in a workspace of its own (check_paid_workspace); the manifest records the release it was built from.
+    Germany too since ANSWERS §301: the free DE sheet stays the one-shot build of prep/de_build.py on DE_RELEASE."""
+    value = os.environ.get("GRIDPIN_PAID_RELEASE", "").strip()
+    if not value:
+        return None
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}\.\d+", value):
+        raise SystemExit(f"STOP: GRIDPIN_PAID_RELEASE={value!r} is not an Overture release like 2026-11-18.0")
+    return value
+
+
+def check_paid_workspace(data_dir: pathlib.Path) -> None:
+    """A paid rebuild never writes into the data of the free sheets: that folder holds the release folders (public-*),
+    a paid workspace does not (docs/agents/paid-rebuild.md)."""
+    if paid_release() and any(data_dir.glob("public-*")):
+        raise SystemExit(f"STOP: GRIDPIN_PAID_RELEASE is set but {data_dir} holds the free release folders; run the paid "
+                         "rebuild in its own workspace (docs/agents/paid-rebuild.md), not over the frozen inputs")
+
+
 def release_for_country(cc: str) -> str:
     """Keep the DE evidence pin independent of the older country sheets."""
+    if paid_release():  # Germany included (ANSWERS §301); its free sheet is prep/de_build.py on DE_RELEASE
+        return paid_release()
     if cc.lower() in ("es", "br"):  # BR: ANSWERS §41, same pin as ES
         return "2026-08-19.0"
     if cc.lower() == "us":  # ANSWERS §140
@@ -397,6 +420,16 @@ CA_POSTCODE_SQL = (
 MX_POSTCODE_SQL = "CASE WHEN regexp_full_match(coalesce(postcode, ''), '0*') THEN '' ELSE postcode END"
 POSTCODE_SQL = {"BR": BR_POSTCODE_SQL, "US": US_POSTCODE_SQL, "CA": CA_POSTCODE_SQL, "MX": MX_POSTCODE_SQL}
 
+# NL house letter / addition (BAG huisletter, huisnummertoevoeging): up to the June 2026 release it was part of `number`
+# ("2a"), since September at the latest it is the separate `unit` ("2" + "A"; 2026-10-21.0: 1 983 186 of 9 988 169
+# rows, the same letters as the 1 964 489 June suffixes). Glued back so `rep` reads it as before; without it the paid
+# rebuild of 10.11.2026 lost every letter and "Kerkstraat 37A" went to a 37 in another town. Elsewhere `unit` is a
+# flat or a suite (US, CA, AU, MX), never part of the house number.
+# The house letter in `unit` (Overture): Dutch BAG from September 2026 on, and the German Länder Baden-Württemberg,
+# Saarland and Sachsen-Anhalt (S3 count 10.11.2026, release 2026-10-21.0: 500 683 rows; the free DE sheet, which read
+# `number` only, has no letter in Stuttgart or Saarbrücken). The other 12 Länder keep the letter in `number`.
+NUMBER_SQL = {"NL": "number || coalesce(' ' || unit, '')", "DE": "number || coalesce(' ' || unit, '')"}
+
 # Mexican state: the full Overture name -> the ISO 3166-2:MX code the rule pack keys (prep/mx_states.py).
 MX_STATE_SQL = ("CASE address_levels[1].value " + " ".join(
     f"WHEN '{name}' THEN '{code}'" for name, code in sorted(OVERTURE_STATE_TO_CODE.items()))
@@ -501,7 +534,7 @@ def select_src_sql(cc: str, s3: str) -> str:
     return f"""
         SELECT id,
                {street:<40} AS nom_voie,
-               number                                   AS number_raw,
+               {NUMBER_SQL.get(cc, "number"):<40} AS number_raw,
                {postcode:<40} AS postcode_raw,
                {city}                                    AS nom_commune,
                {province}                                AS provincia,
@@ -522,7 +555,7 @@ def _de_base_stats(release: str, manifest: dict) -> dict:
         "country": "DE",
         "release": release,
         "coverage": DE_COVERAGE,
-        "source_catalog_sha256": DE_SOURCE_CATALOG_SHA256,
+        "source_catalog_sha256": manifest["source_catalog_sha256"],
         "source_catalog": manifest["source_catalog"],
     }
 
@@ -830,6 +863,7 @@ def main(argv: list[str] | None = None) -> None:
         # would only turn the region into a search alias (the "Roma" risk below), and it needs
         # the whole source as a table.
         raise SystemExit(f"STOP: {cc} is built without a GeoNames umbrella (streamed source)")
+    check_paid_workspace(CODE / "data")
     release, manifest, _sources = preflight(cc, geonames_file, args.release)
     out_parquet = CODE / "data" / f"{cc.lower()}_norm.parquet"
 

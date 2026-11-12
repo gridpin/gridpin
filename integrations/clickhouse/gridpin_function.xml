@@ -1,0 +1,22 @@
+<!-- ClickHouse executable user-defined function: geocode(address) -> JSON text of the top answer.
+     Put this file next to the server's config (user_defined_executable_functions_config, *_function.xml) and the
+     script gridpin_udf.sh in user_scripts_path. ClickHouse keeps one `gridpin batch -` process per pool slot and
+     sends it rows on stdin; one row in, one row out, in order. -->
+<functions>
+    <function>
+        <type>executable_pool</type>
+        <name>geocode</name>
+        <return_type>String</return_type>
+        <argument>
+            <type>String</type>
+            <name>address</name>
+        </argument>
+        <format>TabSeparated</format>
+        <command>gridpin_udf.sh</command>
+        <pool_size>4</pool_size>
+        <command_termination_timeout>10</command_termination_timeout>
+        <!-- the first answer of a large sheet (US) comes after about 9 s while the sheet is read; the default read
+             timeout is 10 000 ms, so allow a minute -->
+        <command_read_timeout>60000</command_read_timeout>
+    </function>
+</functions>

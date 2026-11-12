@@ -1,0 +1,6 @@
+apiVersion: v2
+name: gridpin
+description: GridPin offline geocoding server, one Deployment per country sheet
+type: application
+version: 0.1.0
+appVersion: "0.9.0"

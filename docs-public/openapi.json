@@ -1,0 +1,1337 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "GridPin server",
+  "version": "0.9",
+  "description": "The local HTTP server of `gridpin serve`: offline geocoding of one country sheet."
+ },
+ "paths": {
+  "/": {
+   "get": {
+    "summary": "a plain-text list of the routes",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/health": {
+   "get": {
+    "summary": "the sheet, the counters and whether the server is warm",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/ui": {
+   "get": {
+    "summary": "a page: drop a CSV, get it back geocoded",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/geocode": {
+   "get": {
+    "summary": "an address or place: q, k, near, with",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "q",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ]
+   },
+   "post": {
+    "summary": "many queries: {queries, k, with}",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/extract": {
+   "post": {
+    "summary": "the addresses found in a text: {text, verify}",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object"
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/reverse": {
+   "get": {
+    "summary": "the nearest addresses of a point: lat, lon, k, with",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "q",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ]
+   }
+  },
+  "/v1/suggest": {
+   "get": {
+    "summary": "streets that start as the typed text: q, k",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "q",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ]
+   }
+  },
+  "/v1/exists": {
+   "get": {
+    "summary": "does an address exist: yes, maybe or no and why",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "q",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ]
+   }
+  },
+  "/v1/explain": {
+   "get": {
+    "summary": "why the engine answered as it did",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/search": {
+   "get": {
+    "summary": "Nominatim-compatible search",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/search.php": {
+   "get": {
+    "summary": "Nominatim-compatible search",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/reverse": {
+   "get": {
+    "summary": "Nominatim-compatible reverse",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/reverse.php": {
+   "get": {
+    "summary": "Nominatim-compatible reverse",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/status": {
+   "get": {
+    "summary": "Nominatim-compatible status",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/status.php": {
+   "get": {
+    "summary": "Nominatim-compatible status",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/maps/api/geocode/json": {
+   "get": {
+    "summary": "a subset of the Google Geocoding API shape",
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "results": {
+           "type": "array",
+           "items": {
+            "type": "object",
+            "properties": {
+             "lat": {
+              "type": "number"
+             },
+             "lon": {
+              "type": "number"
+             },
+             "precision": {
+              "type": "string"
+             },
+             "score": {
+              "type": "number"
+             },
+             "confidence": {
+              "type": "number"
+             },
+             "street": {
+              "type": "string"
+             },
+             "housenumber": {
+              "type": "string"
+             },
+             "commune": {
+              "type": "string"
+             },
+             "postcode": {
+              "type": "string"
+             },
+             "flags": {
+              "type": "array"
+             },
+             "region": {
+              "type": "string"
+             },
+             "distance_m": {
+              "type": "number"
+             },
+             "weak": {
+              "type": "boolean"
+             },
+             "match_level": {
+              "type": "string"
+             },
+             "match_status": {
+              "type": "string"
+             },
+             "extras": {
+              "type": "object"
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ }
+}

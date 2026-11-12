@@ -1,0 +1,33 @@
+# Words that open a flat, office or floor designator, and its kind: data of the engine, read for every sheet alike.
+# A word counts only when the token after it is a number, a number with a letter, or one or two letters ("apt 4B",
+# "Suite 300", "kv. 12"); inside a street name ("Unit Street") it is not one.
+# Cyrillic words live in extras.rs (UNIT_WORDS_CYRILLIC): the public text of this file is Latin only.
+apt	flat
+apartment	flat
+appartement	flat
+appt	flat
+app	flat
+flat	flat
+unit	flat
+kv	flat
+stan	flat
+wohnung	flat
+whg	flat
+depto	flat
+dpto	flat
+departamento	flat
+piso	floor
+floor	floor
+fl	floor
+etage	floor
+sprat	floor
+suite	office
+ste	office
+office	office
+bureau	office
+kancelarija	office
+room	room
+puerta	door
+porta	door
+interior	door
+int	door

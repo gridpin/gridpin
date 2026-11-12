@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gridpin.dev/address-grammar.schema.json",
+  "title": "Address grammar of a country",
+  "description": "How the addresses of one country are written: postcode forms, house number forms and position, street type words and their position, locality and region. `method: declared` is what a GridPin sheet's own rules state (gridpin grammar); `method: measured` is counted over the addresses of a sheet (gridpin-pro learn-grammar). Shares are fractions 0..1 of the rows counted.",
+  "type": "object",
+  "required": ["country", "method", "postcode", "house_number", "street", "locality", "region", "source"],
+  "additionalProperties": false,
+  "properties": {
+    "country": {"type": "string", "pattern": "^[a-z]{2}$", "description": "ISO 3166-1 alpha-2, lower case"},
+    "method": {"enum": ["declared", "measured"]},
+    "postcode": {
+      "type": "object",
+      "required": ["patterns"],
+      "additionalProperties": false,
+      "properties": {
+        "digits": {"type": ["integer", "null"], "description": "digits of the numeric key, when the country's code is numeric"},
+        "patterns": {"type": "array", "items": {"$ref": "#/$defs/form"}},
+        "position": {"enum": ["before_locality", "after_locality", "unknown"]}
+      }
+    },
+    "house_number": {
+      "type": "object",
+      "required": ["position", "forms"],
+      "additionalProperties": false,
+      "properties": {
+        "position": {"enum": ["before_street", "after_street", "unknown"]},
+        "forms": {"type": "array", "items": {"$ref": "#/$defs/form"}}
+      }
+    },
+    "street": {
+      "type": "object",
+      "required": ["type_position", "types"],
+      "additionalProperties": false,
+      "properties": {
+        "type_position": {"enum": ["first", "last", "mixed", "unknown"]},
+        "type_first_share": {"type": ["number", "null"]},
+        "types": {"type": "array", "items": {"$ref": "#/$defs/word"}},
+        "particles": {"type": "array", "items": {"$ref": "#/$defs/word"}},
+        "no_type_share": {"type": ["number", "null"]}
+      }
+    },
+    "locality": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "words": {"type": "array", "items": {"type": "object", "required": ["count", "share"], "properties": {"count": {"type": "integer"}, "share": {"type": "number"}}}},
+        "hyphen_share": {"type": ["number", "null"]}
+      }
+    },
+    "region": {
+      "type": "object",
+      "required": ["present"],
+      "additionalProperties": false,
+      "properties": {
+        "present": {"type": ["boolean", "null"]},
+        "kind": {"enum": ["code", "name", "none", "unknown"]}
+      }
+    },
+    "field_order": {
+      "type": "array",
+      "items": {"type": "object", "required": ["order", "share"], "properties": {"order": {"type": "array", "items": {"type": "string"}}, "share": {"type": "number"}}}
+    },
+    "examples": {"type": "array", "items": {"type": "string"}},
+    "source": {
+      "type": "object",
+      "required": ["sheet", "method"],
+      "additionalProperties": false,
+      "properties": {
+        "sheet": {"type": "string"},
+        "release": {"type": ["string", "null"]},
+        "rows": {"type": ["integer", "null"]},
+        "method": {"type": "string"}
+      }
+    }
+  },
+  "$defs": {
+    "form": {
+      "type": "object",
+      "required": ["regex"],
+      "additionalProperties": false,
+      "properties": {
+        "regex": {"type": "string"},
+        "share": {"type": ["number", "null"]},
+        "example": {"type": ["string", "null"]},
+        "examples": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "word": {
+      "type": "object",
+      "required": ["word"],
+      "additionalProperties": false,
+      "properties": {"word": {"type": "string"}, "share": {"type": ["number", "null"]}}
+    }
+  }
+}

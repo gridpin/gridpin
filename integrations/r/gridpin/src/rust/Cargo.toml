@@ -17,5 +17,9 @@ gridpin = "=0.8.0"
 serde = "1"
 serde_json = "1"
 
+[features]
+# extra answer fields: on with the engine release that has them (gridpin-ffi turns it on by default)
+extras = []
+
 [profile.release]
 lto = "thin"

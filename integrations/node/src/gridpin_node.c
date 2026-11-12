@@ -81,13 +81,33 @@ static napi_value collect(napi_env env, GridpinResponse *response, size_t n) {
     return result;
 }
 
-/* text(state, op, k, rows): op 0 load, 1 load POI, 3 geocode; k = 0 is the single-object form. */
+/* The optional `with` argument: NULL when absent, undefined, null or empty; a malloc'd copy otherwise
+ * (*bad is set when it is there but not a string). */
+static char *with_of(napi_env env, size_t argc, napi_value *argv, size_t at, int *bad) {
+    *bad = 0;
+    if (argc <= at) return NULL;
+    napi_valuetype type;
+    if (napi_typeof(env, argv[at], &type) != napi_ok || type == napi_undefined || type == napi_null) return NULL;
+    if (type != napi_string) {
+        *bad = 1;
+        return NULL;
+    }
+    size_t len = 0;
+    napi_get_value_string_utf8(env, argv[at], NULL, 0, &len);
+    if (len == 0) return NULL;
+    char *s = malloc(len + 1);
+    if (s) napi_get_value_string_utf8(env, argv[at], s, len + 1, &len);
+    return s;
+}
+
+/* text(state, op, k, rows[, with]): op 0 load, 1 load POI, 3 geocode; k = 0 is the single-object form;
+ * `with` (extra answer fields, gridpin batch --with) needs k >= 1. */
 static napi_value text_call(napi_env env, napi_callback_info info) {
-    size_t argc = 4;
-    napi_value argv[4];
+    size_t argc = 5;
+    napi_value argv[5];
     CHECK(napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-    if (argc != 4) {
-        napi_throw_type_error(env, NULL, "gridpin: text(state, op, k, rows)");
+    if (argc != 4 && argc != 5) {
+        napi_throw_type_error(env, NULL, "gridpin: text(state, op, k, rows[, with])");
         return NULL;
     }
     GridpinState *state = state_of(env, argv[0]);
@@ -135,9 +155,20 @@ static napi_value text_call(napi_env env, napi_callback_info info) {
         texts[i].data = (const uint8_t *)owned[i];
         texts[i].len = len;
     }
-    GridpinResponse *response = k > 0
+    int bad = 0;
+    char *with = with_of(env, argc, argv, 4, &bad);
+    if (bad || (with && k == 0)) {
+        free(with);
+        napi_throw_type_error(env, NULL, "gridpin: with must be a string of field names, with k >= 1");
+        goto done;
+    }
+    GridpinText with_text = {(const uint8_t *)with, with ? strlen(with) : 0, (uint8_t)(with == NULL)};
+    GridpinResponse *response = with
+        ? gridpin_invoke_with(state, op, k, &with_text, texts, NULL, NULL, NULL, n)
+        : k > 0
         ? gridpin_invoke_k(state, op, k, texts, NULL, NULL, NULL, n)
         : gridpin_invoke(state, op, texts, NULL, NULL, NULL, n);
+    free(with);
     result = collect(env, response, n);
 done:
     if (owned)
@@ -147,13 +178,13 @@ done:
     return result;
 }
 
-/* reverse(state, k, lats, lons): NaN in either is a null row. */
+/* reverse(state, k, lats, lons[, with]): NaN in either is a null row. */
 static napi_value reverse_call(napi_env env, napi_callback_info info) {
-    size_t argc = 4;
-    napi_value argv[4];
+    size_t argc = 5;
+    napi_value argv[5];
     CHECK(napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-    if (argc != 4) {
-        napi_throw_type_error(env, NULL, "gridpin: reverse(state, k, lats, lons)");
+    if (argc != 4 && argc != 5) {
+        napi_throw_type_error(env, NULL, "gridpin: reverse(state, k, lats, lons[, with])");
         return NULL;
     }
     GridpinState *state = state_of(env, argv[0]);
@@ -182,7 +213,18 @@ static napi_value reverse_call(napi_env env, napi_callback_info info) {
         }
         nulls[i] = (uint8_t)(lats[i] != lats[i] || lons[i] != lons[i]);
     }
-    result = collect(env, gridpin_invoke_k(state, GRIDPIN_OP_REVERSE, k, NULL, lats, lons, nulls, n), n);
+    int bad = 0;
+    char *with = with_of(env, argc, argv, 4, &bad);
+    if (bad) {
+        napi_throw_type_error(env, NULL, "gridpin: with must be a string of field names");
+        goto done;
+    }
+    GridpinText with_text = {(const uint8_t *)with, with ? strlen(with) : 0, (uint8_t)(with == NULL)};
+    result = collect(env,
+                     with ? gridpin_invoke_with(state, GRIDPIN_OP_REVERSE, k, &with_text, NULL, lats, lons, nulls, n)
+                          : gridpin_invoke_k(state, GRIDPIN_OP_REVERSE, k, NULL, lats, lons, nulls, n),
+                     n);
+    free(with);
 done:
     free(lats);
     free(lons);

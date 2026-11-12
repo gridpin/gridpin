@@ -23,8 +23,8 @@ function cli(query, k) {
 
 function same(hit, expected) {
   assert.deepStrictEqual(
-    [hit.lat, hit.lon, hit.precision, hit.street, hit.housenumber, hit.commune, hit.weak],
-    [expected.lat, expected.lon, expected.precision, expected.street, expected.housenumber, expected.commune, expected.weak],
+    [hit.lat, hit.lon, hit.precision, hit.street, hit.housenumber, hit.commune, hit.weak, hit.match_level, hit.match_status],
+    [expected.lat, expected.lon, expected.precision, expected.street, expected.housenumber, expected.commune, expected.weak, expected.match_level, expected.match_status],
   );
 }
 
@@ -39,6 +39,20 @@ test('geocode answers what the CLI answers, k honoured', () => {
   assert.strictEqual(g.geocode('boulevard des moulins 27 monaco', { k: 1 }).length, 1);
   assert.strictEqual(g.geocode('monaco')[0].weak, true);
   assert.deepStrictEqual(g.geocode('xyzzy plugh nonexistent street 999'), []);
+});
+
+test('with adds the extras the CLI adds, and only when asked', () => {
+  const g = new Geocoder(SHEET);
+  const q = 'boulevard des moulins 27 monaco';
+  const theirs = JSON.parse(execFileSync(CLI, ['query', SHEET, q, '-k', '1', '--with', 'h3,codes,placekey'], { encoding: 'utf8' }).trim());
+  const [ours] = g.geocode(q, { k: 1, with: 'h3,codes,placekey' });
+  assert.deepStrictEqual(ours.extras, theirs.extras);
+  assert.strictEqual(g.geocode(q, { k: 1 })[0].extras, undefined);
+  assert.strictEqual(g.geocodeMany([q], { with: 'geohash:6' })[0][0].extras.geohash.length, 6);
+  const [back] = g.reverse(ours.lat, ours.lon, { with: 'h3' });
+  assert.strictEqual(back.extras.h3, ours.extras.h3);
+  assert.throws(() => g.geocode(q, { with: 'zip' }), /unknown field/);
+  assert.throws(() => g.geocode(q, { with: 7 }), TypeError);
 });
 
 test('geocodeMany keeps input order and gives [] for null rows', () => {

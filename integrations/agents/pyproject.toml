@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gridpin-agents"
+version = "0.1.0"
+description = "Offline geocoding tools for agent frameworks (LlamaIndex, CrewAI, PydanticAI, smolagents, OpenAI Agents SDK) over one local GridPin file per country"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["geocoding", "offline", "agents", "llamaindex", "crewai", "pydantic-ai", "smolagents", "openai-agents", "tools"]
+# gridpin-mcp brings the engine (gridpin) and the verified sheet downloader (gridpin-fetch).
+dependencies = ["gridpin-mcp>=0.3,<0.6"]
+
+[project.optional-dependencies]
+llamaindex = ["llama-index-core>=0.12"]
+crewai = ["crewai>=1.0"]
+pydantic-ai = ["pydantic-ai-slim>=1.0"]
+smolagents = ["smolagents>=1.0"]
+openai-agents = ["openai-agents>=0.3"]
+
+[project.urls]
+Homepage = "https://gridpin.dev"
+Documentation = "https://gridpin.dev/docs"
+Repository = "https://github.com/gridpin/gridpin"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+gridpin_agents = ["py.typed"]

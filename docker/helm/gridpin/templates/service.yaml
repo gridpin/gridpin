@@ -1,0 +1,10 @@
+{{- range .Values.countries }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: gridpin-{{ . }}
+spec:
+  selector: {app: gridpin, country: "{{ . }}"}
+  ports: [{port: {{ $.Values.port }}, targetPort: {{ $.Values.port }}}]
+---
+{{- end }}

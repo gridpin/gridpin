@@ -15,6 +15,51 @@ struct Geocoder {
     poi: Option<query::Index>,
 }
 
+/// The options of `houses` and `sample` as an area. `bbox` is (min_lon, min_lat, max_lon, max_lat), `near`
+/// (lat, lon, metres), `polygon` the GeoJSON text.
+fn area_of(
+    street: Option<String>,
+    city: Option<String>,
+    postcode: Option<String>,
+    near: Option<(f64, f64, f64)>,
+    bbox: Option<(f64, f64, f64, f64)>,
+    polygon: Option<String>,
+    region: Option<String>,
+) -> PyResult<query::Area> {
+    let invalid = |e: String| pyo3::exceptions::PyValueError::new_err(e);
+    let circle = near
+        .map(|(lat, lon, metres)| query::parse_circle(&format!("{lat},{lon},{metres}")))
+        .transpose()
+        .map_err(invalid)?;
+    let bbox = bbox
+        .map(|(a, b, c, d)| query::BBox::parse(&format!("{a},{b},{c},{d}")))
+        .transpose()
+        .map_err(invalid)?;
+    let polygons = polygon
+        .as_deref()
+        .map(query::PolygonSet::from_geojson)
+        .transpose()
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok(query::Area {
+        street,
+        city,
+        postcode,
+        circle,
+        bbox,
+        polygons,
+        region,
+    })
+}
+
+/// One address of `geocode_fields_many`: street, number, city, region, postcode.
+type FieldRow = (
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
 fn hit_to_dict<'py>(py: Python<'py>, h: &query::Hit) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("lat", h.lat)?;
@@ -38,6 +83,9 @@ fn hit_to_dict<'py>(py: Python<'py>, h: &query::Hit) -> PyResult<Bound<'py, PyDi
     }
     // the engine's verdict that the answer needs a check before use, as in every JSON surface
     d.set_item("weak", query::hit_is_weak(h))?;
+    let (level, status) = query::match_level(h);
+    d.set_item("match_level", level)?;
+    d.set_item("match_status", status.to_string())?;
     Ok(d)
 }
 
@@ -48,13 +96,40 @@ fn to_python<'py, T: serde::Serialize>(py: Python<'py>, value: &T) -> PyResult<B
     py.import("json")?.call_method1("loads", (text,))
 }
 
+/// `extras="h3,codes"` read against the sheet; a bad spec is a ValueError.
+fn extras_of(spec: Option<&str>, idx: &query::Index) -> PyResult<Option<crate::extras::Extras>> {
+    crate::extras::Extras::new(spec, idx)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
+/// The dict of one hit, with `extras` when asked for.
+fn hit_dict<'py>(
+    py: Python<'py>,
+    h: &query::Hit,
+    extras: Option<&crate::extras::Extras>,
+    idx: &query::Index,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = hit_to_dict(py, h)?;
+    if let Some(e) = extras {
+        d.set_item("extras", to_python(py, &e.of(h, idx))?)?;
+    }
+    Ok(d)
+}
+
 #[pymethods]
 impl Geocoder {
     #[new]
-    #[pyo3(signature = (index_path, poi = None))]
-    fn new(index_path: PathBuf, poi: Option<PathBuf>) -> PyResult<Self> {
-        let inner = query::Index::open_address(&index_path)
+    #[pyo3(signature = (index_path, poi = None, *, also = None))]
+    fn new(index_path: PathBuf, poi: Option<PathBuf>, also: Option<PathBuf>) -> PyResult<Self> {
+        let mut inner = query::Index::open_address(&index_path)
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        if let Some(a) = also {
+            // a sheet of one's own places (`gridpin build --places`), asked before the address sheet
+            inner.set_also(
+                query::Index::open_also(&a)
+                    .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?,
+            );
+        }
         let poi = match poi {
             Some(p) => Some(
                 query::Index::open(&p)
@@ -71,12 +146,51 @@ impl Geocoder {
 
     /// Single query: returns a list of dicts (lat, lon, precision, score, street,
     /// optional housenumber, commune, postcode).
-    #[pyo3(signature = (q, k = 10))]
-    fn geocode<'py>(&self, py: Python<'py>, q: &str, k: usize) -> PyResult<Bound<'py, PyList>> {
+    #[pyo3(signature = (q, k = 10, *, extras = None))]
+    fn geocode<'py>(
+        &self,
+        py: Python<'py>,
+        q: &str,
+        k: usize,
+        extras: Option<&str>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let extras = extras_of(extras, &self.inner)?;
         let hits = py.detach(|| query::query_cascade(&self.inner, self.poi.as_ref(), q, k));
         let out = PyList::empty(py);
-        for h in &hits {
-            out.append(hit_to_dict(py, h)?)?;
+        crate::extras::for_query(q, || -> PyResult<()> {
+            for h in &hits {
+                out.append(hit_dict(py, h, extras.as_ref(), &self.inner)?)?;
+            }
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// One query for an agent: dict with `kind` "answer" (and `results`), "clarify" (`results`, `missing` —
+    /// "city" or "region" — and `options`, the places to choose from: label, city, region, lat, lon) or "none"
+    /// (`reason`: no_street, no_house, city_unknown, outside_sheet, unparsed). `results` is what `geocode` gives.
+    #[pyo3(signature = (q, k = 1))]
+    fn geocode_or_ask<'py>(
+        &self,
+        py: Python<'py>,
+        q: &str,
+        k: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        use crate::outcome::Outcome;
+        let outcome =
+            py.detach(|| crate::outcome::query_outcome(&self.inner, self.poi.as_ref(), q, k));
+        let out = to_python(py, &outcome)?;
+        // the same dicts `geocode` gives, not their JSON round trip (confidence stays the engine's float)
+        let results = match &outcome {
+            Outcome::Answer { results } | Outcome::Clarify { results, .. } => Some(results),
+            Outcome::None { .. } => None,
+        };
+        if let Some(results) = results {
+            let list = PyList::empty(py);
+            for h in results {
+                list.append(hit_to_dict(py, h)?)?;
+            }
+            out.set_item("results", list)?;
         }
         Ok(out)
     }
@@ -86,6 +200,26 @@ impl Geocoder {
     fn parse<'py>(&self, py: Python<'py>, q: &str) -> PyResult<Bound<'py, PyAny>> {
         let reading = py.detach(|| crate::compare::read(&self.inner, self.poi.as_ref(), q));
         to_python(py, &reading)
+    }
+
+    /// Addresses in free text, each confirmed by the sheet: list of dicts with `start`, `end` (byte offsets),
+    /// `text`, `level` (house, street) and `hit`. With `verify`, also the addresses with a number the sheet does
+    /// not have (`verdict` "not_found" and a `reason`). See `gridpin extract`.
+    #[pyo3(signature = (text, *, verify = false))]
+    fn extract<'py>(
+        &self,
+        py: Python<'py>,
+        text: &str,
+        verify: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (found, _) = py.detach(|| crate::extract::extract(&self.inner, text, verify));
+        to_python(py, &found)
+    }
+
+    /// Does an address exist in the sheet? dict with `exists` (yes, maybe, no) and `reason`. See `gridpin exists`.
+    fn exists<'py>(&self, py: Python<'py>, q: &str) -> PyResult<Bound<'py, PyAny>> {
+        let e = py.detach(|| crate::exists::judge(&self.inner, q));
+        to_python(py, &e)
     }
 
     /// Do two address lines name the same place? dict with `level` (house, street, commune, different,
@@ -102,14 +236,16 @@ impl Geocoder {
     /// Returns one list of up to `k` hits per query — the same shape as `geocode`,
     /// so `k` is honoured (an empty list means no match). Interruptible: Ctrl-C is
     /// checked between chunks and raises KeyboardInterrupt.
-    #[pyo3(signature = (queries, k = 1))]
+    #[pyo3(signature = (queries, k = 1, *, extras = None))]
     fn geocode_many<'py>(
         &self,
         py: Python<'py>,
         queries: Vec<String>,
         k: usize,
+        extras: Option<&str>,
     ) -> PyResult<Bound<'py, PyList>> {
         use rayon::prelude::*;
+        let extras = extras_of(extras, &self.inner)?;
         let pool = batch_pool();
         // Chunked execution: between chunks the GIL is re-acquired and pending
         // signals run, so Ctrl-C interrupts a long batch instead of piling up
@@ -127,11 +263,135 @@ impl Geocoder {
                         .collect()
                 })
             });
-            for hits in &results {
+            for (q, hits) in chunk.iter().zip(&results) {
                 let row = PyList::empty(py);
-                for h in hits {
-                    row.append(hit_to_dict(py, h)?)?;
-                }
+                crate::extras::for_query(q, || -> PyResult<()> {
+                    for h in hits {
+                        row.append(hit_dict(py, h, extras.as_ref(), &self.inner)?)?;
+                    }
+                    Ok(())
+                })?;
+                out.append(row)?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Addresses of an area as a list of dicts (lat, lon, street, housenumber, postcode, commune, region
+    /// when known). The same options as `gridpin list`; with none, the whole sheet up to `limit`.
+    #[pyo3(signature = (*, street = None, city = None, postcode = None, near = None, bbox = None, polygon = None, region = None, limit = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn houses<'py>(
+        &self,
+        py: Python<'py>,
+        street: Option<String>,
+        city: Option<String>,
+        postcode: Option<String>,
+        near: Option<(f64, f64, f64)>,
+        bbox: Option<(f64, f64, f64, f64)>,
+        polygon: Option<String>,
+        region: Option<String>,
+        limit: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let area = area_of(street, city, postcode, near, bbox, polygon, region)?;
+        let (filter, _) = self
+            .inner
+            .house_filter(&area)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        let (rows, _) = py.detach(|| self.inner.houses(&filter, limit));
+        to_python(py, &rows)
+    }
+
+    /// A uniform random sample of real addresses of an area; the same `seed` gives the same addresses.
+    /// `seed` None takes one from the clock.
+    #[pyo3(signature = (n, *, seed = None, street = None, city = None, postcode = None, near = None, bbox = None, polygon = None, region = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn sample<'py>(
+        &self,
+        py: Python<'py>,
+        n: usize,
+        seed: Option<u64>,
+        street: Option<String>,
+        city: Option<String>,
+        postcode: Option<String>,
+        near: Option<(f64, f64, f64)>,
+        bbox: Option<(f64, f64, f64, f64)>,
+        polygon: Option<String>,
+        region: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let area = area_of(street, city, postcode, near, bbox, polygon, region)?;
+        let (filter, _) = self
+            .inner
+            .house_filter(&area)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        let seed = seed.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |t| t.as_nanos() as u64)
+        });
+        let (rows, _) = py.detach(|| self.inner.sample_houses(&filter, n, seed));
+        to_python(py, &rows)
+    }
+
+    /// Batch of addresses already split into fields: one `(street, number, city, region, postcode)` tuple
+    /// per address; `number`, `region` and `postcode` may be None and `city` empty. Same shape, pool and
+    /// Ctrl-C as `geocode_many`.
+    #[pyo3(signature = (rows, k = 1, *, extras = None))]
+    fn geocode_fields_many<'py>(
+        &self,
+        py: Python<'py>,
+        rows: Vec<FieldRow>,
+        k: usize,
+        extras: Option<&str>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        use rayon::prelude::*;
+        let extras = extras_of(extras, &self.inner)?;
+        let pool = batch_pool();
+        const CHUNK: usize = 1024;
+        let out = PyList::empty(py);
+        for chunk in rows.chunks(CHUNK) {
+            py.check_signals()?;
+            let results: Vec<Vec<query::Hit>> = py.detach(|| {
+                pool.install(|| {
+                    chunk
+                        .par_iter()
+                        .map(|(street, number, city, region, postcode)| {
+                            query::query_fields_cascade(
+                                &self.inner,
+                                self.poi.as_ref(),
+                                query::AddressFields {
+                                    street,
+                                    number: number.as_deref(),
+                                    city,
+                                    region: region.as_deref(),
+                                    postcode: postcode.as_deref(),
+                                },
+                                k,
+                            )
+                        })
+                        .collect()
+                })
+            });
+            for ((street, number, city, region, postcode), hits) in chunk.iter().zip(&results) {
+                let asked = [
+                    Some(street.as_str()),
+                    number.as_deref(),
+                    Some(city.as_str()),
+                    region.as_deref(),
+                    postcode.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ");
+                let row = PyList::empty(py);
+                crate::extras::for_query(&asked, || -> PyResult<()> {
+                    for h in hits {
+                        row.append(hit_dict(py, h, extras.as_ref(), &self.inner)?)?;
+                    }
+                    Ok(())
+                })?;
                 out.append(row)?;
             }
         }
@@ -139,14 +399,16 @@ impl Geocoder {
     }
 
     /// Reverse geocoding: nearest houses to a point.
-    #[pyo3(signature = (lat, lon, k = 3))]
+    #[pyo3(signature = (lat, lon, k = 3, *, extras = None))]
     fn reverse<'py>(
         &self,
         py: Python<'py>,
         lat: f64,
         lon: f64,
         k: usize,
+        extras: Option<&str>,
     ) -> PyResult<Bound<'py, PyList>> {
+        let extras = extras_of(extras, &self.inner)?;
         // try_reverse is the single strict entry point: a bad coordinate raises here just
         // as in the CLI/DuckDB, not a silent empty list.
         let hits = py
@@ -154,7 +416,7 @@ impl Geocoder {
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
         let out = PyList::empty(py);
         for h in &hits {
-            let d = hit_to_dict(py, h)?;
+            let d = hit_dict(py, h, extras.as_ref(), &self.inner)?;
             if let Some(dm) = h.distance_m {
                 d.set_item("distance_m", dm)?;
             }
@@ -290,9 +552,33 @@ fn _sheets_fetch(py: Python<'_>, country: &str, offline: bool) -> PyResult<PathB
         .map_err(io_err)
 }
 
+/// The CSV columns `gridpin batch --with <spec>` adds, in order (the pandas layer names its columns by them).
+#[pyfunction]
+fn _extras_columns(spec: &str) -> PyResult<Vec<&'static str>> {
+    crate::extras::With::parse(spec)
+        .map(|w| w.columns())
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+}
+
+/// Build a sheet of one's own places from a table (name, lat, lon[, group][, code][, aliases]), as
+/// `gridpin build --places`; returns the number of places. Open it with `Geocoder(sheet, also=out)`.
+#[pyfunction]
+#[pyo3(signature = (places, out, license = None))]
+fn build_places(
+    py: Python<'_>,
+    places: PathBuf,
+    out: PathBuf,
+    license: Option<String>,
+) -> PyResult<usize> {
+    py.detach(|| crate::places::build(&places, &out, license.as_deref()))
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e:#}")))
+}
+
 #[pymodule]
 fn _gridpin(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Geocoder>()?;
+    m.add_function(wrap_pyfunction!(_extras_columns, m)?)?;
+    m.add_function(wrap_pyfunction!(build_places, m)?)?;
     m.add_function(wrap_pyfunction!(_sheets_release, m)?)?;
     m.add_function(wrap_pyfunction!(_sheets_registry, m)?)?;
     m.add_function(wrap_pyfunction!(_sheets_home, m)?)?;

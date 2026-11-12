@@ -1,0 +1,17 @@
+# Postal address layouts, named by a country code the caller gives (`--with postal:de`, `format --layout de`):
+# data of the engine, not a branch on the sheet's country (ANSWERS §60).
+# {number} {street} {postcode} {city} {region} {neighborhood}; "\n" separates lines. An empty field is dropped
+# with the separator next to it; an empty line is dropped. A country without a row uses the default.
+default	{street} {number}\n{postcode} {city}
+de	{street} {number}\n{postcode} {city}
+nl	{street} {number}\n{postcode} {city}
+es	{street} {number}\n{postcode} {city}
+it	{street} {number}\n{postcode} {city}
+fr	{number} {street}\n{postcode} {city}
+rs	{street} {number}\n{postcode} {city}
+mc	{number} {street}\n{postcode} {city}
+us	{number} {street}\n{city}, {region} {postcode}
+ca	{number} {street}\n{city} {region} {postcode}
+au	{number} {street}\n{city} {region} {postcode}
+br	{street}, {number}\n{city} - {region}\n{postcode}
+mx	{street} {number}, {neighborhood}\n{postcode} {city}, {region}

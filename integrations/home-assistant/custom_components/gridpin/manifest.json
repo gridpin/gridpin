@@ -1,0 +1,2 @@
+{"domain": "gridpin", "name": "GridPin reverse geocoding", "version": "0.1.0", "config_flow": true,
+ "documentation": "https://gridpin.dev/docs", "iot_class": "local_polling", "requirements": [], "codeowners": []}

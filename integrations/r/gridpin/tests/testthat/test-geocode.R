@@ -75,7 +75,7 @@ test_that("sf = TRUE gives WGS84 points", {
 
 test_that("versions name the package, the interface and the release", {
   v <- gp_version(tiny())
-  expect_equal(v$abi, 1L)
+  expect_equal(v$abi, 2L)
   expect_match(v$release, "^v[0-9]")
   expect_equal(v$sheet_bytes, file.size(tiny()))
 })

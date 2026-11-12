@@ -51,6 +51,16 @@ If GridPin is useful to you, [a star on GitHub](https://github.com/gridpin/gridp
 [QGIS](https://gridpin.dev/docs#qgis) ·
 [AI agents (MCP)](https://gridpin.dev/mcp-geocoding) ·
 [LangChain](https://gridpin.dev/docs#langchain) ·
+[SQLite and Datasette](https://gridpin.dev/sqlite-datasette-geocoding) ·
+[polars](https://gridpin.dev/polars-geocoding) ·
+[ClickHouse](https://gridpin.dev/docs#clickhouse) ·
+[dbt](https://gridpin.dev/docs#dbt) ·
+[NocoDB, Baserow and Grist](https://gridpin.dev/docs#tables) ·
+[Google Sheets](https://gridpin.dev/docs#google-sheets) ·
+[Benthos and Redpanda Connect](https://gridpin.dev/docs#streams) ·
+[address suggestions in a web form](https://gridpin.dev/docs#suggest) ·
+[WebAssembly](https://gridpin.dev/docs#wasm) ·
+[Home Assistant](https://gridpin.dev/docs#home-assistant) ·
 [Rust](https://gridpin.dev/docs#rust).
 The whole list with what each one needs: [documentation](https://gridpin.dev/docs#ways).
 
@@ -132,9 +142,30 @@ $ gridpin batch france.bin queries.jsonl results.jsonl -k 1
 $ gridpin batch usa.bin addresses.csv geocoded.csv
 $ gridpin batch usa.bin orders.csv geocoded.csv --column "street,city,zip" --delimiter ";"
 
-# a local geocoding server: own JSON API plus Nominatim-compatible /search and /reverse
+# a local geocoding server: own JSON API plus Nominatim-compatible /search and /reverse,
+# and Google's format at /maps/api/geocode/json
 $ gridpin serve usa.bin --port 8080
+
+# an address already split into columns; your own place names; a file of coordinates
+$ gridpin batch usa.bin clients.csv out.csv --columns street=Street,number=No,city=Town,region=State,postcode=ZIP
+$ gridpin batch usa.bin orders.csv out.csv --aliases places.csv
+$ gridpin batch usa.bin pings.csv out.csv --reverse
+
+# the sheet as a table: CSV, JSONL, GeoJSON or GPX, the sheet's licence first
+$ gridpin list usa.bin --street "Pennsylvania Ave NW" --city Washington
+$ gridpin export rs.bin --all -o serbia.csv
+$ gridpin sample es.bin --n 1000 --seed 7 -o test_addresses.csv
+$ gridpin stats usa.bin -o coverage.geojson
+
+# your own data beside the sheet
+$ gridpin nearest clients.csv depots.csv --sheet usa.bin -o out.csv
+$ gridpin join orders.csv zones.geojson -o out.csv
 ```
+
+Every answer carries `match_level` (Esri's scale: `PointAddress`, `StreetAddress`, `StreetName`, `Locality`, ...) and `match_status`
+(`M`, `T`, `U`) beside `precision` and `weak`. Details: [the sheet as a table](https://gridpin.dev/docs#sheet-table),
+[your own data](https://gridpin.dev/docs#own-data), [moving off the Google Geocoding API](https://gridpin.dev/migrate-from-google-geocoding),
+[Spark and Databricks](https://gridpin.dev/spark-geocoding). New commands and fields are in 0.9.0 and later.
 
 ### Python
 
@@ -245,18 +276,18 @@ independent reference coordinate (empty answers count as misses):
 
 | Query set | Rows | GridPin | Photon | Nominatim |
 |---|---:|---:|---:|---:|
-| United States · distorted addresses | 3,655 | **32.9%** | 28.5% | 24.3% |
+| United States · distorted addresses | 3,655 | **37.4%** | 28.5% | 24.3% |
 | United States · historic-places register (as recorded) | 1,000 | **64.1%** | 38.9% | 52.3% |
-| Canada · distorted addresses | 2,785 | **55.9%** | 45.2% | 32.7% |
+| Canada · distorted addresses | 2,785 | **56.0%** | 45.2% | 32.7% |
 | Canada · radio-station sites (as recorded) | 1,000 | **39.3%** | 39.3% | 25.2% |
 | Germany · distorted addresses | 2,000 | **82.1%** | 46.9% | 15.8% |
 | Germany · clean addresses | 2,000 | **82.8%** | 83.2% | 81.2% |
-| Spain · distorted addresses | 1,590 | **33.8%** | 29.6% | 20.8% |
+| Spain · distorted addresses | 1,590 | **34.0%** | 29.6% | 20.8% |
 | Mexico · distorted addresses | 2,000 | **24.1%** | 13.8% | 7.7% |
 | Mexico · cultural venues (as recorded) | 1,000 | **28.0%** | 17.3% | 10.2% |
 | Australia · distorted addresses | 2,000 | **74.6%** | 50.6% | 42.2% |
 | Australia · radio sites (as recorded) | 1,000 | **65.8%** | 25.2% | 13.0% |
-| Brazil · distorted addresses | 2,376 | **20.7%** | 19.8% | 9.6% |
+| Brazil · distorted addresses | 2,376 | **20.8%** | 19.8% | 9.6% |
 | Brazil · health-facility register (as typed) | 1,000 | **36.8%** | 28.2% | 20.7% |
 
 *Distorted* means each real address was changed by one fixed mechanical rule, with the reference
@@ -264,7 +295,7 @@ coordinate kept byte for byte. On German and Spanish distorted addresses GridPin
 on Brazilian distorted addresses GridPin and Photon are level, both well ahead of Nominatim; on clean
 German addresses GridPin and Photon are level (p=0.6691367 — not proof of parity). We show the sets
 where GridPin leads or is level; on the other Spanish sets Photon leads, and on clean Brazilian
-addresses Photon leads too; on clean Canadian addresses Photon leads (59.1% vs 57.5%; Nominatim 57.2%); on clean Mexican addresses GridPin leads (29.2% vs Photon 15.9%, Nominatim 10.1%). Counts, paired tests and data fingerprints for every set are in
+addresses Photon leads too; on clean Canadian addresses Photon leads (59.1% vs 57.5%; Nominatim 57.2%); on clean Mexican addresses GridPin leads (29.4% vs Photon 15.9%, Nominatim 10.1%). Counts, paired tests and data fingerprints for every set are in
 [docs-public/BENCHMARK.md](docs-public/BENCHMARK.md); the summary lives on the
 [test bench page](https://gridpin.dev/bench).
 
@@ -394,12 +425,12 @@ Interfaces and file formats may still change before v1.0. Sheets are tied to the
 Distribution:
 
 - **Free** — static builds of all available countries, with no update schedule. Free builds carry the same curated rules section subscribers get — you trade freshness, not quality; fresh monthly sheets are what subscriptions are for.
-- **Starter, $59/mo** (in preparation) — a subscription: one country of your choice, a fresh sheet every month.
-- **Pro, $149/mo** — a subscription: the full atlas (all available countries), fresh sheets monthly, provenance journal per build, invoice billing, priority email support.
-- **Snapshot, $199 one-time** — *this month's* fresh build of all available countries (the same sheets subscribers get), with an invoice, without a subscription. No updates afterwards. It costs more than one month of Pro on purpose: it is the no-subscription option — one invoice for procurement, no card on file, nothing to cancel. If a subscription works for you, a month of Pro is cheaper.
+- **Starter, $59/mo** — a subscription: one country of your choice, a fresh sheet every month.
+- **Pro, $149/mo** — a subscription: the full atlas (all available countries), fresh sheets monthly, priority email support.
+- **Snapshot, $199 one-time** — *this month's* fresh build of all available countries (the same sheets subscribers get), without a subscription. No updates afterwards. It costs more than one month of Pro on purpose: it is the no-subscription option — one payment, no card on file, nothing to cancel. If a subscription works for you, a month of Pro is cheaper.
 - **OEM / embedding** — from $1,500/yr.
 
-Pro and Snapshot can be bought in USDC: see [pricing](https://gridpin.dev/#pricing) and [how buying works](https://gridpin.dev/docs#paid).
+Starter, Pro and Snapshot can be bought in USDC: see [pricing](https://gridpin.dev/#pricing) and [how buying works](https://gridpin.dev/docs#paid).
 
 ## License
 

@@ -11,6 +11,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
+import re
 
 
 DE_RELEASE = "2026-08-19.0"
@@ -39,11 +41,23 @@ DE_ATTRIBUTION_SUMMARY = (
     "Per-Land provider, source URI, license URI and indication of changes: "
     "see source_catalog"
 )
-DE_TRANSFORMATIONS = (
-    f"ingested via OpenAddresses into Overture Maps Addresses release {DE_RELEASE}",
-    "filtered to country=DE and the declared 15-Länder public coverage",
-    "normalized to the GridPin canonical address schema and indexed by GridPin",
-)
+def transformations(release: str = DE_RELEASE) -> tuple[str, ...]:
+    """The indication of changes every Land licence asks for; it names the Overture release the sheet is built from."""
+    return (
+        f"ingested via OpenAddresses into Overture Maps Addresses release {release}",
+        "filtered to country=DE and the declared 15-Länder public coverage",
+        "normalized to the GridPin canonical address schema and indexed by GridPin",
+    )
+
+
+DE_TRANSFORMATIONS = transformations(DE_RELEASE)
+
+
+def paid_release() -> str | None:
+    """The release of a paid rebuild (ANSWERS §264, §301): GRIDPIN_PAID_RELEASE, the same switch prep/overture.py
+    reads. Germany is built by the general adapter on it; the pinned counts of DE_RELEASE do not apply to it."""
+    value = os.environ.get("GRIDPIN_PAID_RELEASE", "").strip()
+    return value if re.fullmatch(r"\d{4}-\d{2}-\d{2}\.\d+", value) else None
 
 
 # code -> (Land, source, provider, exact license, exact license URL, exact source URL)
@@ -200,6 +214,19 @@ _OVERTURE_DATASET_ROOTS = {
 if set(_OVERTURE_DATASET_ROOTS) != DE_EXPECTED_LAND_CODES:
     raise RuntimeError("DE Overture dataset-root catalog must cover exactly 15 Länder")
 
+# The same 15 sources under the names Overture gives them from 2026-10-21.0 on (counted on S3 10.11.2026: one dataset
+# per Land, the licence field filled and equal to the catalog's licence for every Land, no Bavarian row). A paid rebuild
+# on a later release reads these; a renamed or new dataset fails closed with its name (ANSWERS §301).
+_OVERTURE_DATASET_ROOTS_RENAMED = {
+    code: ("de/berlin" if code == "DE-BE" else f"de/{code.removeprefix('DE-').lower()}/statewide")
+    for code in _OVERTURE_DATASET_ROOTS
+}
+
+
+def dataset_roots(release: str) -> dict:
+    """The Overture dataset of each Land in a release: the audited August names, later the renamed ones."""
+    return _OVERTURE_DATASET_ROOTS if release == DE_RELEASE else _OVERTURE_DATASET_ROOTS_RENAMED
+
 # Per-Land counts from that same immutable release scan.  Pinning the vector,
 # not merely its total, prevents a wrong Land/dataset join from balancing out
 # against another Land while retaining the known 19,269,891-row denominator.
@@ -227,9 +254,9 @@ if (
     raise RuntimeError("DE per-Land row pins must cover the exact F2 COUNT")
 
 
-def _entry(code: str, spec: tuple[str, str, str, str, str, str]) -> dict:
+def _entry(code: str, spec: tuple[str, str, str, str, str, str], release: str = DE_RELEASE) -> dict:
     land, source, provider, license_name, license_url, source_url = spec
-    changes = "; ".join(DE_TRANSFORMATIONS)
+    changes = "; ".join(transformations(release))
     return {
         "land": land,
         "source": source,
@@ -237,9 +264,9 @@ def _entry(code: str, spec: tuple[str, str, str, str, str, str]) -> dict:
         "license": license_name,
         "source_url": source_url,
         "license_url": license_url,
-        "overture_dataset_root": _OVERTURE_DATASET_ROOTS[code],
+        "overture_dataset_root": dataset_roots(release)[code],
         "accessed_at": DE_ACCESS_DATE,
-        "transformations": list(DE_TRANSFORMATIONS),
+        "transformations": list(transformations(release)),
         "attribution": (
             f"{provider} — {source}; {license_name}; source: {source_url}; "
             f"accessed {DE_ACCESS_DATE}; changes: {changes}"
@@ -282,19 +309,25 @@ def canonical_sha256(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def source_catalog() -> dict:
+def _catalog_for(release: str) -> dict:
+    if release == DE_RELEASE:
+        return _CANONICAL_CATALOG
+    return {code: _entry(code, spec, release) for code, spec in sorted(_SOURCE_SPECS.items())}
+
+
+def source_catalog(release: str = DE_RELEASE) -> dict:
     """Return a defensive copy; callers must never mutate the source of truth."""
-    return copy.deepcopy(_CANONICAL_CATALOG)
+    return copy.deepcopy(_catalog_for(release))
 
 
-def canonical_catalog_sha256() -> str:
-    return canonical_sha256(_CANONICAL_CATALOG)
+def canonical_catalog_sha256(release: str = DE_RELEASE) -> str:
+    return canonical_sha256(_catalog_for(release))
 
 
 DE_SOURCE_CATALOG_SHA256 = canonical_catalog_sha256()
 
 
-def catalog_problems(catalog: object) -> list[str]:
+def catalog_problems(catalog: object, release: str = DE_RELEASE) -> list[str]:
     if not isinstance(catalog, dict):
         return ["source_catalog must be an object keyed by ISO 3166-2 Land code"]
     problems = []
@@ -309,7 +342,7 @@ def catalog_problems(catalog: object) -> list[str]:
         problems.append("source_catalog must not contain DE-BY (Bavaria)")
     for code in sorted(DE_EXPECTED_LAND_CODES & got_codes):
         got = catalog.get(code)
-        want = _CANONICAL_CATALOG[code]
+        want = _catalog_for(release)[code]
         if not isinstance(got, dict):
             problems.append(f"source_catalog[{code}] must be an object")
             continue
@@ -322,20 +355,20 @@ def catalog_problems(catalog: object) -> list[str]:
         for field, expected in want.items():
             if got.get(field) != expected:
                 problems.append(f"source_catalog[{code}].{field} differs from canonical value")
-    if isinstance(catalog, dict) and canonical_sha256(catalog) != DE_SOURCE_CATALOG_SHA256:
+    if isinstance(catalog, dict) and canonical_sha256(catalog) != canonical_catalog_sha256(release):
         problems.append("source_catalog canonical SHA-256 mismatch")
     return problems
 
 
-def validate_catalog(catalog: object) -> None:
-    problems = catalog_problems(catalog)
+def validate_catalog(catalog: object, release: str = DE_RELEASE) -> None:
+    problems = catalog_problems(catalog, release)
     if problems:
         raise ValueError("; ".join(problems))
 
 
 def _require_release(release: object) -> str:
     value = str(release or "").strip()
-    if value != DE_RELEASE:
+    if value != DE_RELEASE and value != paid_release():
         raise ValueError(f"DE release must be exactly {DE_RELEASE}, got {value!r}")
     return value
 
@@ -343,8 +376,8 @@ def _require_release(release: object) -> str:
 def build_manifest(release: str) -> dict:
     """Build the only accepted public DE manifest from this module's catalog."""
     release = _require_release(release)
-    catalog = source_catalog()
-    validate_catalog(catalog)
+    catalog = source_catalog(release)
+    validate_catalog(catalog, release)
     return {
         "country": "de",
         "layer": "addresses",
@@ -353,7 +386,7 @@ def build_manifest(release: str) -> dict:
         "source_release": release,
         "coverage": DE_COVERAGE,
         "attribution": DE_ATTRIBUTION_SUMMARY,
-        "source_catalog_sha256": DE_SOURCE_CATALOG_SHA256,
+        "source_catalog_sha256": canonical_catalog_sha256(release),
         "source_catalog": catalog,
     }
 
@@ -393,7 +426,7 @@ def manifest_problems(obj: object, release: str) -> list[str]:
     except ValueError as exc:
         problems.append(str(exc))
     else:
-        problems.extend(catalog_problems(catalog))
+        problems.extend(catalog_problems(catalog, release))
     return problems
 
 
@@ -472,10 +505,14 @@ def stats_witness_problems(stats: object, release: str) -> list[str]:
         problems.append("DE stats release differs from pinned release")
     if stats.get("coverage") != DE_COVERAGE:
         problems.append("DE stats coverage statement differs from canonical value")
-    if stats.get("source_catalog_sha256") != DE_SOURCE_CATALOG_SHA256:
+    if stats.get("source_catalog_sha256") != canonical_catalog_sha256(release):
         problems.append("DE stats source_catalog_sha256 differs from canonical value")
+    # The pinned counts belong to the one audited scan of DE_RELEASE. A paid rebuild on a newer release keeps every
+    # other check: 15 Länder present, each row joined to its Land's catalogued dataset root and licence, and a source
+    # outside the catalog (Bavaria included, should it appear) stops the build for a licence review (ANSWERS §301).
+    pinned = release == DE_RELEASE
     catalog = stats.get("source_catalog")
-    catalog_issues = catalog_problems(catalog)
+    catalog_issues = catalog_problems(catalog, release)
     problems.extend(catalog_issues)
     # Source evidence may join only to a catalog which independently passed the
     # exact canonical preflight above.  A malformed catalog never becomes a
@@ -487,7 +524,7 @@ def stats_witness_problems(stats: object, release: str) -> list[str]:
     rows_src = stats.get("rows_src")
     if not isinstance(rows_src, int) or isinstance(rows_src, bool) or rows_src <= 0:
         problems.append("DE stats rows_src must be a positive integer")
-    elif rows_src != DE_EXPECTED_ROWS:
+    elif pinned and rows_src != DE_EXPECTED_ROWS:
         problems.append(
             f"DE stats rows_src must equal pinned F2 COUNT {DE_EXPECTED_ROWS}"
         )
@@ -500,11 +537,13 @@ def stats_witness_problems(stats: object, release: str) -> list[str]:
         for code in sorted(DE_EXPECTED_LAND_CODES):
             if not isinstance(counts.get(code), int) or counts[code] <= 0:
                 problems.append(f"DE observed_land_counts[{code}] must be positive")
-            elif counts[code] != DE_EXPECTED_LAND_ROWS[code]:
+            elif pinned and counts[code] != DE_EXPECTED_LAND_ROWS[code]:
                 problems.append(
                     f"DE observed_land_counts[{code}] differs from pinned release count")
         if counts.get(DE_BAVARIA_CODE) != 0:
-            problems.append("DE-BY/Bavaria observed row count must be zero")
+            problems.append(
+                f"DE-BY/Bavaria observed row count must be zero, got {counts.get(DE_BAVARIA_CODE)}: a source outside "
+                "the catalog; read its licence at the primary source and add it to the catalog (ANSWERS §301)")
         if isinstance(rows_src, int) and sum(counts.values()) != rows_src:
             problems.append("DE observed Land counts do not sum to rows_src")
     if stats.get("observed_land_codes") != sorted(DE_EXPECTED_LAND_CODES):
@@ -592,7 +631,9 @@ def stats_witness_problems(stats: object, release: str) -> list[str]:
             )
             if not dataset_matches:
                 problems.append(
-                    f"DE observed source item #{number} dataset root does not match {code}"
+                    f"DE observed source item #{number} dataset root does not match {code}: "
+                    f"{dataset!r} ({item.get('land_raw')!r}, licence {item.get('license')!r}, {item.get('rows')} rows) "
+                    "is not in the catalog; read its licence before it enters a sheet (ANSWERS §301)"
                 )
             license_name = item.get("license")
             license_state = item.get("license_state")

@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Vercel AI SDK tools over a local GridPin sheet (copy tool.ts into your project)",
+  "dependencies": { "gridpin": ">=0.9", "ai": ">=5", "zod": ">=3.25" },
+  "scripts": { "test": "node --test tool.test.ts" }
+}

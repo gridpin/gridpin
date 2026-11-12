@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GridPin — geocode a CSV</title>
+<style>
+:root{--bg:#fff;--fg:#1d1d1f;--muted:#6e6e73;--line:#d2d2d7;--accent:#0b63ce}
+@media (prefers-color-scheme: dark){:root{--bg:#1c1c1e;--fg:#f2f2f7;--muted:#a1a1a6;--line:#3a3a3c;--accent:#4c9bff}}
+body{font-family:-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--fg);max-width:980px;margin:2em auto;padding:0 16px}
+#drop{border:2px dashed var(--line);border-radius:10px;padding:2em;text-align:center;color:var(--muted)}
+#drop.over{border-color:var(--accent)}
+table{border-collapse:collapse;width:100%;font-size:.9em;margin-top:1em}td,th{border-bottom:1px solid var(--line);padding:4px 6px;text-align:left}
+button,select{font:inherit;padding:.3em .7em}progress{width:100%}
+.scroll{overflow-x:auto;max-width:100%}#error{color:#c62828}
+.muted{color:var(--muted)}
+</style>
+</head>
+<body>
+<h1>Geocode a CSV</h1>
+<p class="muted">The file stays on this machine: rows go to this server's <code>/v1/geocode</code>, 500 at a time, and come back with
+<code>gp_lat</code>, <code>gp_lon</code>, <code>gp_match_level</code>, <code>gp_weak</code>, <code>gp_confidence</code> and the address found. The delimiter (comma,
+semicolon or tab) is read from the header row and kept in the file you download. A cell longer than 1024 bytes is not
+sent: its row comes back empty with <code>too_long</code>. On a server of several countries, open
+<code>/ui?country=de</code> to ask one country's sheet.</p>
+<div id="drop">Drop a CSV here, or <input type="file" id="file" accept=".csv,text/csv"></div>
+<p id="pick" hidden>Address column: <select id="column"></select> <button id="go">Geocode</button> <span id="delim" class="muted"></span></p>
+<progress id="bar" value="0" max="1" hidden></progress>
+<p id="counts"></p>
+<p id="error" role="alert"></p>
+<p><button id="save" hidden>Download CSV</button></p>
+<div class="scroll"><table id="preview"></table></div>
+<script type="module">
+__CSV_JS__
+const $ = (id) => document.getElementById(id);
+let rows = [], out = [], delimiter = ",";
+const NAMES = {",": "comma", ";": "semicolon", "\t": "tab"};
+async function load(file) {
+  $("error").textContent = "";
+  const text = utf8Text(await file.arrayBuffer());
+  if (text === null) {
+    rows = [];
+    $("pick").hidden = true;
+    $("error").textContent = "This file is not UTF-8, so letters such as ß, é or ü would be lost. In Excel: Save As → \"CSV UTF-8 (Comma delimited)\", then drop that file.";
+    return;
+  }
+  delimiter = sniffDelimiter(text);
+  rows = parseCsv(text, delimiter);
+  if (!rows.length) return;
+  $("delim").textContent = `delimiter: ${NAMES[delimiter]}, ${rows[0].length} columns`;
+  const sel = $("column");
+  sel.innerHTML = "";
+  rows[0].forEach((h, i) => sel.add(new Option(h, i, false, /address|query|^q$/i.test(h))));
+  $("pick").hidden = false;
+}
+$("file").onchange = (e) => e.target.files[0] && load(e.target.files[0]);
+const drop = $("drop");
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); e.dataTransfer.files[0] && load(e.dataTransfer.files[0]); };
+let running = false;
+$("go").onclick = async () => {
+  // one pass at a time: a second click while the first runs would write every row twice into the download
+  if (running) return;
+  running = true;
+  $("go").disabled = true;
+  $("save").hidden = true;
+  try { await geocodeAll(); } finally { running = false; $("go").disabled = false; }
+};
+async function geocodeAll() {
+  const col = Number($("column").value), body = rows.slice(1), counts = {};
+  out = [rows[0].concat(ANSWER_COLUMNS)];
+  const bar = $("bar"); bar.hidden = false; bar.max = body.length; bar.value = 0;
+  $("error").textContent = "";
+  for (let i = 0; i < body.length; i += 500) {
+    const chunk = body.slice(i, i + 500);
+    const asked = chunk.map((row) => queryOf(row[col]));
+    let answers = [], failed = null;
+    try {
+      // /ui?country=de on a server of several sheets: every row is asked of that sheet
+      const country = new URLSearchParams(location.search).get("country");
+      const target = "/v1/geocode" + (country ? "?country=" + encodeURIComponent(country) : "");
+      const r = await fetch(target, {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({queries: asked.map((a) => a.query), k: 1})});
+      const reply = await r.json();
+      if (r.ok && Array.isArray(reply.results)) answers = reply.results;
+      else failed = `HTTP ${r.status}: ${reply.error || "no results"}`;
+    } catch (e) {
+      failed = String(e);
+    }
+    if (failed) $("error").textContent = `Rows ${i + 2}–${i + 1 + chunk.length} were not geocoded (${failed}); the other rows go on.`;
+    chunk.forEach((row, j) => {
+      const hit = answers[j] && answers[j][0];
+      const level = asked[j].skipped || (failed ? "error" : levelOf(hit));
+      counts[level] = (counts[level] || 0) + 1;
+      out.push(row.concat(answerCells(hit, level)));
+    });
+    bar.value = Math.min(body.length, i + 500);
+    $("counts").textContent = Object.entries(counts).map(([k, v]) => `${k}: ${v}`).join(" · ");
+  }
+  const t = $("preview"); t.innerHTML = "";
+  out.slice(0, 21).forEach((row, i) => {
+    const tr = t.insertRow();
+    row.forEach((v) => { const c = tr.insertCell(); c.textContent = v; });
+    const base = row.length - ANSWER_COLUMNS.length, lat = row[base], lon = row[base + 1];
+    if (i > 0 && lat !== "") {
+      const a = document.createElement("a"); a.textContent = "map"; a.target = "_blank";
+      a.onclick = () => { a.href = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=19/${lat}/${lon}`; };
+      tr.insertCell().appendChild(a);
+    }
+  });
+  $("save").hidden = false;
+}
+$("save").onclick = () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([toCsv(out, delimiter)], {type: "text/csv"}));
+  a.download = "geocoded.csv"; a.click();
+};
+</script>
+</body>
+</html>

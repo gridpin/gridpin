@@ -1,0 +1,590 @@
+# Country names -> ISO 3166-1 alpha-2, for picking a sheet or a country by the end of a query.
+# English short names and alpha-3 codes: ISO 3166-1 (as published by Debian iso-codes, read with pycountry 24.6.1,
+# 09.11.2026); other names written by hand. One name per line: code<TAB>name. Matching is on normalized text.
+AW	Aruba
+AW	ABW
+AF	Afghanistan
+AF	AFG
+AO	Angola
+AO	AGO
+AI	Anguilla
+AI	AIA
+AX	Åland Islands
+AX	ALA
+AL	Albania
+AL	ALB
+AD	Andorra
+AD	AND
+AE	United Arab Emirates
+AE	ARE
+AR	Argentina
+AR	ARG
+AR	Argentina
+AM	Armenia
+AM	ARM
+AS	American Samoa
+AS	ASM
+AQ	Antarctica
+AQ	ATA
+TF	French Southern Territories
+TF	ATF
+AG	Antigua and Barbuda
+AG	ATG
+AU	Australia
+AU	AUS
+AU	Australie
+AT	Austria
+AT	AUT
+AT	Österreich
+AT	Autriche
+AZ	Azerbaijan
+AZ	AZE
+BI	Burundi
+BI	BDI
+BE	Belgium
+BE	BEL
+BE	België
+BE	Belgique
+BJ	Benin
+BJ	BEN
+BQ	Bonaire, Sint Eustatius and Saba
+BQ	BES
+BF	Burkina Faso
+BF	BFA
+BD	Bangladesh
+BD	BGD
+BG	Bulgaria
+BG	BGR
+BH	Bahrain
+BH	BHR
+BS	Bahamas
+BS	BHS
+BA	Bosnia and Herzegovina
+BA	BIH
+BL	Saint Barthélemy
+BL	BLM
+BY	Belarus
+BY	BLR
+BZ	Belize
+BZ	BLZ
+BM	Bermuda
+BM	BMU
+BO	Bolivia
+BO	Bolivia, Plurinational State of
+BO	BOL
+BO	Bolivia
+BR	Brazil
+BR	BRA
+BR	Brasil
+BR	Brésil
+BB	Barbados
+BB	BRB
+BN	Brunei Darussalam
+BN	BRN
+BT	Bhutan
+BT	BTN
+BV	Bouvet Island
+BV	BVT
+BW	Botswana
+BW	BWA
+CF	Central African Republic
+CF	CAF
+CA	Canada
+CA	CAN
+CA	Kanada
+CC	Cocos (Keeling) Islands
+CC	CCK
+CH	Switzerland
+CH	CHE
+CH	Schweiz
+CH	Suisse
+CH	Svizzera
+CL	Chile
+CL	CHL
+CL	Chile
+CN	China
+CN	CHN
+CN	中国
+CI	Côte d'Ivoire
+CI	CIV
+CM	Cameroon
+CM	CMR
+CD	Congo, The Democratic Republic of the
+CD	COD
+CG	Congo
+CG	COG
+CK	Cook Islands
+CK	COK
+CO	Colombia
+CO	COL
+CO	Colombia
+KM	Comoros
+KM	COM
+CV	Cabo Verde
+CV	CPV
+CR	Costa Rica
+CR	CRI
+CU	Cuba
+CU	CUB
+CW	Curaçao
+CW	CUW
+CX	Christmas Island
+CX	CXR
+KY	Cayman Islands
+KY	CYM
+CY	Cyprus
+CY	CYP
+CZ	Czechia
+CZ	CZE
+CZ	Czechia
+CZ	Česko
+DE	Germany
+DE	DEU
+DE	Deutschland
+DE	Allemagne
+DE	Alemania
+DJ	Djibouti
+DJ	DJI
+DM	Dominica
+DM	DMA
+DK	Denmark
+DK	DNK
+DK	Danmark
+DO	Dominican Republic
+DO	DOM
+DZ	Algeria
+DZ	DZA
+EC	Ecuador
+EC	ECU
+EG	Egypt
+EG	EGY
+ER	Eritrea
+ER	ERI
+EH	Western Sahara
+EH	ESH
+ES	Spain
+ES	ESP
+ES	España
+ES	Espanya
+ES	Espagne
+ES	Spanien
+EE	Estonia
+EE	EST
+ET	Ethiopia
+ET	ETH
+FI	Finland
+FI	FIN
+FI	Suomi
+FJ	Fiji
+FJ	FJI
+FK	Falkland Islands (Malvinas)
+FK	FLK
+FR	France
+FR	FRA
+FR	République française
+FO	Faroe Islands
+FO	FRO
+FM	Micronesia, Federated States of
+FM	FSM
+GA	Gabon
+GA	GAB
+GB	United Kingdom
+GB	GBR
+GB	United Kingdom
+GB	UK
+GB	Great Britain
+GB	England
+GB	Scotland
+GB	Wales
+GE	Georgia
+GE	GEO
+GG	Guernsey
+GG	GGY
+GH	Ghana
+GH	GHA
+GI	Gibraltar
+GI	GIB
+GN	Guinea
+GN	GIN
+GP	Guadeloupe
+GP	GLP
+GM	Gambia
+GM	GMB
+GW	Guinea-Bissau
+GW	GNB
+GQ	Equatorial Guinea
+GQ	GNQ
+GR	Greece
+GR	GRC
+GR	Ελλάδα
+GR	Greece
+GD	Grenada
+GD	GRD
+GL	Greenland
+GL	GRL
+GT	Guatemala
+GT	GTM
+GF	French Guiana
+GF	GUF
+GU	Guam
+GU	GUM
+GY	Guyana
+GY	GUY
+HK	Hong Kong
+HK	HKG
+HM	Heard Island and McDonald Islands
+HM	HMD
+HN	Honduras
+HN	HND
+HR	Croatia
+HR	HRV
+HR	Hrvatska
+HT	Haiti
+HT	HTI
+HU	Hungary
+HU	HUN
+HU	Magyarország
+ID	Indonesia
+ID	IDN
+IM	Isle of Man
+IM	IMN
+IN	India
+IN	IND
+IO	British Indian Ocean Territory
+IO	IOT
+IE	Ireland
+IE	IRL
+IR	Iran
+IR	Iran, Islamic Republic of
+IR	IRN
+IR	Iran
+IQ	Iraq
+IQ	IRQ
+IS	Iceland
+IS	ISL
+IL	Israel
+IL	ISR
+IT	Italy
+IT	ITA
+IT	Italia
+IT	Italie
+JM	Jamaica
+JM	JAM
+JE	Jersey
+JE	JEY
+JO	Jordan
+JO	JOR
+JP	Japan
+JP	JPN
+JP	日本
+KZ	Kazakhstan
+KZ	KAZ
+KE	Kenya
+KE	KEN
+KG	Kyrgyzstan
+KG	KGZ
+KH	Cambodia
+KH	KHM
+KI	Kiribati
+KI	KIR
+KN	Saint Kitts and Nevis
+KN	KNA
+KR	Korea, Republic of
+KR	South Korea
+KR	KOR
+KR	South Korea
+KR	Korea
+KW	Kuwait
+KW	KWT
+LA	Lao People's Democratic Republic
+LA	Laos
+LA	LAO
+LA	Laos
+LB	Lebanon
+LB	LBN
+LR	Liberia
+LR	LBR
+LY	Libya
+LY	LBY
+LC	Saint Lucia
+LC	LCA
+LI	Liechtenstein
+LI	LIE
+LK	Sri Lanka
+LK	LKA
+LS	Lesotho
+LS	LSO
+LT	Lithuania
+LT	LTU
+LU	Luxembourg
+LU	LUX
+LV	Latvia
+LV	LVA
+MO	Macao
+MO	MAC
+MF	Saint Martin (French part)
+MF	MAF
+MA	Morocco
+MA	MAR
+MC	Monaco
+MC	MCO
+MC	Monaco
+MD	Moldova
+MD	Moldova, Republic of
+MD	MDA
+MD	Moldova
+MG	Madagascar
+MG	MDG
+MV	Maldives
+MV	MDV
+MX	Mexico
+MX	MEX
+MX	México
+MX	Mexique
+MX	Estados Unidos Mexicanos
+MH	Marshall Islands
+MH	MHL
+MK	North Macedonia
+MK	MKD
+ML	Mali
+ML	MLI
+MT	Malta
+MT	MLT
+MM	Myanmar
+MM	MMR
+ME	Montenegro
+ME	MNE
+MN	Mongolia
+MN	MNG
+MP	Northern Mariana Islands
+MP	MNP
+MZ	Mozambique
+MZ	MOZ
+MR	Mauritania
+MR	MRT
+MS	Montserrat
+MS	MSR
+MQ	Martinique
+MQ	MTQ
+MU	Mauritius
+MU	MUS
+MW	Malawi
+MW	MWI
+MY	Malaysia
+MY	MYS
+YT	Mayotte
+YT	MYT
+NA	Namibia
+NA	NAM
+NC	New Caledonia
+NC	NCL
+NE	Niger
+NE	NER
+NF	Norfolk Island
+NF	NFK
+NG	Nigeria
+NG	NGA
+NI	Nicaragua
+NI	NIC
+NU	Niue
+NU	NIU
+NL	Netherlands
+NL	NLD
+NL	Nederland
+NL	Holland
+NL	The Netherlands
+NL	Pays-Bas
+NL	Países Bajos
+NO	Norway
+NO	NOR
+NO	Norge
+NP	Nepal
+NP	NPL
+NR	Nauru
+NR	NRU
+NZ	New Zealand
+NZ	NZL
+OM	Oman
+OM	OMN
+PK	Pakistan
+PK	PAK
+PA	Panama
+PA	PAN
+PN	Pitcairn
+PN	PCN
+PE	Peru
+PE	PER
+PE	Perú
+PH	Philippines
+PH	PHL
+PW	Palau
+PW	PLW
+PG	Papua New Guinea
+PG	PNG
+PL	Poland
+PL	POL
+PL	Polska
+PR	Puerto Rico
+PR	PRI
+KP	Korea, Democratic People's Republic of
+KP	North Korea
+KP	PRK
+KP	North Korea
+PT	Portugal
+PT	PRT
+PT	Portugal
+PY	Paraguay
+PY	PRY
+PS	Palestine, State of
+PS	PSE
+PF	French Polynesia
+PF	PYF
+QA	Qatar
+QA	QAT
+RE	Réunion
+RE	REU
+RO	Romania
+RO	ROU
+RU	Russian Federation
+RU	RUS
+RU	Russia
+RW	Rwanda
+RW	RWA
+SA	Saudi Arabia
+SA	SAU
+SD	Sudan
+SD	SDN
+SN	Senegal
+SN	SEN
+SG	Singapore
+SG	SGP
+GS	South Georgia and the South Sandwich Islands
+GS	SGS
+SH	Saint Helena, Ascension and Tristan da Cunha
+SH	SHN
+SJ	Svalbard and Jan Mayen
+SJ	SJM
+SB	Solomon Islands
+SB	SLB
+SL	Sierra Leone
+SL	SLE
+SV	El Salvador
+SV	SLV
+SM	San Marino
+SM	SMR
+SO	Somalia
+SO	SOM
+PM	Saint Pierre and Miquelon
+PM	SPM
+RS	Serbia
+RS	SRB
+RS	Srbija
+RS	Serbie
+SS	South Sudan
+SS	SSD
+ST	Sao Tome and Principe
+ST	STP
+SR	Suriname
+SR	SUR
+SK	Slovakia
+SK	SVK
+SI	Slovenia
+SI	SVN
+SE	Sweden
+SE	SWE
+SE	Sverige
+SZ	Eswatini
+SZ	SWZ
+SX	Sint Maarten (Dutch part)
+SX	SXM
+SC	Seychelles
+SC	SYC
+SY	Syria
+SY	Syrian Arab Republic
+SY	SYR
+SY	Syria
+TC	Turks and Caicos Islands
+TC	TCA
+TD	Chad
+TD	TCD
+TG	Togo
+TG	TGO
+TH	Thailand
+TH	THA
+TJ	Tajikistan
+TJ	TJK
+TK	Tokelau
+TK	TKL
+TM	Turkmenistan
+TM	TKM
+TL	Timor-Leste
+TL	TLS
+TO	Tonga
+TO	TON
+TT	Trinidad and Tobago
+TT	TTO
+TN	Tunisia
+TN	TUN
+TR	Türkiye
+TR	TUR
+TR	Türkiye
+TR	Turkey
+TV	Tuvalu
+TV	TUV
+TW	Taiwan
+TW	Taiwan, Province of China
+TW	TWN
+TW	Taiwan
+TZ	Tanzania
+TZ	Tanzania, United Republic of
+TZ	TZA
+TZ	Tanzania
+UG	Uganda
+UG	UGA
+UA	Ukraine
+UA	UKR
+UA	Ukraine
+UM	United States Minor Outlying Islands
+UM	UMI
+UY	Uruguay
+UY	URY
+US	United States
+US	USA
+US	USA
+US	U.S.A.
+US	United States of America
+US	America
+UZ	Uzbekistan
+UZ	UZB
+UZ	Oʻzbekiston
+UZ	Uzbekistan
+VA	Holy See (Vatican City State)
+VA	VAT
+VC	Saint Vincent and the Grenadines
+VC	VCT
+VE	Venezuela
+VE	Venezuela, Bolivarian Republic of
+VE	VEN
+VE	Venezuela
+VG	Virgin Islands, British
+VG	VGB
+VI	Virgin Islands, U.S.
+VI	VIR
+VN	Viet Nam
+VN	Vietnam
+VN	VNM
+VN	Vietnam
+VU	Vanuatu
+VU	VUT
+WF	Wallis and Futuna
+WF	WLF
+WS	Samoa
+WS	WSM
+YE	Yemen
+YE	YEM
+ZA	South Africa
+ZA	ZAF
+ZM	Zambia
+ZM	ZMB
+ZW	Zimbabwe
+ZW	ZWE

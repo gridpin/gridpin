@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gridpin-address demo</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 16px}pre{background:#f4f6f8;padding:8px;white-space:pre-wrap}</style>
+<script type="module" src="gridpin-address.js"></script>
+</head><body>
+<h1>Address field with suggestions</h1>
+<p>Start <code>gridpin serve &lt;sheet&gt; --port 8080</code>, then type a street. Arrows move, Enter chooses.</p>
+<label for="addr">Address</label>
+<gridpin-address id="addr" endpoint="http://127.0.0.1:8080" min-chars="3" placeholder="27 boulevard des Moulins"></gridpin-address>
+<pre id="chosen">nothing chosen yet</pre>
+<script>
+const params = new URLSearchParams(location.search);
+const field = document.getElementById("addr");
+if (params.get("endpoint")) field.setAttribute("endpoint", params.get("endpoint"));
+field.addEventListener("gridpin-select", (e) => {
+  document.getElementById("chosen").textContent = JSON.stringify(e.detail, null, 2);
+});
+</script>
+</body></html>

@@ -1,0 +1,18 @@
+[package]
+name = "gridpin-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "GridPin in WebAssembly: geocode in a browser or Node from a sheet held in memory, no server"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+gridpin = { path = "../../gridpin" }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+opt-level = "s"

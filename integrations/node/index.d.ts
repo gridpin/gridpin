@@ -14,13 +14,20 @@ export interface Hit {
   distance_m?: number;
   /** true when the engine itself says the answer needs a check before use */
   weak: boolean;
+  /** PointAddress | StreetAddress | StreetAddressExt | StreetName | Postal | Locality | POI */
+  match_level: string;
+  /** M matched | T tied (the same answers as weak: true) */
+  match_status: string;
+  /** only with the `with` option: the fields asked for (h3, geohash, placekey_where, plus_code, mgrs, dms, street_point, street_point_m, links, provenance) */
+  extras?: Record<string, unknown>;
 }
 
 export class Geocoder {
   constructor(sheet: string, options?: { poi?: string });
-  geocode(query: string, options?: { k?: number }): Hit[];
-  geocodeMany(queries: Iterable<string | null | undefined>, options?: { k?: number }): Hit[][];
-  reverse(lat: number, lon: number, options?: { k?: number }): Hit[];
+  /** `with`: extra answer fields as in `gridpin batch --with` ("h3,geohash,placekey,codes,street_point,links,provenance"); each hit gets `extras`. */
+  geocode(query: string, options?: { k?: number; with?: string }): Hit[];
+  geocodeMany(queries: Iterable<string | null | undefined>, options?: { k?: number; with?: string }): Hit[][];
+  reverse(lat: number, lon: number, options?: { k?: number; with?: string }): Hit[];
   close(): void;
 }
 

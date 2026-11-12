@@ -100,6 +100,32 @@ int main(int argc, char **argv) {
     free(s);
     gridpin_response_drop(r);
 
+    GridpinText with = text("h3,codes");
+    r = gridpin_invoke_with(state, GRIDPIN_OP_GEOCODE, 1, &with, q, NULL, NULL, NULL, 1);
+    s = row_of(r, 0, &st);
+    CHECK(st == 0 && contains(s, "\"extras\":{") && contains(s, "\"h3\":\"") && contains(s, "\"mgrs\":"),
+          "with = h3,codes puts an extras object on every hit");
+    free(s);
+    gridpin_response_drop(r);
+    GridpinText no_with = text(NULL);
+    r = gridpin_invoke_with(state, GRIDPIN_OP_GEOCODE, 1, &no_with, q, NULL, NULL, NULL, 1);
+    s = row_of(r, 0, &st);
+    CHECK(st == 0 && s && s[0] == '[' && !contains(s, "extras"), "a null with is gridpin_invoke_k");
+    free(s);
+    gridpin_response_drop(r);
+    GridpinText bad_with = text("zip");
+    r = gridpin_invoke_with(state, GRIDPIN_OP_GEOCODE, 1, &bad_with, q, NULL, NULL, NULL, 1);
+    s = row_of(r, 0, &st);
+    CHECK(st == 1 && contains(s, "unknown field"), "an unknown field is an error naming the known ones");
+    free(s);
+    gridpin_response_drop(r);
+    r = gridpin_invoke_with(state, GRIDPIN_OP_REVERSE, 1, &with, NULL, &(double){43.73}, &(double){7.42},
+                            &(uint8_t){0}, 1);
+    s = row_of(r, 0, &st);
+    CHECK(st == 0 && contains(s, "\"plus_code\":"), "reverse takes with too");
+    free(s);
+    gridpin_response_drop(r);
+
     r = gridpin_invoke_k(state, GRIDPIN_OP_GEOCODE, 0, q, NULL, NULL, NULL, 1);
     s = row_of(r, 0, &st);
     CHECK(st == 1 && contains(s, "k must be at least 1"), "k = 0 is refused");

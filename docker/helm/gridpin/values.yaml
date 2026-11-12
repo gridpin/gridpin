@@ -1,0 +1,12 @@
+# One Deployment and Service per country; each image carries its sheet (ghcr.io/gridpin/gridpin:<country>-<tag>,
+# the tags the release pushes; linux/amd64 only).
+image:
+  repository: ghcr.io/gridpin/gridpin
+  tag: "0.9.0"
+  pullPolicy: IfNotPresent
+countries: [fr]
+port: 8080
+replicas: 1
+resources:
+  requests: {cpu: 250m, memory: 512Mi}
+  limits: {memory: 2Gi}

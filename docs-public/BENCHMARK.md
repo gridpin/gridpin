@@ -101,7 +101,7 @@ other Spanish sets Photon leads.**
   the Spanish country contour (Overture 2026-08-19.0, land and maritime union) is excluded equally for all three
   engines.
 
-**What it shows.** Distorted addresses: GridPin 33.84%, Photon 29.56%, Nominatim 20.82% — GridPin ahead of
+**What it shows.** Distorted addresses: GridPin 34.03%, Photon 29.56%, Nominatim 20.82% — GridPin ahead of
 both, beyond chance, though by less than in Germany. Andalusia schools: Photon 63.50% leads; GridPin 59.20% and
 Nominatim 60.80% are level (not proof of parity).
 
@@ -110,7 +110,7 @@ Nominatim 60.80% are level (not proof of parity).
 | andalusia | gridpin | 2000 | 1802 | 198 | 887 | 1184 | 1490 | 1638 |
 | andalusia | nominatim | 2000 | 1666 | 334 | 700 | 1216 | 1568 | 1613 |
 | andalusia | photon | 2000 | 1938 | 62 | 726 | 1270 | 1760 | 1894 |
-| distorted | gridpin | 1590 | 1048 | 542 | 385 | 538 | 738 | 958 |
+| distorted | gridpin | 1590 | 1051 | 539 | 387 | 541 | 741 | 961 |
 | distorted | nominatim | 1590 | 511 | 1079 | 226 | 331 | 443 | 465 |
 | distorted | photon | 1590 | 875 | 715 | 347 | 470 | 626 | 692 |
 
@@ -120,8 +120,8 @@ Exact paired two-sided McNemar tests at ≤150 m:
 |---|---|---:|---:|---:|---:|---:|---|
 | andalusia | Nominatim | 377 | 409 | 807 | 407 | 0.268831 | level — not proof of parity |
 | andalusia | Photon | 358 | 444 | 826 | 372 | 0.00266489 | Photon ahead |
-| distorted | Nominatim | 340 | 133 | 198 | 919 | 5.90642e-22 | GridPin ahead |
-| distorted | Photon | 297 | 229 | 241 | 823 | 0.00344627 | GridPin ahead |
+| distorted | Nominatim | 342 | 132 | 199 | 917 | 1.58319e-22 | GridPin ahead |
+| distorted | Photon | 299 | 228 | 242 | 821 | 0.00226359 | GridPin ahead |
 
 Services: GridPin ran `batch -k 1`, one thread, on 2026-09-28 against the release sheet `spain.bin` (v0.3.0).
 Andalusia competitors, 2026-09-25: public Nominatim 5.3.0 (`data_updated` 2026-09-25T02:01:59Z before and
@@ -151,16 +151,16 @@ GridPin builds.
 Wikidata (2,376 rows each) and the CNES health-facility register as typed (1,000). Two clean rows outside the
 country contour are excluded equally for all three engines. These sets are not observed human search traffic.
 
-**What it shows.** Distorted addresses: GridPin 20.71% and Photon 19.82% are level (not proof of parity), both
-well ahead of Nominatim 9.64%. Health-facility register: GridPin 36.20% leads both Photon 28.20% and Nominatim
-20.70%, beyond chance. Clean addresses: on clean Brazilian addresses Photon leads too (25.5% vs 23.2%).
+**What it shows.** Distorted addresses: GridPin 20.79% and Photon 19.82% are level (not proof of parity), both
+well ahead of Nominatim 9.64%. Health-facility register: GridPin 36.80% leads both Photon 28.20% and Nominatim
+20.70%, beyond chance. Clean addresses: on clean Brazilian addresses Photon leads too (25.5% vs 23.3%).
 
 | Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| clean | gridpin | 2376 | 1551 | 825 | 270 | 551 | 972 | 1251 |
+| clean | gridpin | 2376 | 1549 | 827 | 271 | 554 | 974 | 1252 |
 | clean | nominatim | 2376 | 1009 | 1367 | 172 | 412 | 783 | 884 |
 | clean | photon | 2376 | 1494 | 882 | 311 | 607 | 1114 | 1271 |
-| distorted | gridpin | 2376 | 1372 | 1004 | 229 | 492 | 846 | 1093 |
+| distorted | gridpin | 2376 | 1370 | 1006 | 230 | 494 | 847 | 1094 |
 | distorted | nominatim | 2376 | 514 | 1862 | 100 | 229 | 413 | 461 |
 | distorted | photon | 2376 | 1206 | 1170 | 241 | 471 | 879 | 996 |
 | cnes | gridpin | 1000 | 752 | 248 | 270 | 368 | 604 | 707 |
@@ -171,8 +171,8 @@ Exact paired two-sided McNemar tests at ≤150 m:
 
 | Set | Comparator | GridPin only | Comparator only | Both | Neither | p | Reading |
 |---|---|---:|---:|---:|---:|---:|---|
-| distorted | Nominatim | 373 | 110 | 119 | 1,774 | 1.72106e-34 | GridPin ahead |
-| distorted | Photon | 277 | 256 | 215 | 1,628 | 0.386346 | level — not proof of parity |
+| distorted | Nominatim | 374 | 109 | 120 | 1,773 | 5.03758e-35 | GridPin ahead |
+| distorted | Photon | 278 | 255 | 216 | 1,627 | 0.340635 | level — not proof of parity |
 | cnes | Nominatim | 246 | 85 | 122 | 547 | 2.71682e-19 | GridPin ahead |
 | cnes | Photon | 202 | 116 | 166 | 516 | 1.63145e-06 | GridPin ahead |
 
@@ -211,17 +211,17 @@ truth, computed with `wikidata4_regress.py`.
 (3,655 rows each) and the National Register of Historic Places as recorded (1,000). Rows outside the 50 states and
 DC are excluded equally for all three engines. These sets are not observed human search traffic.
 
-**What it shows.** Distorted addresses: GridPin 32.72% leads Photon 28.45% and Nominatim 24.32%, beyond chance.
-Historic-places register: GridPin 64.00% leads Photon 38.90% and Nominatim 52.30%, beyond chance. Clean addresses:
-on clean US addresses Nominatim and Photon both lead (42.5% and 41.3% vs 39.1%). One nationwide sheet with point
+**What it shows.** Distorted addresses: GridPin 37.37% leads Photon 28.45% and Nominatim 24.32%, beyond chance.
+Historic-places register: GridPin 64.10% leads Photon 38.90% and Nominatim 52.30%, beyond chance. Clean addresses:
+on clean US addresses Nominatim and Photon both lead (42.5% and 41.3% vs 39.2%). One nationwide sheet with point
 addresses in 35 states and Census address ranges elsewhere; range answers are interpolated.
 
 | Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| clean | gridpin | 3655 | 3471 | 184 | 847 | 1430 | 2097 | 2292 |
+| clean | gridpin | 3655 | 3476 | 179 | 847 | 1432 | 2103 | 2296 |
 | clean | nominatim | 3655 | 3222 | 433 | 991 | 1553 | 2192 | 2338 |
 | clean | photon | 3655 | 3490 | 165 | 1010 | 1510 | 2224 | 2482 |
-| distorted | gridpin | 3655 | 3063 | 592 | 721 | 1204 | 1700 | 1868 |
+| distorted | gridpin | 3655 | 3365 | 290 | 809 | 1366 | 1981 | 2166 |
 | distorted | nominatim | 3655 | 1796 | 1859 | 571 | 889 | 1330 | 1427 |
 | distorted | photon | 3655 | 2864 | 791 | 698 | 1040 | 1601 | 1804 |
 | nrhp | gridpin | 1000 | 895 | 105 | 468 | 641 | 763 | 825 |
@@ -232,10 +232,10 @@ Exact paired two-sided McNemar tests at ≤150 m:
 
 | Set | Comparator | GridPin only | Comparator only | Both | Neither | p | Reading |
 |---|---|---:|---:|---:|---:|---:|---|
-| clean | Nominatim | 348 | 471 | 1,082 | 1,754 | 1.95005e-05 | Nominatim ahead |
-| clean | Photon | 474 | 554 | 956 | 1,671 | 0.013703 | Photon ahead |
-| distorted | Nominatim | 657 | 342 | 547 | 2,109 | 1.26392e-23 | GridPin ahead |
-| distorted | Photon | 616 | 452 | 588 | 1,999 | 5.82017e-07 | GridPin ahead |
+| clean | Nominatim | 350 | 471 | 1,082 | 1,752 | 2.72734e-05 | Nominatim ahead |
+| clean | Photon | 476 | 554 | 956 | 1,669 | 0.0163881 | Photon ahead |
+| distorted | Nominatim | 707 | 230 | 659 | 2,059 | 4.67802e-57 | GridPin ahead |
+| distorted | Photon | 670 | 344 | 696 | 1,945 | 7.33638e-25 | GridPin ahead |
 | nrhp | Nominatim | 176 | 58 | 465 | 301 | 5.22407e-15 | GridPin ahead |
 | nrhp | Photon | 309 | 57 | 332 | 302 | 5.28401e-43 | GridPin ahead |
 
@@ -275,20 +275,20 @@ truth, computed with `wikidata4_regress.py`.
 from the ISED Technical and Administrative Frequency List, as recorded. These sets are not observed human search
 traffic.
 
-**What it shows.** Distorted addresses: GridPin 55.94% leads Photon 45.21% and Nominatim 32.68%, beyond chance.
+**What it shows.** Distorted addresses: GridPin 55.98% leads Photon 45.21% and Nominatim 32.68%, beyond chance.
 Radio-station sites: GridPin 39.30% and Photon 39.30% are level (not proof of parity), both ahead of Nominatim
 25.20%. Clean addresses: on clean Canadian addresses Photon leads (59.1% vs 57.5%; Nominatim 57.2%); the set cannot tell the three apart beyond chance. One
 nationwide sheet with point addresses in all provinces and territories; answers carry the Canadian postal code.
 
 | Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| clean | gridpin | 2785 | 2698 | 87 | 1060 | 1602 | 1949 | 2045 |
+| clean | gridpin | 2785 | 2703 | 82 | 1060 | 1602 | 1951 | 2048 |
 | clean | nominatim | 2785 | 2587 | 198 | 1011 | 1593 | 1912 | 2035 |
 | clean | photon | 2785 | 2751 | 34 | 1038 | 1646 | 1988 | 2110 |
-| distorted | gridpin | 2785 | 2658 | 127 | 1032 | 1558 | 1897 | 1996 |
+| distorted | gridpin | 2785 | 2664 | 121 | 1033 | 1559 | 1899 | 2001 |
 | distorted | nominatim | 2785 | 1493 | 1292 | 602 | 910 | 1109 | 1185 |
 | distorted | photon | 2785 | 2453 | 332 | 827 | 1259 | 1535 | 1652 |
-| tafl | gridpin | 1000 | 810 | 190 | 184 | 393 | 623 | 699 |
+| tafl | gridpin | 1000 | 809 | 191 | 184 | 393 | 623 | 699 |
 | tafl | nominatim | 1000 | 605 | 395 | 131 | 252 | 425 | 537 |
 | tafl | photon | 1000 | 806 | 194 | 204 | 393 | 607 | 696 |
 
@@ -298,8 +298,8 @@ Exact paired two-sided McNemar tests at ≤150 m:
 |---|---|---:|---:|---:|---:|---:|---|
 | clean | Nominatim | 393 | 384 | 1,209 | 799 | 0.774135 | level |
 | clean | Photon | 349 | 393 | 1,253 | 790 | 0.114372 | level |
-| distorted | Nominatim | 867 | 219 | 691 | 1,008 | 1.20016e-91 | GridPin ahead |
-| distorted | Photon | 625 | 326 | 933 | 901 | 1.94838e-22 | GridPin ahead |
+| distorted | Nominatim | 868 | 219 | 691 | 1,007 | 7.51195e-92 | GridPin ahead |
+| distorted | Photon | 626 | 326 | 933 | 900 | 1.47901e-22 | GridPin ahead |
 | tafl | Nominatim | 200 | 59 | 193 | 548 | 4.10126e-19 | GridPin ahead |
 | tafl | Photon | 120 | 120 | 273 | 487 | 1 | level |
 
@@ -340,18 +340,18 @@ truth, computed with `wikidata4_regress.py`.
 Cultura), addresses as the venues write them. Rows whose point lies outside Mexico were removed before selection.
 These sets are not observed human search traffic.
 
-**What it shows.** Distorted addresses: GridPin 24.05% leads Photon 13.80% and Nominatim 7.65%, beyond chance.
+**What it shows.** Distorted addresses: GridPin 24.10% leads Photon 13.80% and Nominatim 7.65%, beyond chance.
 Cultural venues: GridPin 28.00% leads Photon 17.30% and Nominatim 10.20%, beyond chance. Clean addresses: on clean
-Mexican addresses GridPin leads (29.2% vs Photon 15.9%, Nominatim 10.1%); the set has 2,000 rows, so the margin of error
+Mexican addresses GridPin leads (29.4% vs Photon 15.9%, Nominatim 10.1%); the set has 2,000 rows, so the margin of error
 is about ±2 points. The address layer was surveyed in 2009–2010, so newer addresses are missing from it. One
 nationwide sheet; answers carry the postal code where the source has one.
 
 | Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| clean | gridpin | 2000 | 1247 | 753 | 435 | 585 | 851 | 1012 |
+| clean | gridpin | 2000 | 1247 | 753 | 437 | 587 | 852 | 1013 |
 | clean | nominatim | 2000 | 668 | 1332 | 110 | 202 | 416 | 462 |
 | clean | photon | 2000 | 1046 | 954 | 186 | 318 | 697 | 818 |
-| distorted | gridpin | 2000 | 1079 | 921 | 356 | 481 | 677 | 813 |
+| distorted | gridpin | 2000 | 1079 | 921 | 357 | 482 | 678 | 814 |
 | distorted | nominatim | 2000 | 487 | 1513 | 84 | 153 | 302 | 340 |
 | distorted | photon | 2000 | 1026 | 974 | 154 | 276 | 631 | 757 |
 | sic | gridpin | 1000 | 616 | 384 | 200 | 280 | 422 | 533 |
@@ -362,10 +362,10 @@ Exact paired two-sided McNemar tests at ≤150 m:
 
 | Set | Comparator | GridPin only | Comparator only | Both | Neither | p | Reading |
 |---|---|---:|---:|---:|---:|---:|---|
-| clean | Nominatim | 471 | 88 | 114 | 1,327 | 2.99149e-64 | GridPin ahead |
-| clean | Photon | 431 | 164 | 154 | 1,251 | 1.26171e-28 | GridPin ahead |
-| distorted | Nominatim | 411 | 83 | 70 | 1,436 | 3.15518e-53 | GridPin ahead |
-| distorted | Photon | 384 | 179 | 97 | 1,340 | 3.466e-18 | GridPin ahead |
+| clean | Nominatim | 473 | 88 | 114 | 1,325 | 1.05138e-64 | GridPin ahead |
+| clean | Photon | 433 | 164 | 154 | 1,249 | 5.98336e-29 | GridPin ahead |
+| distorted | Nominatim | 412 | 83 | 70 | 1,435 | 1.89426e-53 | GridPin ahead |
+| distorted | Photon | 385 | 179 | 97 | 1,339 | 2.53319e-18 | GridPin ahead |
 | sic | Nominatim | 216 | 38 | 64 | 682 | 2.09717e-31 | GridPin ahead |
 | sic | Photon | 200 | 93 | 80 | 627 | 3.80807e-10 | GridPin ahead |
 
@@ -402,14 +402,14 @@ cultural venues 2026-10-31; all retained. Top-1 great-circle distance to indepen
 
 **What we tested.** Three sets with known coordinates: 2,000 clean addresses (1,327 regular polling places of the 2025 federal election from the Australian Electoral Commission, 673 places from Wikidata), the same 2,000 with one mechanical distortion each, and 1,000 radio sites from the ACMA licence register, addresses as the licensees write them (New South Wales only). Wikidata rows whose coordinate cites a heritage register are excluded: those registers share their points with the address data. These sets are not observed human search traffic.
 
-**What it shows.** Distorted addresses: GridPin leads both (74.6% vs 50.6% and 42.2%), beyond chance. Radio sites: GridPin leads both (65.8% vs 25.2% and 13.0%), beyond chance. Clean addresses: GridPin leads both (75.0% vs 54.1% and 53.2%), on polling places 83.8% vs 59.0% and 59.6%, on Wikidata 57.5% vs 44.4% and 40.6%. Polling places are mostly schools and halls: the reference point is the building, the sheet's point is the address on the lot, so a correct answer can stand beyond 150 m. The AEC does not document how it places points; independence of the kept points was measured, not documented.
+**What it shows.** Distorted addresses: GridPin leads both (74.6% vs 50.6% and 42.2%), beyond chance. Radio sites: GridPin leads both (65.8% vs 25.2% and 13.0%), beyond chance. Clean addresses: GridPin leads both (75.0% vs 54.1% and 53.2%), on polling places 83.8% vs 59.0% and 59.6%, on Wikidata 57.7% vs 44.4% and 40.6%. Polling places are mostly schools and halls: the reference point is the building, the sheet's point is the address on the lot, so a correct answer can stand beyond 150 m. The AEC does not document how it places points; independence of the kept points was measured, not documented.
 
 | Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| clean | gridpin | 2000 | 1990 | 10 | 858 | 1499 | 1858 | 1925 |
+| clean | gridpin | 2000 | 1990 | 10 | 858 | 1500 | 1859 | 1925 |
 | clean | nominatim | 2000 | 1888 | 112 | 494 | 1064 | 1673 | 1824 |
 | clean | photon | 2000 | 1889 | 111 | 525 | 1082 | 1668 | 1828 |
-| distorted | gridpin | 2000 | 1987 | 13 | 854 | 1492 | 1850 | 1921 |
+| distorted | gridpin | 2000 | 1987 | 13 | 854 | 1492 | 1851 | 1921 |
 | distorted | nominatim | 2000 | 1544 | 456 | 373 | 845 | 1358 | 1498 |
 | distorted | photon | 2000 | 1817 | 183 | 479 | 1012 | 1574 | 1740 |
 | acma | gridpin | 1000 | 932 | 68 | 430 | 658 | 857 | 911 |
@@ -418,8 +418,8 @@ cultural venues 2026-10-31; all retained. Top-1 great-circle distance to indepen
 
 | Set | Comparator | GridPin only | Comparator only | Both | Neither | p | Reading |
 |---|---|---:|---:|---:|---:|---:|---|
-| clean | Nominatim | 562 | 127 | 937 | 374 | 3.91875e-66 | GridPin ahead |
-| clean | Photon | 553 | 136 | 946 | 365 | 1.73637e-60 | GridPin ahead |
+| clean | Nominatim | 563 | 127 | 937 | 373 | 2.40014e-66 | GridPin ahead |
+| clean | Photon | 553 | 135 | 947 | 365 | 6.8385e-61 | GridPin ahead |
 | distorted | Nominatim | 738 | 91 | 754 | 417 | 1.08071e-126 | GridPin ahead |
 | distorted | Photon | 615 | 135 | 877 | 373 | 5.71364e-74 | GridPin ahead |
 | acma | Nominatim | 540 | 12 | 118 | 330 | 2.05511e-142 | GridPin ahead |

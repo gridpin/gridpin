@@ -1,0 +1,40 @@
+{
+  "name": "gridpin-wasm",
+  "version": "0.9.0",
+  "description": "GridPin in WebAssembly: geocode in a browser page or in Node from a country sheet held in memory, no server and no network after the sheet is loaded",
+  "license": "Apache-2.0",
+  "homepage": "https://gridpin.dev/docs#wasm",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gridpin/gridpin.git",
+    "directory": "integrations/wasm"
+  },
+  "keywords": [
+    "geocoding",
+    "geocoder",
+    "offline",
+    "address",
+    "reverse-geocoding",
+    "webassembly",
+    "wasm"
+  ],
+  "type": "module",
+  "main": "gridpin.js",
+  "exports": {
+    ".": "./gridpin.js",
+    "./gridpin_wasm.wasm": "./gridpin_wasm.wasm"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "gridpin.js",
+    "gridpin_wasm.wasm",
+    "LICENSE",
+    "THIRDPARTY.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  }
+}

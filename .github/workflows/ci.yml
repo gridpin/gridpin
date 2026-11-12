@@ -133,7 +133,8 @@ jobs:
           # packaging/permissions contract. pycountry is the ISO source used by the country-vote
           # generator exercised by the whole-directory tools test below. Both are pinned like the
           # rest so a clean CI runner observes the same inputs as the local gate.
-          .venv-py/bin/pip install --quiet maturin==1.14.0 pytest==9.1.1 duckdb==1.5.3 pyyaml==6.0.3 pycountry==24.6.1 pandas==2.3.3 geopy==2.5.0  # pinned: a floating input can change the build between runs
+          .venv-py/bin/pip install --quiet maturin==1.14.0 pytest==9.1.1 duckdb==1.5.3 pyyaml==6.0.3 pycountry==24.6.1 pandas==2.3.3 geopy==2.5.0 polars==2.1.0 pandera==0.35.0  # pinned: a floating input can change the build between runs
+          # polars and pandera: gridpin.polars and the pandera check of gridpin.dq (gridpin/tests/test_polars_dq.py, §304)
           # `make mc` runs the prep/ pipeline with the SYSTEM python3 — it needs duckdb too
           pip install --quiet duckdb==1.5.3
           git clone https://github.com/duckdb/extension-ci-tools duckdb-ext/extension-ci-tools
@@ -147,6 +148,69 @@ jobs:
         run: make langchain-venv test-langchain
       - name: QGIS plugin tests (integrations/qgis, QGIS LTR and current release in Docker)
         run: make test-qgis
+
+  # The loadable SQLite extension on the four platforms the release ships (ANSWERS §304 p. 2): the same build.sh and
+  # pinned header as the release job `sqlite`, so a pull request proves the release build first (PRINCIPLES 5.4-bis,
+  # sixth source). Linux and macOS also run the extension's tests on the Monaco smoke sheet.
+  sqlite:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.93.0"  # pinned: a floating input can change the build between runs
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: SQLite header (amalgamation 3.54.1, pinned by checksum)
+        run: python3 .github/sqlite_header.py "$RUNNER_TEMP/sqlite"
+      - name: Build the extension
+        run: SQLITE_INCLUDE="$RUNNER_TEMP/sqlite" sh integrations/sqlite/build.sh
+      - name: Smoke — the extension loads and its engine answers
+        run: python3 .github/sqlite_smoke.py integrations/sqlite
+      - name: Tests on the Monaco smoke sheet
+        if: runner.os != 'Windows'
+        run: |
+          pip install --quiet duckdb==1.5.3 pytest==9.1.1  # pinned: a floating input can change the build between runs
+          make mc
+          python3 -m pytest integrations/sqlite/tests -q
+
+  # .deb and .rpm of the CLI (ANSWERS §304 p. 3), built and installed exactly as the release job `linux-packages` does.
+  linux-packages:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.93.0"  # pinned: a floating input can change the build between runs
+          targets: ${{ matrix.target }}
+      - name: Packaging tools (pinned)
+        run: cargo install --locked cargo-deb@3.8.0 cargo-generate-rpm@0.21.1
+      - name: Build and package
+        run: sh .github/linux_packages.sh ${{ matrix.target }}
+      - name: The .deb installs and runs; both packages carry the license files
+        run: |
+          sudo dpkg -i gridpin/target/${{ matrix.target }}/debian/gridpin_*.deb
+          /usr/bin/gridpin --version
+          cmp -s /usr/share/doc/gridpin/THIRDPARTY.yml gridpin/THIRDPARTY.yml && test -f /usr/share/doc/gridpin/LICENSE
+          command -v rpm >/dev/null || sudo apt-get install -y -qq rpm
+          rpm -qlp gridpin/target/${{ matrix.target }}/generate-rpm/gridpin-*.rpm | tee rpm.txt
+          grep -qx /usr/bin/gridpin rpm.txt && grep -q LICENSE rpm.txt && grep -q THIRDPARTY.yml rpm.txt
 
   node:
     # The npm package (integrations/node): Node-API glue over gridpin-ffi, built here on every platform

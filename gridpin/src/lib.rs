@@ -1,20 +1,46 @@
 //! Geocoder core library (used by both the CLI binary and the Python bindings).
 
+pub mod abbrev;
+pub mod aliases;
+pub mod bench;
 pub mod builder;
+pub mod cite;
+pub mod cluster;
+pub mod codes;
 pub mod compare;
+pub mod country_names;
+pub mod crs;
 mod de;
 #[cfg(test)]
 mod de_effect_audit;
 pub mod diagnosis;
+pub mod exists;
+pub mod explain;
+pub mod export;
+pub mod extract;
+pub mod extras;
+pub mod forms;
+pub mod geojson_io;
+pub mod google;
+pub mod grammar;
 pub mod index;
+pub mod iso20022;
 mod levenshtein;
 pub mod ml;
 pub mod norm;
+pub mod outcome;
+pub mod places;
+pub mod points;
+pub mod postcodes;
+pub mod publish;
 pub mod query;
+pub mod receipt;
 pub mod rules;
 pub mod serve;
 pub mod sheets;
+pub mod slice;
 pub mod tabular;
+pub mod verdict;
 
 #[cfg(feature = "python")]
 mod py;
