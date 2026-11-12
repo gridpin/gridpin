@@ -487,10 +487,13 @@ fn build_places_never_writes_over_its_own_table() {
     std::fs::hard_link(&table, &link).unwrap();
     let helper = dir.join("t.places-input.csv");
     std::fs::write(&helper, body).unwrap();
-    for (input, out) in [
-        (&table, table.clone()),
-        (&table, link.clone()),
-        (&helper, dir.join("t.bin")),
+    // A second hard link of the table is told apart only on unix (dev + ino, as `batch` does):
+    // std has no stable file identity on Windows. There the sheet replaces the link by an atomic
+    // rename, and the table itself must still come through untouched (v0.9.0 Windows CI).
+    for (input, out, refused_everywhere) in [
+        (&table, table.clone(), true),
+        (&table, link.clone(), false),
+        (&helper, dir.join("t.bin"), true),
     ] {
         let o = run(&[
             "build",
@@ -499,10 +502,12 @@ fn build_places_never_writes_over_its_own_table() {
             out.to_str().unwrap(),
         ]);
         let err = String::from_utf8_lossy(&o.stderr);
-        assert!(
-            !o.status.success() && err.contains("destroy"),
-            "{out:?}: {err}"
-        );
+        if refused_everywhere || cfg!(unix) {
+            assert!(
+                !o.status.success() && err.contains("destroy"),
+                "{out:?}: {err}"
+            );
+        }
         assert_eq!(std::fs::read_to_string(input).unwrap(), body, "{out:?}");
     }
     // another name builds
