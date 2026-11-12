@@ -533,6 +533,9 @@ jobs:
           else
             tar czf gridpin_sqlite-${{ matrix.target }}.tar.gz "$ext" LICENSE THIRDPARTY.yml README.md
           fi
+      - name: SQLite module with extension loading (macOS — the runner's Python is built without it)
+        if: runner.os == 'macOS'
+        run: python3 -m pip install --quiet sqlean.py==3.50.4.5  # pinned: a floating input can change the build between runs
       - name: Smoke — the packaged extension loads into SQLite and its engine answers
         run: |
           cd integrations/sqlite && mkdir -p _smoke && cd _smoke

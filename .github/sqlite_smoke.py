@@ -7,6 +7,11 @@ import sqlite3
 import sys
 from pathlib import Path
 
+if not hasattr(sqlite3.Connection, "enable_load_extension"):
+    # The Python of the macOS CI runner is built without extension loading; CI installs sqlean.py there
+    # (a drop-in sqlite3 with loading). Anywhere else a missing module is a loud ImportError, not a skip.
+    import sqlean as sqlite3  # type: ignore[no-redef]
+
 folder = Path(sys.argv[1]).resolve()
 c = sqlite3.connect(":memory:")
 c.enable_load_extension(True)

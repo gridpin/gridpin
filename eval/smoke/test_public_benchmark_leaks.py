@@ -49,7 +49,10 @@ SKIP_DIRECTORIES = {
 CYRILLIC_ALLOWED = {
     "ATTRIBUTIONS.md": "legal attribution",
     "docs-public/FORMAT.md": "documented product-format example",
+    "gridpin/python/gridpin/messy.py": "Serbian Cyrillic transliteration table",
     "gridpin/src/builder.rs": "product-language string literals",
+    "gridpin/src/country_names.rs": "country names in their own script",
+    "gridpin/src/extras.rs": "unit words of addresses and their tests",
     "gridpin/src/norm.rs": "product-language string literals",
     "gridpin/src/query.rs": "product-language string literals",
     "gridpin/src/rules.rs": "product-language string literals",

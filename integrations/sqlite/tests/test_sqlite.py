@@ -7,6 +7,11 @@ from pathlib import Path
 
 import pytest
 
+if not hasattr(sqlite3.Connection, "enable_load_extension"):
+    # The Python of the macOS CI runner is built without extension loading; CI installs sqlean.py there
+    # (a drop-in sqlite3 with loading). Anywhere else a missing module is a loud ImportError, not a skip.
+    import sqlean as sqlite3  # type: ignore[no-redef]
+
 HERE = Path(__file__).resolve().parents[1]
 CODE = HERE.parents[1]
 EXT = HERE / ("gridpin_sqlite.dylib" if sys.platform == "darwin" else "gridpin_sqlite.so")

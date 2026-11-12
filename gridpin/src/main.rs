@@ -973,15 +973,32 @@ fn main() -> anyhow::Result<()> {
             );
         }
     }));
-    let cli = parse_cli();
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(cli))) {
-        Ok(r) => r,
-        Err(_) => {
+    // The whole CLI runs on a thread with an explicit stack. The main thread gets 8 MiB on Linux
+    // and macOS but 1 MiB on Windows, and a debug build overflowed it in argument parsing alone
+    // (the recursive `unhide` walk moves clap `Command` values by value): every CLI test failed
+    // on Windows CI for v0.9.0. One explicit size gives every platform the same headroom.
+    std::thread::Builder::new()
+        .name("gridpin".into())
+        .stack_size(MAIN_STACK_BYTES)
+        .spawn(|| {
+            let cli = parse_cli();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(cli))) {
+                Ok(r) => r,
+                Err(_) => {
+                    eprintln!("gridpin: fatal: corrupt or unsupported input");
+                    std::process::exit(1);
+                }
+            }
+        })?
+        .join()
+        .unwrap_or_else(|_| {
             eprintln!("gridpin: fatal: corrupt or unsupported input");
             std::process::exit(1);
-        }
-    }
+        })
 }
+
+/// Stack of the thread that runs the CLI (see `main`).
+const MAIN_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.cmd {

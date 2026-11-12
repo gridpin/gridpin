@@ -173,6 +173,9 @@ jobs:
         run: python3 .github/sqlite_header.py "$RUNNER_TEMP/sqlite"
       - name: Build the extension
         run: SQLITE_INCLUDE="$RUNNER_TEMP/sqlite" sh integrations/sqlite/build.sh
+      - name: SQLite module with extension loading (macOS — the runner's Python is built without it)
+        if: runner.os == 'macOS'
+        run: python3 -m pip install --quiet sqlean.py==3.50.4.5  # pinned: a floating input can change the build between runs
       - name: Smoke — the extension loads and its engine answers
         run: python3 .github/sqlite_smoke.py integrations/sqlite
       - name: Tests on the Monaco smoke sheet
