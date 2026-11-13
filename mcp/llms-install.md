@@ -56,6 +56,7 @@ only a few environment variables, so a `GRIDPIN_HOME` exported in the user's she
 | `geocode` | address -> ranked candidates (`lat`, `lon`, `precision`, `confidence`, ...) |
 | `reverse` | coordinates -> nearest indexed addresses with `distance_m` |
 | `batch` | up to 1000 addresses of one country per call, in input order |
+| `extract_addresses` | addresses written in a free text, each with its span and answer |
 
 Errors name the next step, for example "the France sheet is not downloaded (365 MB); run
 `gridpin-fetch fr` or call the download_sheet tool".

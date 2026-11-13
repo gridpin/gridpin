@@ -2,7 +2,7 @@
 
 Geocode addresses to coordinates and back on your own machine. GridPin reads one downloadable file per country, so there is no API key and no rate limit, and your addresses are not sent to a geocoding service.
 
-The plugin adds five tools (`list_countries`, `download_sheet`, `geocode`, `reverse`, `batch`) and a skill that tells Claude when to use them and how to read the answer, including when an answer is only approximate.
+The plugin adds six tools (`list_countries`, `download_sheet`, `geocode`, `reverse`, `batch`, `extract_addresses`) and a skill that tells Claude when to use them and how to read the answer, including when an answer is only approximate.
 
 Try it after installing:
 
@@ -16,7 +16,7 @@ Try it after installing:
 
 ## What it runs, downloads and sends
 
-- **Runs:** `uvx gridpin-mcp==0.5.0`, the open-source [GridPin MCP server](https://github.com/gridpin/gridpin/tree/main/mcp). On first start, `uv` downloads that package and its dependencies from PyPI.
+- **Runs:** `uvx gridpin-mcp==0.6.0`, the open-source [GridPin MCP server](https://github.com/gridpin/gridpin/tree/main/mcp). On first start, `uv` downloads that package and its dependencies from PyPI.
 - **Downloads:** when `download_sheet` is called, one country file from `dl.gridpin.dev`, checked against the SHA-256 in the signed release. Files are kept in `~/.cache/gridpin` unless you set `GRIDPIN_HOME` in the server's environment.
 - **Sends:** the plugin has no telemetry and no account, and its tools send addresses and coordinates nowhere. As with any download, the file host and PyPI see the request itself, not your addresses.
 

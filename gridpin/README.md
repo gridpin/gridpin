@@ -40,7 +40,7 @@ no dependencies.
 The United States is one nationwide sheet: point addresses in 35 states, Census address ranges
 elsewhere; Canada is one nationwide sheet (all provinces and territories). Germany covers **15 of 16 Länder; Bavaria is not covered**. Spain covers all
 52 postal provinces; Brazil is one nationwide sheet; Mexico is one nationwide sheet; Australia is one nationwide sheet. Client update required:
-use 0.8.0, because older engines have no Australian rules.
+use 0.8.0 or newer, because older engines have no Australian rules.
 
 ```python
 import gridpin

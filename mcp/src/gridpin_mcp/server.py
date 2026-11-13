@@ -96,6 +96,21 @@ class BatchOut(TypedDict):
     results: List[BatchRow]
 
 
+class Found(TypedDict):
+    start: int
+    end: int
+    text: str
+    level: str
+    verdict: str
+    reason: NotRequired[str]
+    hit: NotRequired[Hit]
+
+
+class ExtractOut(TypedDict):
+    country: str
+    results: List[Found]
+
+
 class Country(TypedDict):
     code: str
     name: str
@@ -191,6 +206,19 @@ def build_server(session: Optional[tools.Session] = None) -> MCPServer:
     def batch(queries: List[str], country: str, k: int = 1) -> BatchOut:
         """Geocode up to 1000 addresses of one country in a single call, in input order."""
         return session.batch(queries, country, k)
+
+    @server.tool(annotations=_read_only("Find addresses in a text"))
+    @_agent_errors
+    def extract_addresses(text: str, country: str, verify: bool = False) -> ExtractOut:
+        """Find the addresses written in a free text (a letter, an invoice, an answer of a model), offline.
+        Each result is a span of the text (start, end are byte offsets) that the country sheet confirms as a
+        house or a street, with the answer in `hit`.
+
+        verify: also list the addresses with a house number the sheet does not have (verdict "not_found",
+            reason street_unknown, number_not_on_street or ambiguous) -- use it to check a generated text for
+            invented addresses.
+        """
+        return session.extract(text, country, verify)
 
     return server
 

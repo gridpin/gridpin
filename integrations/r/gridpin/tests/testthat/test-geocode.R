@@ -7,6 +7,7 @@ test_that("a known address is found as a house with its coordinates", {
   expect_equal(r$street, "Main Street")
   expect_equal(c(r$lat, r$lon), c(40.7502, -73.9902), tolerance = 1e-7)
   expect_false(r$weak)
+  expect_identical(r$match_status, "M")
   expect_equal(r$rank, 1L)
 })
 

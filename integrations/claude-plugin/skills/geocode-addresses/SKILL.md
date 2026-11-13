@@ -6,7 +6,7 @@ description: Turn addresses into coordinates or coordinates into addresses witho
 Use the `gridpin` MCP tools. They run on this computer, and only `download_sheet` uses the network.
 
 1. Work out which country the addresses are in. If they span several countries, group them and repeat these steps for each. Call `list_countries` to see what is covered, the size of each country's file and whether it is already downloaded. If the country is not covered, say so instead of guessing with another country's file.
-2. If the file is missing, tell the user its size, then call `download_sheet`. The largest file is over 1 GB and can outlast a client's tool timeout. If that happens, have the user run `uvx --from gridpin-mcp==0.5.0 gridpin-fetch <country>` in a terminal, then call the tool again.
+2. If the file is missing, tell the user its size, then call `download_sheet`. The largest file is over 1 GB and can outlast a client's tool timeout. If that happens, have the user run `uvx --from gridpin-mcp==0.6.0 gridpin-fetch <country>` in a terminal, then call the tool again.
 3. Call `geocode` for one address, `batch` for up to 1000 addresses per call, and `reverse` for coordinates. For a longer list, split it into chunks of 1000 and keep the input order. Pass each address as the person wrote it, including city and postcode when known.
 
 Read the result before reporting it:

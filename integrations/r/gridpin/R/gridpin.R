@@ -45,7 +45,8 @@ gp_close <- function(geocoder) {
 }
 
 .gp_columns <- c("query", "rank", "lat", "lon", "precision", "confidence", "weak",
-                 "housenumber", "street", "postcode", "commune", "flags")
+                 "housenumber", "street", "postcode", "commune", "flags",
+                 "match_level", "match_status")
 
 # One data frame row per hit; a query without hits keeps one row with rank NA.
 .gp_table <- function(input, rows, extra = NULL) {
@@ -69,6 +70,9 @@ gp_close <- function(geocoder) {
   out$postcode <- field("postcode", NA_character_)
   out$commune <- field("commune", NA_character_)
   out$flags <- vapply(flat, function(h) paste(unlist(h$flags), collapse = ";"), "")
+  out$match_level <- field("match_level", NA_character_)
+  out$match_status <- field("match_status", NA_character_)
+  out$match_status[is.na(out$rank)] <- "U"
   for (name in extra) out[[name]] <- field(name, NA_real_)
   out
 }
@@ -96,7 +100,8 @@ gp_close <- function(geocoder) {
 #'   address, in input order; with more, one row per candidate and `rank` numbers them.
 #' @param sf Return an `sf` object with WGS84 points (needs the sf package).
 #' @return A data frame with `query`, `rank`, `lat`, `lon`, `precision` (`house`, `interp`,
-#'   `near`, `street`, `city`), `confidence`, `weak` (`TRUE` when the answer is too uncertain to
+#'   `near`, `street`, `city`), `confidence`, `match_level` and `match_status` (the Esri scale; `U` when
+#'   nothing is found), `weak` (`TRUE` when the answer is too uncertain to
 #'   use without a check), the matched `housenumber`, `street`, `postcode`, `commune`, and
 #'   `flags`. Addresses that are not found keep their row with `NA` coordinates.
 #' @export

@@ -325,7 +325,7 @@ jobs:
           listed = call({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                          "params": {"name": "list_countries", "arguments": {}}})["result"]
           p.stdin.close(); p.wait(timeout=30)
-          want = {"list_countries", "download_sheet", "geocode", "reverse", "batch"}
+          want = {"list_countries", "download_sheet", "geocode", "reverse", "batch", "extract_addresses"}
           if tools != want:
               sys.exit(f"::error::tools {sorted(tools)} != {sorted(want)}")
           if listed.get("isError"):

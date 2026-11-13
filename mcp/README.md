@@ -7,7 +7,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets an agent geocode addr
 No API key, no rate limit, and no query leaves the machine. The only network step is
 downloading a country sheet once, verified against the signed GridPin release.
 
-Countries (release v0.8.0): United States, Canada, Germany, France, Italy, Spain, Australia, Mexico, Netherlands, Brazil, Serbia.
+Countries (release v0.9.0): United States, Canada, Germany, France, Italy, Spain, Australia, Mexico, Netherlands, Brazil, Serbia.
 
 ## Add it to an agent
 
@@ -57,10 +57,11 @@ If GridPin is useful to you, [a star on GitHub](https://github.com/gridpin/gridp
 | Tool | What it does |
 |---|---|
 | `list_countries` | covered countries, sheet sizes, which are downloaded |
-| `download_sheet` | fetch one country sheet (32-677 MB) once, verify its SHA-256; the only tool that uses the network |
+| `download_sheet` | fetch one country sheet (32 MB to 1.5 GB) once, verify its SHA-256; the only tool that uses the network |
 | `geocode` | address text -> ranked candidates with `lat`, `lon`, `precision`, `confidence` |
 | `reverse` | coordinates -> nearest indexed addresses with `distance_m` |
 | `batch` | up to 1000 addresses of one country per call, in input order |
+| `extract_addresses` | addresses written in a free text (a letter, an invoice, a model's answer), each with its span and answer; `verify` also lists invented ones |
 
 Results are the same as the GridPin CLI, Python and DuckDB return. Treat `street` or
 `city` precision as approximate.
@@ -69,7 +70,7 @@ Results are the same as the GridPin CLI, Python and DuckDB return. Treat `street
 
 ```console
 $ pip install gridpin-mcp
-$ gridpin-fetch fr          # prints the path, e.g. ~/.cache/gridpin/v0.5.0/france.bin
+$ gridpin-fetch fr          # prints the path, e.g. ~/.cache/gridpin/v0.9.0/france.bin
 ```
 
 ```python

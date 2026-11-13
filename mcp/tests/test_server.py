@@ -35,8 +35,8 @@ def test_tools_are_listed_with_read_only_hints(app):
         async with Client(app) as client:
             return (await client.list_tools()).tools
     listed = {t.name: t for t in run(go())}
-    assert set(listed) == {"list_countries", "download_sheet", "geocode", "reverse", "batch"}
-    for name in ("list_countries", "geocode", "reverse", "batch"):
+    assert set(listed) == {"list_countries", "download_sheet", "geocode", "reverse", "batch", "extract_addresses"}
+    for name in ("list_countries", "geocode", "reverse", "batch", "extract_addresses"):
         assert listed[name].annotations.read_only_hint is True, name
     assert listed["download_sheet"].annotations.read_only_hint is False
     assert listed["download_sheet"].annotations.open_world_hint is True
@@ -52,7 +52,7 @@ def test_every_tool_states_title_and_destructive_hint(app):
         async with Client(app) as client:
             return (await client.list_tools()).tools
     tools_listed = run(go())
-    assert len(tools_listed) == 5
+    assert len(tools_listed) == 6
     for tool in tools_listed:
         name = tool.name
         assert tool.annotations.title, name
@@ -66,6 +66,20 @@ def test_geocode_through_mcp_returns_structured_results(app):
     result = run(go())
     assert not result.is_error
     assert result.structured_content["results"][0]["lat"] > 43
+
+
+def test_extract_addresses_through_mcp_finds_the_address_in_a_text(app):
+    text = "Please send the parcel to 27 boulevard des Moulins, Monaco by Friday."
+    async def go():
+        async with Client(app) as client:
+            return await client.call_tool("extract_addresses", {"text": text, "country": "fr"})
+    result = run(go())
+    assert not result.is_error
+    found = result.structured_content["results"]
+    assert found, "no address found in the text"
+    first = found[0]
+    assert text.encode()[first["start"]:first["end"]].decode() == first["text"]
+    assert "moulins" in first["text"].lower() and first["hit"]["lat"] > 43
 
 
 def test_anticipated_error_reaches_the_model_verbatim(app):

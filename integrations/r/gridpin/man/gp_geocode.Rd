@@ -18,7 +18,8 @@ address, in input order; with more, one row per candidate and `rank` numbers the
 }
 \value{
 A data frame with `query`, `rank`, `lat`, `lon`, `precision` (`house`, `interp`,
-  `near`, `street`, `city`), `confidence`, `weak` (`TRUE` when the answer is too uncertain to
+  `near`, `street`, `city`), `confidence`, `match_level` and `match_status` (the Esri scale; `U` when
+  nothing is found), `weak` (`TRUE` when the answer is too uncertain to
   use without a check), the matched `housenumber`, `street`, `postcode`, `commune`, and
   `flags`. Addresses that are not found keep their row with `NA` coordinates.
 }
