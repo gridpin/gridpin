@@ -73,8 +73,9 @@ macOS Apple Silicon (`aarch64-apple-darwin`) and Windows x86_64
 (`x86_64-pc-windows-msvc`) are attached to every
 [GitHub release](https://github.com/gridpin/gridpin/releases). Since v0.9.0 a release also has
 static Linux builds that run on any distribution (`x86_64-unknown-linux-musl`,
-`aarch64-unknown-linux-musl`) and `.deb` and `.rpm` packages for x86_64 and arm64. Other targets
-(Intel macOS, Windows arm) build from source:
+`aarch64-unknown-linux-musl`) and `.deb` and `.rpm` packages for x86_64 and arm64.
+Homebrew: `brew install gridpin/gridpin/gridpin`; Scoop: `scoop bucket add gridpin https://github.com/gridpin/scoop-gridpin`,
+then `scoop install gridpin`. Other targets (Intel macOS, Windows arm) build from source:
 
 ```console
 $ base=https://github.com/gridpin/gridpin/releases/download/v0.9.0
@@ -126,7 +127,7 @@ Then unzip it and `LOAD` the extracted `gridpin_ext.duckdb_extension` in a `duck
 session — keep
 that basename, DuckDB derives the entry symbol from it.
 
-## Quick start
+## Examples
 
 ### CLI
 
@@ -222,8 +223,7 @@ All files are free; download only the file of the country your addresses are in 
 **Germany covers 15 of 16 Länder; Bavaria is not covered.** In local spot checks, Bavarian queries
 typically returned a distant same-named address with low confidence; less often, an empty answer.
 Neither outcome establishes coverage. These spot checks illustrate failure modes, not population rates.
-The release sheet contains 19,267,049 addresses,
-213,315,143 bytes, and no POI layer. Per-Land providers and licenses are in [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
+Per-Land providers and licenses are in [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
 
 POI coverage is per-country (see the table; we ship a layer only where source data is rich
 enough to help). For France, pass the layer and
