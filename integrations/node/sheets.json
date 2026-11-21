@@ -1,8 +1,8 @@
 {
  "_about": "Sheets of the release this engine ships with: size and SHA-256 from the signed sheets receipt (sheets-receipt.json, signed before the engine is built). The copies in gridpin-mcp, the QGIS plugin and the R package are checked equal to this file (tools/test_sheet_registry.py).",
- "release": "v0.9.0",
+ "release": "v0.10.0",
  "base_url": "https://dl.gridpin.dev",
- "receipt_sha256": "4870456f4396f1fd0457491fa3fc9eedbf2507fd38e6c40a837c986912fd5d41",
+ "receipt_sha256": "0f7ee39d71c45043a3528e70315cbf3b6b54b15f009c3779d80906114f8411cd",
  "sheets": [
   {
    "code": "us",
@@ -29,8 +29,8 @@
    "code": "de",
    "file": "germany.bin",
    "name": "Germany",
-   "sha256": "c0ac3d0cbf3dbd480bff6aebd717e2df96e9f0a2eb4e83aeffde736fa42b18af",
-   "size": 213315143
+   "sha256": "b48640c112ec83c77c3a514ec5fb2d28fe965fcf9c44de96982acfa532ee27eb",
+   "size": 255661278
   },
   {
    "code": "es",
@@ -81,6 +81,20 @@
    "name": "Australia",
    "sha256": "6f19f33536894ff5b0d3444cee6d47ccc57a77a5170a3bcb01244114e68b3867",
    "size": 130385568
+  },
+  {
+   "code": "pl",
+   "file": "poland.bin",
+   "name": "Poland",
+   "sha256": "c9e1f914ea2f627257ede5b221eb106b3173e12f6a549ce2312ecf40d74c76f7",
+   "size": 106180784
+  },
+  {
+   "code": "nz",
+   "file": "new-zealand.bin",
+   "name": "New Zealand",
+   "sha256": "d1918f73bba4d6f365d25e0abef7c9f3e7efba848d38c14a52c32696f1a1e2af",
+   "size": 28970578
   }
  ]
 }

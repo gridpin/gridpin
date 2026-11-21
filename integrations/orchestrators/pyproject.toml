@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gridpin-orchestrators"
+version = "0.1.0"
+description = "Offline geocoding steps for Airflow, Dagster and Prefect with GridPin: a CSV in, the same CSV with answer columns out, no API key, no network"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["airflow", "dagster", "prefect", "geocoding", "geocoder", "offline", "pipeline", "etl"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: GIS",
+]
+# The step itself is gridpin.files.geocode_file in the engine wheel; this package only fits it to each orchestrator.
+dependencies = ["gridpin>=0.10,<0.11"]
+
+[project.optional-dependencies]
+airflow = ["apache-airflow>=3.0"]
+dagster = ["dagster>=1.10"]
+prefect = ["prefect>=3.0"]
+
+[project.urls]
+Homepage = "https://gridpin.dev"
+Documentation = "https://gridpin.dev/docs"
+Repository = "https://github.com/gridpin/gridpin"
+Issues = "https://github.com/gridpin/gridpin/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+gridpin_orchestrators = ["py.typed"]

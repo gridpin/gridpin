@@ -1,0 +1,6 @@
+#cloud-config
+# Paste into the "user data" field of a new Debian or Ubuntu machine. Change the two words of the last line:
+# the country of the sheet and a domain that already points at the machine's address.
+# The key is written to /opt/gridpin/gridpin.key (root only); read it with: sudo cat /opt/gridpin/gridpin.key
+runcmd:
+  - [sh, -c, "curl -fsSL https://raw.githubusercontent.com/gridpin/gridpin/v0.10.0/docker/public/install.sh -o /root/gridpin-install.sh && sh /root/gridpin-install.sh us geo.example.com"]

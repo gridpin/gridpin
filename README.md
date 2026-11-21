@@ -32,7 +32,7 @@ g.geocode("1 rue de la Paix, Paris", 1)
 No install: [try it in Colab](https://colab.research.google.com/github/gridpin/gridpin/blob/main/examples/colab_quickstart.ipynb)
 — the Serbia sheet, forward, reverse and batch geocoding in five minutes.
 
-Countries: `us` `ca` `de` `fr` `it` `es` `au` `mx` `nl` `br` `rs` (`gridpin-fetch --list`). For AI agents there is an
+Countries: `us` `ca` `de` `fr` `it` `es` `au` `mx` `nl` `pl` `br` `rs` `nz` (`gridpin-fetch --list`). For AI agents there is an
 MCP server — `claude mcp add gridpin -- uvx gridpin-mcp`, details in [mcp/README.md](mcp/README.md).
 Everything after the download runs offline.
 
@@ -211,24 +211,25 @@ All files are free; download only the file of the country your addresses are in 
 | [`brazil.bin`](https://dl.gridpin.dev/v0.9.0/brazil.bin) | **Brazil.** 67.19M addresses in 26 states and the Federal District. Source: Overture / IBGE CNEFE 2022. | CC0 1.0 (IBGE public data) | 677 MB |
 | [`canada.bin`](https://dl.gridpin.dev/v0.9.0/canada.bin) | **Canada.** 16.94M addresses in all provinces and territories. Source: Overture / Statistics Canada NAR, Adresses Québec, Yukon. | open data (per source) | 183 MB |
 | [`france.bin`](https://dl.gridpin.dev/v0.9.0/france.bin) | **France.** 26.1M addresses. Source: BAN, the national registry. | Licence Ouverte | 365 MB |
-| [`germany.bin`](https://dl.gridpin.dev/v0.9.0/germany.bin) | **Germany.** 19.27M addresses in 15 of 16 Länder. Bavaria is not covered. Source: Overture / OpenAddresses; BNetzA postcode witness. | dl-de/by-2-0 · dl-de/zero-2-0 · CC BY 4.0 (per source) | 213 MB |
+| [`germany.bin`](https://dl.gridpin.dev/v0.9.0/germany.bin) | **Germany.** 22.84M addresses in 16 of 16 Länder; Bavaria without postcodes. Source: Overture / OpenAddresses, 15 Länder; Bavaria: LoD2 building models (LDBV); BNetzA postcode witness. | dl-de/by-2-0 · dl-de/zero-2-0 · CC BY 4.0 (per source) | 256 MB |
 | [`italy.bin`](https://dl.gridpin.dev/v0.9.0/italy.bin) | **Italy.** 25.9M addresses. Source: Overture / ANNCSU. | CC BY 4.0 | 247 MB |
 | [`mexico.bin`](https://dl.gridpin.dev/v0.9.0/mexico.bin) | **Mexico.** 14.14M addresses in all 32 states, from an address layer surveyed in 2009–2010. Source: Overture / INEGI address layer, Correos de México postal codes. | open data (per source) | 156 MB |
 | [`netherlands.bin`](https://dl.gridpin.dev/v0.9.0/netherlands.bin) | **Netherlands.** 9.9M addresses. Source: Overture / NGR (BAG). | Public Domain Mark 1.0 | 103 MB |
 | [`serbia.bin`](https://dl.gridpin.dev/v0.9.0/serbia.bin) | **Serbia.** 2.6M addresses. Source: Overture / RGZ. | data.gov.rs Terms | 32 MB |
 | [`spain.bin`](https://dl.gridpin.dev/v0.9.0/spain.bin) | **Spain.** 15.27M addresses in all 52 postal provinces, including Ceuta and Melilla. Source: Overture / CartoCiudad (IGN/CNIG). | CC BY 4.0 | 185 MB |
 | [`usa.bin`](https://dl.gridpin.dev/v0.9.0/usa.bin) | **United States.** 95.33M point addresses plus 34.52M points from address ranges, in 50 states and the District of Columbia. 7 states have address ranges only. Source: Overture / NAD + Census TIGER/Line. | open data (per source) | 1.45 GB |
-| [`fr_poi.bin`](https://dl.gridpin.dev/v0.9.0/fr_poi.bin) | **France, places.** Optional add-on to `france.bin`: places by name, such as "pharmacie gare de Lyon". Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 231 MB |
+| [`fr_poi.bin`](https://dl.gridpin.dev/v0.9.0/fr_poi.bin) | **France, places.** Optional add-on to `france.bin`: places by name, such as "Gare de Lyon, Paris". Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 399 MB |
 
-**Germany covers 15 of 16 Länder; Bavaria is not covered.** In local spot checks, Bavarian queries
-typically returned a distant same-named address with low confidence; less often, an empty answer.
-Neither outcome establishes coverage. These spot checks illustrate failure modes, not population rates.
+**Bavaria comes from building models and has no postcodes.** Its addresses are read from the 3D building
+models (LoD2) of the Bavarian surveying office, which carry no postcode, so Bavarian answers have an empty
+`postcode`. Give the town with a Bavarian address: a street and a postcode alone typically return a same-named
+street elsewhere with low confidence.
 Per-Land providers and licenses are in [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
 
 POI coverage is per-country (see the table; we ship a layer only where source data is rich
 enough to help). For France, pass the layer and
 the engine cascades automatically — address index first, POI only on weak results, exact
-addresses never overridden: `gridpin query france.bin "pharmacie gare de Lyon" --poi fr_poi.bin`
+addresses never overridden: `gridpin query france.bin "Gare de Lyon, Paris" --poi fr_poi.bin`
 or `gridpin.Geocoder("france.bin", poi="fr_poi.bin")`.
 
 The cascade precedence, identical for free-form and structured input:
@@ -267,22 +268,26 @@ independent reference coordinate (empty answers count as misses):
 | Australia · radio sites (as recorded) | 1,000 | **65.8%** | 25.2% | 13.0% |
 | Brazil · distorted addresses | 2,376 | **20.8%** | 19.8% | 9.6% |
 | Brazil · health-facility register (as typed) | 1,000 | **36.8%** | 28.2% | 20.7% |
-| Canada · distorted addresses | 2,785 | **56.0%** | 45.2% | 32.7% |
-| Canada · radio-station sites (as recorded) | 1,000 | **39.3%** | 39.3% | 25.2% |
+| Canada · distorted addresses | 2,785 | **56.1%** | 45.2% | 32.7% |
+| Canada · radio-station sites (as recorded) | 1,000 | **39.5%** | 39.3% | 25.2% |
 | Germany · distorted addresses | 2,000 | **82.1%** | 46.9% | 15.8% |
 | Germany · clean addresses | 2,000 | **82.8%** | 83.2% | 81.2% |
 | Mexico · distorted addresses | 2,000 | **24.1%** | 13.8% | 7.7% |
 | Mexico · cultural venues (as recorded) | 1,000 | **28.0%** | 17.3% | 10.2% |
-| Spain · distorted addresses | 1,590 | **34.0%** | 29.6% | 20.8% |
-| United States · distorted addresses | 3,655 | **37.4%** | 28.5% | 24.3% |
-| United States · historic-places register (as recorded) | 1,000 | **64.1%** | 38.9% | 52.3% |
+| New Zealand · distorted addresses | 2,000 | **84.0%** | 79.4% | 59.5% |
+| New Zealand · polling places (as recorded) | 1,000 | **88.8%** | 70.2% | 25.6% |
+| Poland · distorted addresses | 3,104 | **44.3%** | 37.0% | 14.7% |
+| Poland · base-station sites (as recorded) | 1,000 | **67.5%** | 44.7% | 31.0% |
+| Spain · distorted addresses | 1,590 | **34.1%** | 29.6% | 20.8% |
+| United States · distorted addresses | 3,655 | **37.5%** | 28.5% | 24.3% |
+| United States · historic-places register (as recorded) | 1,000 | **66.4%** | 38.9% | 52.3% |
 
 *Distorted* means each real address was changed by one fixed mechanical rule, with the reference
 coordinate kept byte for byte. On German and Spanish distorted addresses GridPin leads both services;
 on Brazilian distorted addresses GridPin and Photon are level, both well ahead of Nominatim; on clean
 German addresses GridPin and Photon are level (p=0.6691367 — not proof of parity). We show the sets
 where GridPin leads or is level; on the other Spanish sets Photon leads, and on clean Brazilian
-addresses Photon leads too; on clean Canadian addresses Photon leads (59.1% vs 57.5%; Nominatim 57.2%); on clean Mexican addresses GridPin leads (29.4% vs Photon 15.9%, Nominatim 10.1%). Counts, paired tests and data fingerprints for every set are in
+addresses Photon leads too; on clean Canadian addresses Photon leads (59.1% vs 57.6%; Nominatim 57.2%); on clean Mexican addresses GridPin leads (29.4% vs Photon 15.9%, Nominatim 10.1%). Counts, paired tests and data fingerprints for every set are in
 [docs-public/BENCHMARK.md](docs-public/BENCHMARK.md); the summary lives on the
 [test bench page](https://gridpin.dev/bench).
 
@@ -375,14 +380,19 @@ contact@gridpin.dev.
 
 The engine is Apache-2.0. Each sheet carries the license of its source data:
 
-- **United States** — National Address Database (USDOT) and 19 state and county open datasets via Overture/OpenAddresses, each under its own permissive licence (U.S. Government work, CC0, PDDL, CC BY 4.0, open-data terms — listed per source in the sheet manifest); address ranges from U.S. Census Bureau TIGER/Line 2025 (U.S. Government work); postal codes from GeoNames (CC BY 4.0).
-- **Canada** — Statistics Canada National Address Register under the [Statistics Canada Open Licence](https://www.statcan.gc.ca/en/terms-conditions/open-licence) (required notice: "Adapted from Statistics Canada, National Address Register, 2024. This does not constitute an endorsement by Statistics Canada of this product."); Adresses Québec (MRNF) under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); Yukon civic addresses under the [Open Government Licence – Yukon](https://yukon.ca/en/your-government/open-government/open-government-licence-yukon) ("Contains information licensed under the Open Government Licence – Yukon"); all via Overture/OpenAddresses; settlement names from GeoNames (CC BY 4.0).
-- **Mexico** — "Fuente: INEGI, Vectorial de localidades amanzanadas y números exteriores (actualización 2009-2010), via AddressForAll"; postal codes: Correos de México (Libre Uso MX). GridPin's sheet is a derived work, not an INEGI product, and INEGI does not endorse it.
 - **Australia** — "Incorporates or developed using G-NAF © Geoscape Australia licensed by the Commonwealth of Australia under the Open Geo-coded National Address File (G-NAF) End User Licence Agreement." Adapted by GridPin. That licence does not allow using this data to compile addresses for sending mail unless each address is verified against a second source.
+- **Brazil** — IBGE, CNEFE 2022, via Overture/OpenAddresses; public data, labelled CC0 by Overture. Address normalization applied.
+- **Canada** — Statistics Canada National Address Register under the [Statistics Canada Open Licence](https://www.statcan.gc.ca/en/terms-conditions/open-licence) (required notice: "Adapted from Statistics Canada, National Address Register, 2024. This does not constitute an endorsement by Statistics Canada of this product."); Adresses Québec (MRNF) under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); Yukon civic addresses under the [Open Government Licence – Yukon](https://yukon.ca/en/your-government/open-government/open-government-licence-yukon) ("Contains information licensed under the Open Government Licence – Yukon"); all via Overture/OpenAddresses; settlement names from GeoNames (CC BY 4.0).
 - **France** — BAN, under [Licence Ouverte 2.0](https://www.etalab.gouv.fr/licence-ouverte-open-licence/).
+- **Germany** — the surveying offices of 15 Länder via Overture, each under its own licence (mostly [Datenlizenz Deutschland – Namensnennung 2.0](https://www.govdata.de/dl-de/by-2-0)); the per-Land list with the attribution lines is in [ATTRIBUTIONS.md](ATTRIBUTIONS.md). Bavaria: Bayerische Vermessungsverwaltung – www.geodaten.bayern.de, 3D building models (LoD2), under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); no postcodes.
 - **Italy** — ANNCSU via Overture/OpenAddresses, under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+- **Mexico** — "Fuente: INEGI, Vectorial de localidades amanzanadas y números exteriores (actualización 2009-2010), via AddressForAll"; postal codes: Correos de México (Libre Uso MX). GridPin's sheet is a derived work, not an INEGI product, and INEGI does not endorse it.
 - **Netherlands** — Nationaal Georegister (BAG) via Overture, under [Public Domain Mark 1.0](https://creativecommons.org/publicdomain/mark/1.0/).
+- **New Zealand** — "Contains data sourced from the LINZ Data Service licensed for reuse under CC BY 4.0." Toitū Te Whenua Land Information New Zealand (LINZ), NZ Addresses, via Overture/OpenAddresses, under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Adapted by GridPin (normalized, filtered and re-keyed); place reference from GeoNames (CC BY 4.0).
+- **Poland** — "Source: Państwowy Rejestr Granic (PRG), address points, Główny Urząd Geodezji i Kartografii (GUGiK), geoportal.gov.pl." Adapted by GridPin. No licence is issued for this data and it is free to use; the law requires naming the source ([Prawo geodezyjne i kartograficzne](https://isap.sejm.gov.pl/isap.nsf/DocDetails.xsp?id=WDU19890300163), art. 40c(3)). Known houses are derived from Overture places (CDLA-Permissive-2.0, Apache-2.0, CC0-1.0).
 - **Serbia** — RGZ via Overture, under [data.gov.rs Terms of use](https://data.gov.rs/sr/terms/); settlement-name aliases from GeoNames (CC BY 4.0).
+- **Spain** — "Obra derivada de CartoCiudad CC-BY 4.0 scne.es" (Instituto Geográfico Nacional / CNIG) via Overture/OpenAddresses, under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); address normalization applied.
+- **United States** — National Address Database (USDOT) and 19 state and county open datasets via Overture/OpenAddresses, each under its own permissive licence (U.S. Government work, CC0, PDDL, CC BY 4.0, open-data terms — listed per source in the sheet manifest); address ranges from U.S. Census Bureau TIGER/Line 2025 (U.S. Government work); postal codes from GeoNames (CC BY 4.0).
 - **POI layer** — Overture places, mixed permissive: CDLA-Permissive-2.0 (Meta, Microsoft, …), Apache-2.0 (Foursquare), CC0-1.0 (AllThePlaces).
 
 Per the [Overture attribution page](https://docs.overturemaps.org/attribution/), addresses are not one blanket license — each national source carries its own. Consult your own counsel before commercial redistribution.

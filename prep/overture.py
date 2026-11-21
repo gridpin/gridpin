@@ -88,6 +88,16 @@ ADDRESS_LICENSE = {
     # compiling addresses for sending mail (2(a)2), read at data.gov.au on 2026-11-04.
     "au": {"provider": "Geoscape Australia, Geocoded National Address File (G-NAF), via OpenAddresses",
            "license": "Open G-NAF End User Licence Agreement (CC BY 4.0 terms plus a mail-use restriction)"},
+    # PL (owner decisions ANSWERS §317-§318): one source, the state register of addresses PRG (GUGiK) in 16 voivodeship
+    # datasets. Prawo geodezyjne i kartograficzne, consolidated text Dz.U. 2026 poz. 1389: art. 40a(2)(1)(a) -- no fee,
+    # art. 40c(5) -- no licence is issued, art. 40c(3) -- the source is named in published works (read 2026-11-13).
+    "pl": {"provider": "Glowny Urzad Geodezji i Kartografii (GUGiK), Panstwowy Rejestr Granic (PRG) address points, "
+                       "via OpenAddresses",
+           "license": "no licence issued, free use (Prawo geodezyjne i kartograficzne art. 40a, 40c); source named"},
+    # NZ (owner decisions ANSWERS §364): one dataset, the LINZ register NZ Addresses (layer 123113) via OpenAddresses;
+    # CC BY 4.0 per the layer metadata and the LINZ attribution page (read 2026-11-17). No postcode in the source.
+    "nz": {"provider": "Toitu Te Whenua Land Information New Zealand (LINZ), NZ Addresses, via OpenAddresses",
+           "license": "CC BY 4.0"},
 }
 S3 = f"s3://overturemaps-us-west-2/release/{RELEASE}/theme=addresses/type=*/*.parquet"
 
@@ -113,6 +123,15 @@ MX_DATASETS = ("mx/countrywide",)
 # AU: the release pinned by the owner (ANSWERS §225) and the one Australian dataset (15 739 608 rows, 2026-11-04).
 AU_RELEASE = "2026-10-21.0"
 AU_DATASETS = ("au/countrywide",)
+# PL: the release pinned by the owner (ANSWERS §318) and the 16 voivodeship datasets of PRG (8 628 514 rows, 2026-11-13).
+PL_RELEASE = "2026-10-21.0"
+PL_DATASETS = tuple(f"pl/{v}" for v in (
+    "dolnoslaskie", "kujawsko-pomorskie", "lodzkie", "lubelskie", "lubuskie", "malopolskie", "mazowieckie", "opolskie",
+    "podkarpackie", "podlaskie", "pomorskie", "slaskie", "swietokrzyskie", "warminsko-mazurskie", "wielkopolskie",
+    "zachodniopomorskie"))
+# NZ: the release pinned by the owner (ANSWERS §364) and the one dataset, LINZ NZ Addresses (2 428 584 rows, 2026-11-17).
+NZ_RELEASE = "2026-10-21.0"
+NZ_DATASETS = ("nz/countrywide",)
 US_STATES = (
     "AK", "AL", "AR", "AZ", "CA", "CO", "CT", "DC", "DE", "FL", "GA", "HI", "IA", "ID", "IL", "IN",
     "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO", "MS", "MT", "NC", "ND", "NE", "NH", "NJ",
@@ -159,6 +178,10 @@ def release_for_country(cc: str) -> str:
         return MX_RELEASE
     if cc.lower() == "au":  # ANSWERS §225
         return AU_RELEASE
+    if cc.lower() == "pl":  # ANSWERS §318
+        return PL_RELEASE
+    if cc.lower() == "nz":  # ANSWERS §364
+        return NZ_RELEASE
     return DE_RELEASE if cc.lower() == "de" else RELEASE
 
 
@@ -175,6 +198,10 @@ BOUNDED_STORAGE = {
     "MX": ("mx_build", 10, "4GiB"),
     # AU streams 15.7 M rows, about CA's size.
     "AU": ("au_build", 8, "4GiB"),
+    # PL streams 8.6 M rows, about half of AU.
+    "PL": ("pl_build", 8, "4GiB"),
+    # NZ streams 2.4 M rows, about a quarter of PL.
+    "NZ": ("nz_build", 4, "4GiB"),
 }
 
 
@@ -303,6 +330,25 @@ def address_manifest(cc: str, geonames: bool = False, release: str | None = None
             "licence does not allow using this data to compile addresses for sending mail unless each address is "
             "verified against a second source; use it consistently with the Australian Privacy Principles. "
             f"Via Overture Maps / OpenAddresses, release {selected_release}; place reference (c) GeoNames (CC BY 4.0)"
+        )
+    if country == "pl":
+        # Art. 40c(3) of the Polish geodesy law: works that use the material name its source (no licence is issued for
+        # PRG, art. 40c(5)); read in the consolidated text Dz.U. 2026 poz. 1389 on 2026-11-13.
+        result["attribution"] = (
+            "Source: Państwowy Rejestr Granic (PRG), address points, Główny Urząd Geodezji i Kartografii (GUGiK), "
+            "geoportal.gov.pl. Adapted by GridPin (normalized, filtered and re-keyed). "
+            f"Via Overture Maps / OpenAddresses, release {selected_release}; place reference (c) GeoNames (CC BY 4.0); "
+            "known houses derived from Overture places (c) Overture Maps Foundation and per-source contributors "
+            "(CDLA-Permissive-2.0, Apache-2.0, CC0-1.0)"
+        )
+    if country == "nz":
+        # The statement LINZ asks for adapted data, word for word from linz.govt.nz "Attributing LINZ data" (read
+        # 2026-11-17), the CC BY 4.0 mark of modification, and the Overture route. GeoNames feeds the rule pack's place table.
+        result["attribution"] = (
+            "Contains data sourced from the LINZ Data Service licensed for reuse under CC BY 4.0 "
+            "(NZ Addresses, Toitu Te Whenua Land Information New Zealand). Adapted by GridPin (normalized, filtered and "
+            f"re-keyed). Via Overture Maps / OpenAddresses, release {selected_release}; place reference (c) GeoNames "
+            "(CC BY 4.0)"
         )
     return result
 
@@ -437,6 +483,7 @@ MX_STATE_SQL = ("CASE address_levels[1].value " + " ".join(
 # INEGI writes the street type in capitals before the name; "OTRO" is INEGI's "other type" and is no word
 # of the name ("OTRO CARRETERA FEDERAL" -> "CARRETERA FEDERAL").
 MX_STREET_SQL = "regexp_replace(street, '^OTRO ', '')"
+PL_STREET_SQL = "coalesce(nullif(trim(street), ''), address_levels[3].value)"
 # Survey 2026-10-31 (code/eval/work/meksika_licenzii_20261031/report.md): of 15 016 772 rows with a street and a
 # number, 548 595 name no street ("NINGUNO", "SIN NOMBRE"), the "RASGO ..." rows are landmarks (a block, a
 # stream, a hill), and 237 471 numbers are a block and lot ("MZ 5 LT 3") or a road kilometre, not a house.
@@ -521,6 +568,29 @@ def select_src_sql(cc: str, s3: str) -> str:
             f"country = 'AU' AND sources[1].dataset IN ({_sql_list(AU_DATASETS)}) "
             "AND street IS NOT NULL AND number IS NOT NULL"
         )
+    elif cc == "NZ":
+        # Two levels on 2 428 473 rows: town or city, then suburb or locality; 111 water addresses carry one level, the
+        # name of the water (survey 2026-11-17). The place is the last level (the suburb), the province of the key the
+        # one before it (the city): the same suburb name under two cities stays apart (Clifton under five). The query
+        # naming the city alone is a quality class of its own (plan step E3.1). No postcode in the source.
+        city = "coalesce(address_levels[-1].value, '')"
+        province = "CASE WHEN len(address_levels) >= 2 THEN coalesce(address_levels[-2].value, '') ELSE '' END"
+        evidence_columns = ""
+        where_clause = (
+            f"country = 'NZ' AND sources[1].dataset IN ({_sql_list(NZ_DATASETS)}) "
+            "AND street IS NOT NULL AND number IS NOT NULL"
+        )
+    elif cc == "PL":
+        # Three levels on every row (survey 2026-11-13): voivodeship, gmina, place (miejscowosc). The place is the city;
+        # the gmina is the province of the KEY, so the 6 120 place names found in more than one gmina (Nowa Wies in
+        # 120) stay apart; the voivodeship anchor comes from commune_regions. A village without streets (3.08 M rows,
+        # 35.7 %) writes "Kowalewo 12": the place name stands in for the street.
+        city = "coalesce(address_levels[3].value, '')"
+        province = "coalesce(address_levels[2].value, '')"
+        evidence_columns = ""
+        where_clause = (
+            f"country = 'PL' AND sources[1].dataset IN ({_sql_list(PL_DATASETS)}) AND number IS NOT NULL"
+        )
     else:
         city = "coalesce(address_levels[-1].value, '')"
         province = (
@@ -530,7 +600,7 @@ def select_src_sql(cc: str, s3: str) -> str:
         evidence_columns = ""
         where_clause = f"country = '{cc}' AND street IS NOT NULL AND number IS NOT NULL"
     postcode = POSTCODE_SQL.get(cc, "coalesce(postcode, '')")
-    street = MX_STREET_SQL if cc == "MX" else "street"
+    street = {"MX": MX_STREET_SQL, "PL": PL_STREET_SQL}.get(cc, "street")
     return f"""
         SELECT id,
                {street:<40} AS nom_voie,
@@ -689,11 +759,22 @@ TITLE = ("CASE WHEN {col} = upper({col}) AND len({col}) > 3 THEN "
 # The numeric postcode of the index (u32) is the first digit run of the raw code. A Canadian code
 # starts with a letter ("V9Z 1K2"), and its first digit run ("9") is no postcode at all: Canada
 # keeps the numeric code empty and carries the full code in code_postal_display only (E1.4, 28.10).
-POSTAL_DIGITS_SQL = {"CA": "CAST(NULL AS VARCHAR)"}
+# A Polish code is written "00-950": its first digit run is "00", so the numeric code joins the two runs ("00950" -> 950;
+# the engine reads a written "00-950" the same way through postal_digits 5 / postal_split 2).
+POSTAL_DIGITS_SQL = {"CA": "CAST(NULL AS VARCHAR)",
+                     "PL": "CASE WHEN regexp_full_match(postcode_raw, '[0-9]{2}-[0-9]{3}') "
+                           "THEN replace(postcode_raw, '-', '') ELSE regexp_extract(postcode_raw, '[0-9]+') END"}
+
+
+# The street key without a type word the source keeps in some names. PRG writes the streets of Warsaw "ulica Bednarska"
+# and of Wrocław "ul. Bierutowska" (122 828 and 72 586 keys), every other town without it; a query loses its "ul." to the
+# type rules and then reached those houses only by a fuzzy match, or not at all (Poland E3.6, 14.11.2026: "Bednarska
+# 23, Warszawa"). The displayed name keeps the word.
+NOM_VOIE_KEY_SQL = {"PL": "regexp_replace({norm}, '^(ulica|ul) ', '')"}
 
 
 def base_sql(source: str = "src", cc: str | None = None) -> str:
-    norm_voie = NORM.format(col="nom_voie")
+    norm_voie = NOM_VOIE_KEY_SQL.get((cc or "").upper(), "{norm}").format(norm=NORM.format(col="nom_voie"))
     postal_digits = POSTAL_DIGITS_SQL.get((cc or "").upper(), "regexp_extract(postcode_raw, '[0-9]+')")
     norm_commune = NORM.format(col="nom_commune")
     return f"""
@@ -758,7 +839,7 @@ def canon_sql(insee_order: str, prov_alias: str, keys_table: str | None = None,
 
 # Countries extracted in two streamed passes over an S3 view: the source never sits in memory
 # (BR 74M rows, US 100M). `canon` is then a view over the written Parquet, not a table.
-STREAMED = frozenset({"BR", "US", "CA", "MX", "AU"})
+STREAMED = frozenset({"BR", "US", "CA", "MX", "AU", "PL", "NZ"})
 # Streamed countries whose source leaves the city empty on part of the rows (US survey 2026-10-19:
 # about 4.7 M green rows, Texas 1.7 M and New York State 0.97 M first). With a GeoNames dump the
 # adapter fills those cities in a zero pass (fill_missing_cities) before the shared base_sql filter
@@ -1022,6 +1103,10 @@ def main(argv: list[str] | None = None) -> None:
         metrics["rows_duplicate"] = duplicates
     if umbrella_stats is not None:
         metrics.update(umbrella_stats)  # rows_nocity_src, umbrella_filled, umbrella_cross_state
+    if cc == "PL":
+        # Upper bound of the village rows: a street named like its place counts too.
+        metrics["rows_street_is_place"] = con.execute(
+            "SELECT count(*) FROM canon WHERE nom_voie_norm = nom_commune_norm").fetchone()[0]
     metrics.update({
         "localities": con.execute("SELECT count(DISTINCT code_insee) FROM canon").fetchone()[0],
         "streets": con.execute("SELECT count(DISTINCT street_key) FROM canon").fetchone()[0],

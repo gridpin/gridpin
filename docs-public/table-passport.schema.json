@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GridPin table passport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["table", "file", "prefix", "key", "take", "edition", "publisher", "licence", "caveat"],
+  "properties": {
+    "table": {"type": "string"},
+    "file": {"type": "string"},
+    "delimiter": {"type": "string", "maxLength": 2},
+    "prefix": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+    "key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["column", "kind"],
+      "properties": {
+        "column": {"type": "string"},
+        "kind": {"type": "string"},
+        "vintage": {"type": ["string", "null"]},
+        "width": {"type": "integer", "minimum": 1},
+        "grain": {"enum": ["fine", "coarse"]}
+      }
+    },
+    "take": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["as"],
+        "properties": {
+          "as": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+          "unit": {"type": "string"},
+          "moe": {"type": "string"},
+          "missing": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "valid": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "from": {"type": "string", "format": "date"},
+        "to": {"type": "string", "format": "date"},
+        "from_column": {"type": "string"},
+        "to_column": {"type": "string"}
+      }
+    },
+    "edition": {"type": "string"},
+    "publisher": {"type": "string"},
+    "source_url": {"type": "string"},
+    "read": {"type": "string", "format": "date"},
+    "licence": {"type": "string"},
+    "attribution": {"type": "string"},
+    "coverage": {"enum": ["complete", "partial"]},
+    "max_absent_share": {"type": "number", "minimum": 0, "maximum": 1},
+    "caveat": {"type": "string"}
+  }
+}

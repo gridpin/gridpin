@@ -22,7 +22,7 @@ pip install --upgrade gridpin==0.5.0
 ```
 
 The wheel contains the engine, not the data: **download a country sheet
-separately**. Free static sheets for the United States, Canada, Germany, France, Italy, Spain, Australia, Mexico, the Netherlands, Brazil and Serbia
+separately**. Free static sheets for Australia, Brazil, Canada, France, Germany, Italy, Mexico, the Netherlands, New Zealand, Poland, Serbia, Spain and the United States
 are listed at <https://gridpin.dev/docs#delivery> — no account, no key, no
 sign-up.
 
@@ -38,7 +38,7 @@ fetch` use the same cache and checks as `gridpin sheets`. Extras `[pandas]`, `[g
 no dependencies.
 
 The United States is one nationwide sheet: point addresses in 35 states, Census address ranges
-elsewhere; Canada is one nationwide sheet (all provinces and territories). Germany covers **15 of 16 Länder; Bavaria is not covered**. Spain covers all
+elsewhere; Canada is one nationwide sheet (all provinces and territories). Germany covers **all 16 Länder; Bavaria has no postcodes**. Spain covers all
 52 postal provinces; Brazil is one nationwide sheet; Mexico is one nationwide sheet; Australia is one nationwide sheet. Client update required:
 use 0.8.0 or newer, because older engines have no Australian rules.
 

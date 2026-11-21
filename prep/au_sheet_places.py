@@ -45,8 +45,9 @@ def state_of(code):
 
 def sheet_places(norm):
     import duckdb
+    from duck import cap_spill
 
-    con = duckdb.connect()
+    con = cap_spill(duckdb.connect())
     con.execute("SET enable_progress_bar=false")
     rows = con.execute(
         """select code_insee, min(nom_commune) AS place, code_postal, count(*) AS n, avg(lat) AS lat, avg(lon) AS lon

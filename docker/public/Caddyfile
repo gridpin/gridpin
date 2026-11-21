@@ -1,0 +1,8 @@
+# The certificate for your domain and nothing else: no access log (the addresses your requests carry stay out
+# of it), a 1 MB body limit (the server's own), requests passed to the geocoder as they come, key header and all.
+{$GRIDPIN_DOMAIN} {
+	request_body {
+		max_size 1MB
+	}
+	reverse_proxy gridpin:8080
+}

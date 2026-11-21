@@ -19,7 +19,9 @@ LICENSE = "ODbL-1.0 (Overture Maps divisions, from OpenStreetMap; CC-BY-4.0 part
 
 
 def rows(parquet, min_population=0):
-    con = duckdb.connect()
+    from duck import cap_spill
+
+    con = cap_spill(duckdb.connect())
     # the friendly table answers `code` like a name, so the country stays out of it (it is the head of the region code);
     # one name per region: homonyms of one region keep the most populous (the table refuses two equal names in a group)
     q = f"""SELECT name, lat, lon, coalesce(region, country, '') AS grp, '' AS code,

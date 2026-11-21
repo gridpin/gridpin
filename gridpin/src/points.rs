@@ -363,6 +363,207 @@ pub fn write_nearest<W: Write>(
     Ok(counts)
 }
 
+/// Options of `gridpin distance`.
+pub struct DistanceOptions<'a> {
+    /// pair the rows that share this column's value instead of row i with row i
+    pub key: Option<&'a str>,
+    /// every row of the first file with every row of the second, as "a_id, b_id, metres"
+    pub matrix: bool,
+    /// the most pairs a matrix may have
+    pub max_pairs: u64,
+    /// the column naming a row in the matrix and in `distance_id` (default: id, else the line number)
+    pub id_column: Option<&'a str>,
+}
+
+/// The rows a matrix may hold when `--max-pairs` is not given: about 300 MB of output.
+pub const MAX_PAIRS: u64 = 10_000_000;
+
+/// What `gridpin distance` did, for the closing lines on stderr.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DistanceCounts {
+    pub pairs: u64,
+    pub without_distance: u64,
+    pub weak: u64,
+}
+
+/// The point of a row, or why it has none. A weak answer is no point: a distance to the wrong place would look
+/// like any other distance.
+fn point_or_reason(file: &Points, row: usize) -> std::result::Result<(f64, f64), &'static str> {
+    if let Some(Some(h)) = file.hits.as_ref().map(|hits| &hits[row]) {
+        if crate::query::hit_is_weak(h) {
+            return Err("weak answer");
+        }
+    }
+    file.points[row].ok_or("no point")
+}
+
+fn row_id(file: &Points, id: Option<usize>, row: usize) -> String {
+    match id {
+        Some(col) => file.rows[row].get(col).cloned().unwrap_or_default(),
+        None => (row + 1).to_string(),
+    }
+}
+
+fn id_column_of(file: &Points, column: Option<&str>, which: &str) -> Result<Option<usize>> {
+    match column {
+        Some(name) => file
+            .headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case(name))
+            .map(Some)
+            .ok_or_else(|| anyhow!("no column {name:?} in the {which} file")),
+        None => Ok(file
+            .headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("id"))),
+    }
+}
+
+/// `gridpin distance`: the straight-line distance between the rows of two files, pair by pair (row i with row i,
+/// or the rows sharing `--key`), or every row with every row (`--matrix`). A row without a point, or placed by a
+/// weak answer, gets no distance and the reason in `distance_note`.
+pub fn write_distance<W: Write>(
+    a: &Points,
+    b: &Points,
+    options: &DistanceOptions,
+    out: W,
+) -> Result<DistanceCounts> {
+    let mut writer = csv::WriterBuilder::new()
+        .terminator(csv::Terminator::Any(b'\n'))
+        .from_writer(out);
+    let mut counts = DistanceCounts::default();
+    let a_id = id_column_of(a, options.id_column, "first")?;
+    let b_id = id_column_of(b, options.id_column, "second")?;
+    if options.matrix {
+        if options.key.is_some() {
+            bail!("distance: --key pairs rows, --matrix takes every pair: give one of them");
+        }
+        let pairs = a.rows.len() as u64 * b.rows.len() as u64;
+        if pairs > options.max_pairs {
+            bail!(
+                "distance --matrix: {} x {} rows make {pairs} pairs, more than --max-pairs {}: \
+                 cut a file, or use gridpin nearest for the closest rows only",
+                a.rows.len(),
+                b.rows.len(),
+                options.max_pairs
+            );
+        }
+        writer.write_record(["a_id", "b_id", "distance_m"])?;
+        let b_found: Vec<std::result::Result<(f64, f64), &'static str>> =
+            (0..b.rows.len()).map(|r| point_or_reason(b, r)).collect();
+        let b_points: Vec<Option<(f64, f64)>> = b_found.iter().map(|p| p.ok()).collect();
+        let b_weak = b_found.iter().filter(|p| *p == &Err("weak answer")).count() as u64;
+        for i in 0..a.rows.len() {
+            let (lat, lon) = match point_or_reason(a, i) {
+                Ok(p) => p,
+                Err(why) => {
+                    counts.without_distance += b.rows.len() as u64;
+                    if why == "weak answer" {
+                        counts.weak += b.rows.len() as u64;
+                    }
+                    continue;
+                }
+            };
+            counts.weak += b_weak;
+            let row: Vec<String> = b_points
+                .par_iter()
+                .map(|p| {
+                    p.map(|(blat, blon)| format!("{:.1}", distance_m(lat, lon, blat, blon)))
+                        .unwrap_or_default()
+                })
+                .collect();
+            let id = row_id(a, a_id, i);
+            for (j, metres) in row.into_iter().enumerate() {
+                if metres.is_empty() {
+                    counts.without_distance += 1;
+                    continue;
+                }
+                writer.write_record([id.as_str(), row_id(b, b_id, j).as_str(), metres.as_str()])?;
+                counts.pairs += 1;
+            }
+        }
+        writer.flush()?;
+        return Ok(counts);
+    }
+    // pairs: the row of the second file for each row of the first
+    let partner: Vec<std::result::Result<usize, &'static str>> = match options.key {
+        None => (0..a.rows.len())
+            .map(|i| {
+                if i < b.rows.len() {
+                    Ok(i)
+                } else {
+                    Err("no row with this number in the second file")
+                }
+            })
+            .collect(),
+        Some(name) => {
+            let at = |file: &Points, which: &str| -> Result<usize> {
+                file.headers
+                    .iter()
+                    .position(|h| h.eq_ignore_ascii_case(name))
+                    .ok_or_else(|| anyhow!("no key column {name:?} in the {which} file"))
+            };
+            let (ka, kb) = (at(a, "first")?, at(b, "second")?);
+            let mut by_key: HashMap<&str, usize> = HashMap::new();
+            for (j, row) in b.rows.iter().enumerate() {
+                let key = row[kb].trim();
+                if key.is_empty() {
+                    continue;
+                }
+                if by_key.insert(key, j).is_some() {
+                    bail!(
+                        "distance --key {name}: {key:?} names more than one row of the second file"
+                    );
+                }
+            }
+            a.rows
+                .iter()
+                .map(|row| {
+                    by_key
+                        .get(row[ka].trim())
+                        .copied()
+                        .ok_or("no row with this key in the second file")
+                })
+                .collect()
+        }
+    };
+    let mut head: Vec<&str> = a.headers.iter().map(String::as_str).collect();
+    head.extend(["distance_id", "distance_m", "distance_note"]);
+    writer.write_record(&head)?;
+    for (i, found) in partner.into_iter().enumerate() {
+        let (id, metres, note) = match found {
+            Err(why) => (String::new(), String::new(), why.to_string()),
+            Ok(j) => {
+                let id = row_id(b, b_id, j);
+                match (point_or_reason(a, i), point_or_reason(b, j)) {
+                    (Ok((la, lo)), Ok((lb, lob))) => (
+                        id,
+                        format!("{:.1}", distance_m(la, lo, lb, lob)),
+                        String::new(),
+                    ),
+                    (Err(why), _) => (id, String::new(), format!("{why} in the first file")),
+                    (_, Err(why)) => (id, String::new(), format!("{why} in the second file")),
+                }
+            }
+        };
+        if metres.is_empty() {
+            counts.without_distance += 1;
+            if note.starts_with("weak answer") {
+                counts.weak += 1;
+            }
+        } else {
+            counts.pairs += 1;
+        }
+        writer.write_record(a.rows[i].iter().map(String::as_str).chain([
+            id.as_str(),
+            metres.as_str(),
+            note.as_str(),
+        ]))?;
+    }
+    writer.flush()?;
+    Ok(counts)
+}
+
 /// One zone of `gridpin join`: its polygons and properties.
 pub struct Zone {
     polygons: PolygonSet,

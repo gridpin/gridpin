@@ -33,6 +33,20 @@ pub fn code_of(text: &str) -> Option<String> {
         .map(|cc| cc.to_ascii_lowercase())
 }
 
+/// The English short name of a country (the first name of its code in the table, ISO 3166-1), for `address.country`
+/// of a Nominatim answer. `None` for a code the table does not have.
+pub fn name_of(code: &str) -> Option<&'static str> {
+    if code.len() != 2 {
+        return None;
+    }
+    TABLE
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.split_once('\t'))
+        .find(|(cc, _)| cc.eq_ignore_ascii_case(code))
+        .map(|(_, name)| name)
+}
+
 /// The country the last comma segment of a query names, if it names one.
 pub fn named_at_end(q: &str) -> Option<String> {
     let (_, tail) = q.rsplit_once(',')?;
@@ -69,5 +83,16 @@ mod tests {
             None,
             "a query that is only a country names no sheet by its end"
         );
+    }
+
+    #[test]
+    fn a_code_is_named_by_its_english_short_name_and_nothing_else_is() {
+        assert_eq!(name_of("us"), Some("United States"));
+        assert_eq!(name_of("RS"), Some("Serbia"));
+        assert_eq!(name_of("de"), Some("Germany"));
+        assert_eq!(name_of("zz"), None);
+        // an alpha-3 code or a name is not a code
+        assert_eq!(name_of("usa"), None);
+        assert_eq!(name_of(""), None);
     }
 }

@@ -57,13 +57,13 @@ def _extras_cells(extras: dict) -> dict:
     return cells
 
 
-def _k(k) -> int:
+def _k(k: object) -> int:
     if isinstance(k, bool) or not isinstance(k, int) or k < 1:
         raise ValueError("k must be a whole number of at least 1")
     return k
 
 
-def _blank(cell) -> bool:
+def _blank(cell: object) -> bool:
     if cell is None:
         return True
     if isinstance(cell, float) and math.isnan(cell):
@@ -93,7 +93,7 @@ def _field_rows(df: "pd.DataFrame", column: Mapping[str, str]) -> List[Union[tup
     if missing:
         raise KeyError(f"no column {missing!r}; the frame has: {list(df.columns)}")
 
-    def cells(field):
+    def cells(field: str) -> List[Optional[str]]:
         if field not in column:
             return [None] * len(df)
         return [None if _blank(c) else str(c).strip() for c in df[column[field]]]
@@ -165,7 +165,7 @@ def _extras_columns(extras: Optional[str]) -> tuple:
 
 
 def geocode_df(df: "pd.DataFrame", column: Union[str, Sequence[str], Mapping[str, str]], sheet: SheetLike,
-               k: int = 1, poi=None, extras: Optional[str] = None) -> "pd.DataFrame":
+               k: int = 1, poi: Optional[str] = None, extras: Optional[str] = None) -> "pd.DataFrame":
     """A copy of `df` with the answer columns for the addresses in `column`.
 
     column  one column name, or several joined with ", " ("street", "city", "postcode"), or a mapping
@@ -223,11 +223,11 @@ def reverse_df(df: "pd.DataFrame", sheet: SheetLike, lat: str = "lat", lon: str 
 class GridpinAccessor:
     """`df.gridpin.geocode("address", "us")` and `df.gridpin.reverse("us", lat="lat", lon="lon")`."""
 
-    def __init__(self, df: "pd.DataFrame"):
+    def __init__(self, df: "pd.DataFrame") -> None:
         self._df = df
 
     def geocode(self, column: Union[str, Sequence[str]], sheet: SheetLike, k: int = 1,
-                poi=None, extras: Optional[str] = None) -> "pd.DataFrame":
+                poi: Optional[str] = None, extras: Optional[str] = None) -> "pd.DataFrame":
         return geocode_df(self._df, column, sheet, k=k, poi=poi, extras=extras)
 
     def reverse(self, sheet: SheetLike, lat: str = "lat", lon: str = "lon", k: int = 1,

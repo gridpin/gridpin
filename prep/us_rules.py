@@ -110,8 +110,21 @@ def regions_table(reference):
     return {name: ";".join(sorted(entries)) for name, entries in points.items()}
 
 
-def expected_pack(common, overlay, marker=MARKER, reference=REFERENCE, with_guard=False):
+KNOWN_HEADER = (b"# Generated from Overture places (prep/known_houses.py): normalized street|commune, then the house numbers"
+                b" an Overture place stands at.\n")
+
+
+UNFOLDED_HEADER = b"# Generated from the sheet keys (prep/unfolded_words.py): a word written without \"\xc5\x82\", then the sheet's word.\n"
+
+
+def expected_pack(common, overlay, marker=MARKER, reference=REFERENCE, with_guard=False, known=None, unfolded=None):
     pack = common_pack(common, overlay, marker)
+    if unfolded is not None:
+        # class 29 (query.rs restore_unfolded_words): "lodz" -> "łodz" before the query is read (Poland, 14.11.2026)
+        pack["unfolded_words.tsv"] = UNFOLDED_HEADER + gzip.decompress(unfolded.read_bytes())
+    if known is not None:
+        # class 28 (query.rs known_house): a cityless homonym with a known house goes first (Poland, 14.11.2026)
+        pack["known_houses.tsv"] = KNOWN_HEADER + gzip.decompress(known.read_bytes())
     document = json.loads(gzip.decompress(reference.read_bytes()))
     regions = regions_table(document)
     pack["commune_regions.tsv"] = REGIONS_HEADER + "".join(
@@ -125,8 +138,8 @@ def expected_pack(common, overlay, marker=MARKER, reference=REFERENCE, with_guar
     return pack
 
 
-def check_pack(common, overlay, output, marker=MARKER, reference=REFERENCE, with_guard=False):
-    expected = expected_pack(common, overlay, marker, reference, with_guard)
+def check_pack(common, overlay, output, marker=MARKER, reference=REFERENCE, with_guard=False, known=None, unfolded=None):
+    expected = expected_pack(common, overlay, marker, reference, with_guard, known, unfolded)
     problems = [f"unexpected family: {name}" for name in sorted(
         {p.name for p in output.glob("*.tsv")} - expected.keys())]
     for name, raw in expected.items():
@@ -136,8 +149,9 @@ def check_pack(common, overlay, output, marker=MARKER, reference=REFERENCE, with
     return problems
 
 
-def generate_pack(common, overlay, output, marker=MARKER, reference=REFERENCE, with_guard=False):
-    pack = expected_pack(common, overlay, marker, reference, with_guard)
+def generate_pack(common, overlay, output, marker=MARKER, reference=REFERENCE, with_guard=False, known=None,
+                  unfolded=None):
+    pack = expected_pack(common, overlay, marker, reference, with_guard, known, unfolded)
     if output.resolve() == common.resolve():
         raise ValueError("output must not replace the common rules")
     extra = {p.name for p in output.glob("*.tsv")} - pack.keys()

@@ -74,6 +74,8 @@ pub struct Suggestion {
 pub const SUGGEST_MIN_CHARS: usize = 3;
 /// How many matching streets are read before ranking: enough for the common starts, bounded for "ma".
 pub const SUGGEST_SCAN: usize = 5_000;
+/// The radius of `near` in `suggest_near`: a street within it comes before the bigger streets farther away.
+pub const SUGGEST_NEAR_M: f64 = 50_000.0;
 /// How many of the biggest matching streets are searched for the typed house number.
 pub const SUGGEST_HOUSE_LOOKUP: usize = 200;
 
@@ -311,6 +313,76 @@ impl RegionSet {
             .map(|r| r.name.as_str())
             .collect()
     }
+
+    /// Metres from a point to the nearest boundary of any area of the layer, looked for within `within_m` (plan T2.1:
+    /// a point near a boundary is told from one in the middle). The same on both sides of a boundary: the areas whose
+    /// box reaches the point within `within_m` are measured, in the point's cell and its neighbours. `None` when no
+    /// boundary is that close. Local flat metres: exact enough for the tens of metres the threshold is about.
+    pub fn edge_distance_m(&self, lat: f64, lon: f64, within_m: f64) -> Option<f64> {
+        const M_PER_DEG: f64 = 111_320.0;
+        let kx = lat.to_radians().cos().max(1e-6) * M_PER_DEG / 1e7; // metres per file unit of longitude
+        let ky = M_PER_DEG / 1e7;
+        let (la, lo) = ((lat * 1e7) as i64, (lon * 1e7) as i64);
+        let pad_lat = (within_m / ky).ceil() as i64;
+        let pad_lon = (within_m / kx).ceil() as i64;
+        let (cla, clo) = (
+            (la as i32).div_euclid(REGION_CELL),
+            (lo as i32).div_euclid(REGION_CELL),
+        );
+        let mut seen = HashSet::new();
+        let mut best: Option<f64> = None;
+        for dla in -1..=1 {
+            for dlo in -1..=1 {
+                let Some(list) = self.cells.get(&(cla + dla, clo + dlo)) else {
+                    continue;
+                };
+                for &at in list {
+                    if !seen.insert(at) {
+                        continue;
+                    }
+                    let r = &self.regions[at as usize];
+                    if la < r.min_lat as i64 - pad_lat
+                        || la > r.max_lat as i64 + pad_lat
+                        || lo < r.min_lon as i64 - pad_lon
+                        || lo > r.max_lon as i64 + pad_lon
+                    {
+                        continue;
+                    }
+                    for ring in &r.rings {
+                        for w in ring.windows(2) {
+                            let d = segment_distance_m(
+                                (la as f64, lo as f64),
+                                (w[0].0 as f64, w[0].1 as f64),
+                                (w[1].0 as f64, w[1].1 as f64),
+                                kx,
+                                ky,
+                            );
+                            if d <= within_m && best.is_none_or(|b| d < b) {
+                                best = Some(d);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
+/// Metres from a point to a segment, all in file units (1e-7 degree, (lat, lon)), scaled by `kx` and `ky` metres per unit.
+fn segment_distance_m(p: (f64, f64), a: (f64, f64), b: (f64, f64), kx: f64, ky: f64) -> f64 {
+    let (px, py) = (p.1 * kx, p.0 * ky);
+    let (ax, ay) = (a.1 * kx, a.0 * ky);
+    let (bx, by) = (b.1 * kx, b.0 * ky);
+    let (dx, dy) = (bx - ax, by - ay);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 == 0.0 {
+        0.0
+    } else {
+        (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0)
+    };
+    let (cx, cy) = (ax + t * dx, ay + t * dy);
+    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
 }
 
 /// What to keep; every given part must hold.
@@ -562,6 +634,13 @@ impl Index {
     /// comes before one that has not, and its point is that house (`precision` "house"); otherwise the point is the
     /// street's middle (`precision` "street"), and the label only repeats what was typed.
     pub fn suggest(&self, text: &str, k: usize) -> Vec<Suggestion> {
+        self.suggest_near(text, k, None)
+    }
+
+    /// `suggest` with a point the user is near (`near=lat,lon` of `/v1/suggest`): streets within `SUGGEST_NEAR_M` of it
+    /// come first, the nearest first, then the rest in the usual order (the biggest first). Without a point the
+    /// answer is that of `suggest`, byte for byte.
+    pub fn suggest_near(&self, text: &str, k: usize, near: Option<(f64, f64)>) -> Vec<Suggestion> {
         let _rules = crate::rules::scope(self.rules);
         let k = crate::query::bound_k(k);
         let (head, tail) = text.split_once(',').unwrap_or((text, ""));
@@ -578,11 +657,11 @@ impl Index {
             if let Some((rest, n)) = head.rsplit_once(char::is_whitespace) {
                 if is_house_number(n) {
                     let after = self.suggest_scan(&normalize(rest), &town);
-                    return self.suggestions(after, Some(n), true, k);
+                    return self.suggestions(after, Some(n), true, k, near);
                 }
             }
         }
-        self.suggestions(found, number.as_deref(), false, k)
+        self.suggestions(found, number.as_deref(), false, k, near)
     }
 
     /// (addresses, street id) of the streets whose normalized name starts with `prefix`, in a commune starting
@@ -620,8 +699,27 @@ impl Index {
         number: Option<&str>,
         number_last: bool,
         k: usize,
+        near: Option<(f64, f64)>,
     ) -> Vec<Suggestion> {
         found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        if let Some(p) = near {
+            // within the radius, the nearest first; the rest keep the order above (the sort is stable)
+            let dist = |sid: u32| {
+                let m = self.street_meta(sid);
+                crate::codes::haversine_m(p, (f64::from(m.lat_c) / 1e7, f64::from(m.lon_c) / 1e7))
+            };
+            let mut keyed: Vec<(Option<f64>, (u32, u32))> = found
+                .into_iter()
+                .map(|f| (Some(dist(f.1)).filter(|d| *d <= SUGGEST_NEAR_M), f))
+                .collect();
+            keyed.sort_by(|a, b| match (a.0, b.0) {
+                (Some(x), Some(y)) => x.total_cmp(&y),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            });
+            found = keyed.into_iter().map(|(_, f)| f).collect();
+        }
         // One suggestion per street name and commune. A commune can hold several streets of one name (one per
         // village): with a number typed, the first of them that has that house speaks for the name.
         let mut out: Vec<Suggestion> = Vec::new();
@@ -1067,6 +1165,50 @@ mod tests {
         for (lat, lon) in [(-3.4, -3.4), (2.4, 2.4), (-0.5, 0.5), (0.5, -0.5)] {
             assert_eq!(set.regions_at(lat, lon), ["big"], "{lat} {lon}");
         }
+    }
+
+    #[test]
+    fn the_distance_to_the_nearest_boundary_is_the_same_on_both_sides_and_stops_at_its_limit() {
+        // two squares touching at lon -74.6; a point 0.0005° of longitude off the line at lat 40.5 is ~42.3 m from it
+        let set = RegionSet::from_bytes(&wofa(&[
+            ("west", 40.0, -75.5, 41.0, -74.6),
+            ("east", 40.0, -74.6, 41.0, -73.9),
+        ]))
+        .unwrap();
+        let metres = 0.0005 * 111_320.0 * 40.5f64.to_radians().cos();
+        let inside_west = set.edge_distance_m(40.5, -74.6005, 1_000.0).unwrap();
+        let inside_east = set.edge_distance_m(40.5, -74.5995, 1_000.0).unwrap();
+        assert!(
+            (inside_west - metres).abs() < 0.5,
+            "{inside_west} vs {metres}"
+        );
+        assert!(
+            (inside_east - metres).abs() < 0.5,
+            "{inside_east} vs {metres}"
+        );
+        assert_eq!(
+            set.edge_distance_m(40.5, -74.6005, 30.0),
+            None,
+            "beyond the limit: no boundary that close"
+        );
+        assert!(
+            set.edge_distance_m(40.5, -75.0, 1_000.0).is_none(),
+            "in the middle of an area"
+        );
+        assert!(
+            set.edge_distance_m(45.0, -75.0, 1_000.0).is_none(),
+            "no area anywhere near"
+        );
+    }
+
+    #[test]
+    fn a_boundary_in_the_next_degree_cell_is_measured_too() {
+        // the area lies wholly in the cell north of the point: its south edge, 0.0003° north of 40.9999, is ~44.5 m away
+        let set = RegionSet::from_bytes(&wofa(&[("north", 41.0002, -75.0, 41.5, -74.5)])).unwrap();
+        let d = set
+            .edge_distance_m(40.9999, -74.7, 100.0)
+            .expect("a boundary across the cell line");
+        assert!((d - 0.0003 * 111_320.0).abs() < 0.5, "{d}");
     }
 
     #[test]

@@ -54,14 +54,77 @@ def expected_pack(common: Path, overlay: Path, marker: bytes = MARKER) -> dict[s
         config = additions["city_tail"]
         required = {"enabled", "regions", "forms", "postal_digits", "postal_split"}
         optional = {"street_titles", "street_title_aliases", "postal_extension", "street_type_last", "region_names",
-                    "junk_tail", "homonym_prominence",
-    "homonym_doubt", "postal_pattern", "quadrant_suffixes", "direction_trailing", "city_first", "unit_hyphen", "number_first_types", "glue_road_numbers", "type_first_siblings", "fuzzy_short_forms", "saint_communes", "interp_max_gap", "interp_max_km", "bare_street_types", "postal_pad_zero", "number_mark", "postal_prefix", "commaless_restore", "postal_near_digits", "postal_street_suffix", "no_number_marks", "unit_slash", "postal_street_typo", "house_spans", "commune_short_words", "silence_to_place"}
+                    "junk_tail", "homonym_prominence", "postal_glue", "type_before_numeral", "number_slash_flat", "plot_segments", "flat_marks", "ordinal_suffixes", "title_retry", "type_lead", "postbox_words", "region_words", "region_markers", "postcode_town", "number_fraction",
+    "homonym_doubt", "postal_pattern", "quadrant_suffixes", "direction_trailing", "city_first", "unit_hyphen", "number_first_types", "glue_road_numbers", "type_first_siblings", "fuzzy_short_forms", "saint_communes", "interp_max_gap", "interp_max_km", "bare_street_types", "postal_pad_zero", "number_mark", "postal_prefix", "commaless_restore", "postal_near_digits", "postal_street_suffix", "no_number_marks", "unit_slash", "postal_street_typo", "house_spans", "commune_short_words", "silence_to_place", "postal_ignore", "silence_place_segments", "next_place_km", "near_next_door_km", "town_house_km", "postal_pair_off", "fuzzy_next_door_km", "glued_street_words", "typo_street_house", "commaless_type_comma", "fuzzy_long_forms", "placeless_retry_km", "type_run_last", "place_first_retry", "street_short_first", "number_last_retry"}
         if not isinstance(config, dict) or not required <= set(config) or set(config) - required - optional:
             raise ValueError("city_tail: expected complete tail grammar")
         # postal_pad_zero: "1" restores the leading zero of a postal code written one digit short (query.rs
         # pad_short_postal, Mexico City "6060" -> "06060").
         if "postal_pad_zero" in config and str(config["postal_pad_zero"]) != "1":
             raise ValueError("city_tail: postal_pad_zero must be \"1\" when present")
+        # silence_place_segments: "1" lets silence_to_place try each tail segment as the place (query.rs
+        # place_segment_points, New Zealand).
+        if "silence_place_segments" in config and str(config["silence_place_segments"]) != "1":
+            raise ValueError("city_tail: silence_place_segments must be \"1\" when present")
+        # near_next_door_km: an answer near a neighbour on the street written gives way to the very house on
+        # that street within so many km (0.1-50) of it (query.rs very_house_next_door, New Zealand).
+        if "near_next_door_km" in config and not (
+                re.fullmatch(r"(0|[1-9][0-9]?)(\.[0-9])?", str(config["near_next_door_km"]))
+                and 0.1 <= float(config["near_next_door_km"]) <= 50):
+            raise ValueError("city_tail: near_next_door_km must be 0.1-50 km, one decimal at most, when present")
+        # fuzzy_next_door_km: an answer on a street read a letter off gives way to the very house on the street
+        # written within so many km (0.1-50) (query.rs very_house_next_door, New Zealand).
+        if "fuzzy_next_door_km" in config and not (
+                re.fullmatch(r"(0|[1-9][0-9]?)(\.[0-9])?", str(config["fuzzy_next_door_km"]))
+                and 0.1 <= float(config["fuzzy_next_door_km"]) <= 50):
+            raise ValueError("city_tail: fuzzy_next_door_km must be 0.1-50 km, one decimal at most, when present")
+        # postal_pair_off: "1" reads "2703 Te Anga Road" as a house and a word, not the Dutch postcode pair
+        # "1012 NZ" (query.rs postal_pair_off, New Zealand).
+        # glued_street_words: "1" reads "Camphill Road" as "Camp Hill Road" and back (query.rs glued_word_variants).
+        # typo_street_house: "1" keeps the house number on a street the fuzzy reading fixed (query.rs typo_street_house).
+        # commaless_type_comma: "1" puts the commas back after the street type of a comma-less query (query.rs).
+        # fuzzy_long_forms: "1" retries a fuzzy lookup with short street types spelled out (query.rs fuzzy_long_rest).
+        # placeless_retry_km: a house found without the place named stands within these km of it (query.rs placeless_retry).
+        if "placeless_retry_km" in config and not (
+                re.fullmatch(r"[1-9][0-9]?", str(config["placeless_retry_km"]))
+                and 1 <= int(config["placeless_retry_km"]) <= 50):
+            raise ValueError("city_tail: placeless_retry_km must be a whole 1-50 km when present")
+        # type_run_last: "1" reads "270 Bay View Road" to its last type word in a row (query.rs address_and_tail).
+        # place_first_retry: "1" asks "Wairoa, 12 Okare Road" again with the town last (query.rs place_first_retry).
+        # street_short_first: "1" reads a street's first word at the other form of commune_short_words (query.rs).
+        # number_last_retry: "1" asks "Wharepapa Road 14, Te Awamutu" again with the number first (query.rs).
+        if "number_last_retry" in config and config["number_last_retry"] != "1":
+            raise ValueError("city_tail: number_last_retry must be \"1\" when present")
+        if "street_short_first" in config and config["street_short_first"] != "1":
+            raise ValueError("city_tail: street_short_first must be \"1\" when present")
+        if "place_first_retry" in config and config["place_first_retry"] != "1":
+            raise ValueError("city_tail: place_first_retry must be \"1\" when present")
+        if "type_run_last" in config and config["type_run_last"] != "1":
+            raise ValueError("city_tail: type_run_last must be \"1\" when present")
+        if "fuzzy_long_forms" in config and config["fuzzy_long_forms"] != "1":
+            raise ValueError("city_tail: fuzzy_long_forms must be \"1\" when present")
+        if "commaless_type_comma" in config and config["commaless_type_comma"] != "1":
+            raise ValueError("city_tail: commaless_type_comma must be \"1\" when present")
+        if "typo_street_house" in config and config["typo_street_house"] != "1":
+            raise ValueError("city_tail: typo_street_house must be \"1\" when present")
+        if "glued_street_words" in config and config["glued_street_words"] != "1":
+            raise ValueError("city_tail: glued_street_words must be \"1\" when present")
+        if "postal_pair_off" in config and config["postal_pair_off"] != "1":
+            raise ValueError("city_tail: postal_pair_off must be \"1\" when present")
+        # town_house_km: a rural address answered by its postal town alone takes the one house of that number on
+        # the street written within so many km (1-150) of the town (query.rs house_near_postal_town, New Zealand).
+        if "town_house_km" in config and not (str(config["town_house_km"]).isdigit()
+                                              and 1 <= int(config["town_house_km"]) <= 150):
+            raise ValueError("city_tail: town_house_km must be a whole number 1-150 when present")
+        # next_place_km: the radius in km (1-50) around a named place within which silence_to_place takes the
+        # very house written (query.rs next_place_radius_km, New Zealand).
+        if "next_place_km" in config and not (str(config["next_place_km"]).isdigit()
+                                              and 1 <= int(config["next_place_km"]) <= 50):
+            raise ValueError("city_tail: next_place_km must be a whole number 1-50 when present")
+        # postal_ignore: "1" drops a postal code that closes a segment on a sheet that keeps none (query.rs
+        # drop_unkept_postal, New Zealand).
+        if "postal_ignore" in config and str(config["postal_ignore"]) != "1":
+            raise ValueError("city_tail: postal_ignore must be \"1\" when present")
         # commaless_restore: "1" gives a query written without commas and ending with a postal code its
         # commas back (query.rs restore_commas, Mexico).
         if "commaless_restore" in config and str(config["commaless_restore"]) != "1":
@@ -88,10 +151,56 @@ def expected_pack(common: Path, overlay: Path, marker: bytes = MARKER) -> dict[s
         # with a postal code and the answer is not inside it (query.rs bare_street_postal_variants, Mexico).
         if "bare_street_types" in config and not re.fullmatch(r"[a-z]+( [a-z]+)*", str(config["bare_street_types"])):
             raise ValueError("city_tail: bare_street_types must be lowercase words separated by spaces")
-        # homonym_prominence: "1" orders equal-score homonyms of a cityless query by commune size
-        # before distance to the sheet's anchor commune (query.rs homonym_prominence_first).
-        if "homonym_prominence" in config and str(config["homonym_prominence"]) != "1":
-            raise ValueError("city_tail: homonym_prominence must be \"1\" when present")
+        # homonym_prominence: equal-score homonyms of a cityless query go by size before distance to the
+        # sheet's anchor commune (query.rs homonym_prominence_first): "1" — the size of the place (communes
+        # within 20 km), "commune" — the commune's own count (Poland: suburbs are separate communes).
+        if "homonym_prominence" in config and str(config["homonym_prominence"]) not in ("1", "commune"):
+            raise ValueError("city_tail: homonym_prominence must be \"1\" or \"commune\" when present")
+        # type_before_numeral: street-type words dropped before a street named by a date ("ul. 3 Maja 93"), query.rs
+        # drop_type_before_numeral (Poland): lowercase words separated by spaces.
+        if "type_before_numeral" in config and not re.fullmatch(r"[a-ząćęłńóśźż]+( [a-ząćęłńóśźż]+)*", str(config["type_before_numeral"])):
+            raise ValueError("city_tail: type_before_numeral must be lowercase words separated by spaces")
+        # number_slash_flat: "1" drops the flat of a house number written "house/flat" ("21a/20" -> "21a"), query.rs
+        # drop_flat_after_slash (Poland).
+        if "number_slash_flat" in config and str(config["number_slash_flat"]) != "1":
+            raise ValueError("city_tail: number_slash_flat must be \"1\" when present")
+        # plot_segments: "1" drops the land-plot segments a register writes after the address ("dz. nr 12/14", "361/12"),
+        # query.rs drop_plot_segments (Poland, UKE).
+        # title_retry: "1" asks a line again with its street titles in the other form ("Świętego" <-> "św"), query.rs
+        # short_title_retry (Poland; on Brazil the same pairs lose answers).
+        if "title_retry" in config and str(config["title_retry"]) != "1":
+            raise ValueError("city_tail: title_retry must be \"1\" when present")
+        # type_lead: a street-type word opening a segment put as the sheet keys it ("ul= al=aleja"), query.rs
+        # rewrite_leading_type (Poland): pairs short=full, the full side may be empty.
+        W = r"[a-ząćęłńóśźż]+"
+        if "type_lead" in config and not re.fullmatch(rf"{W}=({W})?( {W}=({W})?)*", str(config["type_lead"])):
+            raise ValueError("city_tail: type_lead must be pairs short=full separated by spaces")
+        # postbox_words, region_words, region_markers: lowercase words (region names may carry a hyphen), query.rs
+        # drop_postbox_segment / drop_region_words (Poland).
+        for key in ("postbox_words", "region_words", "region_markers"):
+            if key in config and not re.fullmatch(r"[a-ząćęłńóśźż-]+( [a-ząćęłńóśźż-]+)*", str(config[key])):
+                raise ValueError(f"city_tail: {key} must be lowercase words separated by spaces")
+        # postcode_town: "1" answers a postcode and a town alone with the town, query.rs postcode_town_answer (Poland).
+        if "postcode_town" in config and str(config["postcode_town"]) != "1":
+            raise ValueError("city_tail: postcode_town must be \"1\" when present")
+        # number_fraction: "1" reads "10/16" as the house's whole number (query.rs find_house, Poland, PRG).
+        if "number_fraction" in config and str(config["number_fraction"]) != "1":
+            raise ValueError("city_tail: number_fraction must be \"1\" when present")
+        if "plot_segments" in config and str(config["plot_segments"]) != "1":
+            raise ValueError("city_tail: plot_segments must be \"1\" when present")
+        # flat_marks: marks of a flat written after the house ("m. 24", "lok. 3"), dropped with the flat, query.rs
+        # drop_flat_marks (Poland): lowercase words separated by spaces.
+        if "flat_marks" in config and not re.fullmatch(r"[a-z]+( [a-z]+)*", str(config["flat_marks"])):
+            raise ValueError("city_tail: flat_marks must be lowercase words separated by spaces")
+        # ordinal_suffixes: endings of a day written as an ordinal ("3-go Maja", "20-go Stycznia"), dropped from the
+        # number so the street is read as the sheet keys it ("3 Maja"), query.rs drop_ordinal_suffixes (Poland):
+        # lowercase words separated by spaces.
+        if "ordinal_suffixes" in config and not re.fullmatch(r"[a-z]+( [a-z]+)*", str(config["ordinal_suffixes"])):
+            raise ValueError("city_tail: ordinal_suffixes must be lowercase words separated by spaces")
+        # postal_glue: "1" glues a postal code written with its hyphen at the start of a segment ("31-044 Kraków") into
+        # the digits the sheet keys (query.rs glue_split_postcodes, Poland); needs postal_split < postal_digits.
+        if "postal_glue" in config and str(config["postal_glue"]) != "1":
+            raise ValueError("city_tail: postal_glue must be \"1\" when present")
         # postal_extension: digits of a postal-code extension joined by a hyphen ("62701-1234" -> 4);
         # read by the engine's region_postal form only (query.rs split_region_postal).
         if "postal_extension" in config and not re.fullmatch(r"[1-9]", str(config["postal_extension"])):

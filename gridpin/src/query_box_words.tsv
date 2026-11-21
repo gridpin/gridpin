@@ -1,0 +1,19 @@
+# Words of a post office box that a query drops together with the box number before it is read ("BP 524",
+# "CS 40051", "Postfach 1234"): the box is no part of the street, and its number read as a house number sends
+# the answer to the wrong house. Data of the engine, read for every sheet alike (ANSWERS §60). Matched on the
+# normalized words glued without spaces ("B.P." -> "bp", "Boîte postale" -> "boitepostale"). Narrower than
+# po_box_words.tsv: "cp" (a Spanish postcode label) and "box" (a word of names) are not dropped from a query.
+bp
+boitepostale
+cs
+tsa
+pobox
+postofficebox
+postfach
+postbus
+apartadodecorreos
+apdo
+caixapostal
+casellapostale
+skrytkapocztowa
+postanskifah

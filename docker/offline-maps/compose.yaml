@@ -1,0 +1,49 @@
+# Offline maps in one compose file: a base map, search and routing for one country, with no network at run time.
+#
+#   ./fetch.sh rs            # once: pinned map libraries, the country's base map, the OSM extract for routing
+#   docker compose up        # then open http://127.0.0.1:8090
+#
+# Only the geocoder needs no compose file: docker run --rm -p 127.0.0.1:8080:8080 ghcr.io/gridpin/gridpin:rs
+# (https://gridpin.dev/docker-geocoding). Here it answers through the page, at http://127.0.0.1:8090/api/.
+#
+# geocoder and routing sit on an internal network: they cannot reach the internet and need not. Only web publishes a
+# port, on the loopback address. The base map and routing are OpenStreetMap data (ODbL); the geocoder's sheet is not,
+# and nothing of OSM goes into it: the layers are only drawn side by side.
+services:
+  geocoder:
+    image: ${GRIDPIN_IMAGE:-ghcr.io/gridpin/gridpin:rs}
+    # the GridPin images are built for linux/amd64; on Apple silicon Docker runs them under emulation
+    platform: linux/amd64
+    restart: unless-stopped
+    networks: [maps]
+  routing:
+    image: ghcr.io/gis-ops/docker-valhalla/valhalla:3.5.1
+    restart: unless-stopped
+    environment:
+      # build the routing tiles from data/valhalla/*.osm.pbf on the first start; nothing is downloaded
+      tile_urls: ""
+      use_tiles_ignore_pbf: "True"
+      force_rebuild: "False"
+      build_elevation: "False"
+      build_admins: "True"
+      build_time_zones: "False"
+      build_transit: "False"
+      serve_tiles: "True"
+      server_threads: "2"
+    volumes:
+      - ./data/valhalla:/custom_files
+    networks: [maps]
+  web:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["127.0.0.1:8090:80"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web/index.html:/srv/index.html:ro
+      - ./data/web:/srv/data:ro
+    networks: [maps, edge]
+
+networks:
+  maps:
+    internal: true
+  edge: {}

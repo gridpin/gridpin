@@ -11,14 +11,14 @@ A batch keeps its length and order; a row without an address or an answer has em
 
 from __future__ import annotations
 
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Optional
 
 try:
     import pandas as pd
 except ImportError as e:  # pragma: no cover - exercised without pandas installed
     raise ImportError('gridpin.udf needs pandas: pip install "gridpin[pandas]"') from e
 
-from ._open import geocoder
+from ._open import SheetLike, geocoder
 from .pandas import GP_COLUMNS, _frame
 
 __all__ = ["SPARK_SCHEMA", "geocode_iter"]
@@ -29,7 +29,7 @@ _TYPES = {"gp_lat": "double", "gp_lon": "double", "gp_confidence": "double", "gp
 SPARK_SCHEMA = ", ".join(f"{c} {_TYPES.get(c, 'string')}" for c in GP_COLUMNS)
 
 
-def geocode_iter(sheet, poi=None) -> Callable[[Iterator["pd.Series"]], Iterator["pd.DataFrame"]]:
+def geocode_iter(sheet: SheetLike, poi: Optional[str] = None) -> Callable[[Iterator["pd.Series"]], Iterator["pd.DataFrame"]]:
     """The batch function over one sheet (a path or a country code); nothing opens until the first batch."""
 
     def answer(batches: Iterator["pd.Series"]) -> Iterator["pd.DataFrame"]:

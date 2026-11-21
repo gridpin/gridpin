@@ -1,0 +1,60 @@
+{
+ "table": "acs5_2024_tract_excerpt",
+ "file": "acs5_2024_tract_excerpt.csv",
+ "prefix": "acs",
+ "key": {
+  "column": "GEOID",
+  "kind": "us_tract",
+  "vintage": "2020",
+  "width": 11,
+  "grain": "fine"
+ },
+ "take": {
+  "population": {
+   "as": "population",
+   "unit": "persons",
+   "moe": "population_moe",
+   "missing": [
+    "-666666666",
+    "-999999999",
+    "-888888888",
+    "-555555555",
+    "-333333333",
+    "-222222222"
+   ]
+  },
+  "median_household_income": {
+   "as": "median_household_income",
+   "unit": "USD",
+   "moe": "median_household_income_moe",
+   "missing": [
+    "-666666666",
+    "-999999999",
+    "-888888888",
+    "-555555555",
+    "-333333333",
+    "-222222222"
+   ]
+  },
+  "below_poverty_share": {
+   "as": "below_poverty_share",
+   "unit": "share 0..1",
+   "moe": "below_poverty_share_moe",
+   "missing": [
+    "-666666666",
+    "-999999999",
+    "-888888888",
+    "-555555555",
+    "-333333333",
+    "-222222222"
+   ]
+  }
+ },
+ "edition": "ACS 5-year 2020-2024",
+ "publisher": "U.S. Census Bureau",
+ "source_url": "https://www2.census.gov/programs-surveys/acs/summary_file/2024/table-based-SF/data/5YRData/",
+ "read": "2026-11-19",
+ "licence": "U.S. federal government work (17 U.S.C. 105); the Bureau's terms forbid using the data to identify any person, household or business",
+ "coverage": "partial",
+ "caveat": "A value of the census tract the address lies in, an estimate with its margin of error; not a value of the household or the person at the address. This file is a four-row excerpt for the example; the full table comes from the publisher."
+}

@@ -101,6 +101,9 @@ enum Cmd {
         /// verdict, postal[:cc], crs:EPSG:<code>, exists, area, unit
         #[arg(long, value_name = "FIELDS")]
         with: Option<String>,
+        /// md: each answer as a heading and a table of its fields, for a reader rather than a program
+        #[arg(long, value_name = "FORMAT", hide = true, value_parser = ["jsonl", "md"])]
+        format: Option<String>,
     },
     /// Single forward query
     Query {
@@ -129,6 +132,10 @@ enum Cmd {
         /// your own names for places: a CSV with the columns name,address, read before the sheet
         #[arg(long)]
         aliases: Option<PathBuf>,
+        /// a postcode layer (Brazil's eight-digit CEP: `prep/br_cep_layer.py`): a query that is only a code answers
+        /// its street from the layer
+        #[arg(long, hide = true)]
+        postcode_layer: Option<PathBuf>,
         /// extra answer fields: h3[:res], geohash[:len], placekey, codes, street_point, links, provenance, place[:level],
         /// verdict, postal[:cc], crs:EPSG:<code>, exists, area, unit
         #[arg(long, value_name = "FIELDS")]
@@ -142,6 +149,11 @@ enum Cmd {
         /// your own abbreviations, written out before the query: a TSV of short form and full form
         #[arg(long, value_name = "TSV")]
         abbrev: Option<PathBuf>,
+        /// valhalla: the top answer as one Valhalla route location (lat/lon on the street, display_lat/display_lon at
+        /// the house, street); no answer or a weak one is an error; md: each answer as a heading and a table of its
+        /// fields, for a reader rather than a program
+        #[arg(long, value_name = "FORMAT", hide = true, value_parser = ["jsonl", "valhalla", "md"])]
+        format: Option<String>,
     },
     /// Batch mode: JSONL {"q": ...} in -> JSONL {"results": [...]} out, or a CSV/TSV file in -> the same
     /// file with gp_* answer columns out; order preserved
@@ -156,7 +168,8 @@ enum Cmd {
         /// a .geojson or .geojsonl file is read as GeoJSON features
         #[arg(long)]
         format: Option<String>,
-        /// output format for a CSV/TSV input: csv or tsv (default: the input format)
+        /// output format for a CSV/TSV input: csv or tsv (default: the input format); md writes one Markdown
+        /// table of at most 200 rows, for a reader rather than a program
         #[arg(long)]
         output_format: Option<String>,
         /// CSV/TSV: the address column, or several joined with ", " ("street,city,postcode");
@@ -276,9 +289,26 @@ enum Cmd {
         /// your own names for places: a CSV with the columns name,address, read before the sheet
         #[arg(long)]
         aliases: Option<PathBuf>,
+        /// a postcode layer (Brazil's eight-digit CEP: `prep/br_cep_layer.py`): a query that is only a code answers
+        /// its street, and `/ws/<cep>/json/` answers in the shape of ViaCEP
+        #[arg(long, hide = true)]
+        postcode_layer: Option<PathBuf>,
         /// only GET this http:// URL and exit 0 on status 200 (container health checks)
         #[arg(long, conflicts_with_all = ["poi"])]
         probe: Option<String>,
+        /// a file whose first line is the one shared key every request but /health must carry
+        /// (`Authorization: Bearer <key>`); or set GRIDPIN_SERVE_KEY. The key counts and logs nothing: several keys,
+        /// limits and a log are gridpin-pro serve
+        #[arg(long, hide = true)]
+        key_file: Option<PathBuf>,
+        /// refuse to start without a key (GRIDPIN_REQUIRE_KEY=1 does the same): a server on the internet must not
+        /// start open because a secret was left unset
+        #[arg(long, hide = true)]
+        require_key: bool,
+        /// write osm_type/osm_id on the Nominatim and Photon paths: a number made from each answer, negative so it
+        /// is never an OpenStreetMap object (TeslaMate, Dawarich and Atlas take no answer without one); /lookup reads it
+        #[arg(long, hide = true)]
+        ids: bool,
     },
     /// Addresses in free text (a letter, a delivery note, an answer of a model), each confirmed by the sheet
     Extract {
@@ -318,8 +348,9 @@ enum Cmd {
         /// number, postcode, town) or `sheet`: the layout of the sheet's country
         #[arg(long, default_value = "sheet")]
         layout: String,
-        /// what to print: `postal` (the layout above) or `iso20022` (the ISO 20022 `PstlAdr` as JSON: mode structured,
-        /// hybrid or none, the elements, the checks and whether the address exists)
+        /// what to print: `postal` (the layout above), `iso20022` (the ISO 20022 `PstlAdr` as JSON: mode structured,
+        /// hybrid or none, the elements, the checks and whether the address exists), `parts` (the parts of the address
+        /// every structured format is built from) or `fhir` (an HL7 FHIR `Address` with the point as geolocation)
         #[arg(long, default_value = "postal")]
         out: String,
         /// with `--out iso20022`: the `<PstlAdr>` element as XML instead of JSON
@@ -354,6 +385,37 @@ enum Cmd {
         /// optional POI layer (second .bin): cascades when the address result is weak
         #[arg(long)]
         poi: Option<PathBuf>,
+    },
+    /// Join two tables by the address their rows name: the pairs of rows whose top answers are one house (or one
+    /// street with --level street), the key of `gridpin same`; with --unmatched also the rows without a pair and why
+    #[command(hide = true)]
+    Match {
+        index: PathBuf,
+        /// the first table (CSV)
+        a: PathBuf,
+        /// the second table (CSV)
+        b: PathBuf,
+        /// output CSV: a_row, b_row, level, a_matches, b_matches, reason, a_address, b_address (rows counted from 1
+        /// after the header)
+        out: PathBuf,
+        /// the address column of both tables (default: the one named address, query or q); several joined with ", "
+        #[arg(long)]
+        column: Option<String>,
+        /// the address column of the first table, when it differs
+        #[arg(long)]
+        a_column: Option<String>,
+        /// the address column of the second table, when it differs
+        #[arg(long)]
+        b_column: Option<String>,
+        /// house (one street, number and commune) or street (one street and commune)
+        #[arg(long, default_value = "house")]
+        level: String,
+        /// let a weak answer make a key: a weak answer is a guess the sheet does not stand behind
+        #[arg(long)]
+        lenient: bool,
+        /// also write the rows of each table without a pair, with the reason
+        #[arg(long)]
+        unmatched: bool,
     },
     /// Do two address lines name the same house, street or commune? (`--pairs`: a JSONL file of {"a","b"})
     Same {
@@ -395,6 +457,65 @@ enum Cmd {
         /// the address column of the second file
         #[arg(long)]
         list_column: Option<String>,
+        /// output file (default: standard output)
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+    },
+    /// The straight-line distance between the rows of two files: row i with row i, the rows sharing --key, or
+    /// every row with every row (--matrix). A file without lat and lon columns is geocoded on --sheet
+    #[command(hide = true)]
+    Distance {
+        a: PathBuf,
+        b: PathBuf,
+        /// the sheet to geocode addresses on, when a file has no coordinates
+        #[arg(long)]
+        sheet: Option<PathBuf>,
+        /// pair the rows that have the same value in this column of both files
+        #[arg(long)]
+        key: Option<String>,
+        /// every row of the first file with every row of the second, one line per pair
+        #[arg(long)]
+        matrix: bool,
+        /// the most pairs --matrix may write
+        #[arg(long, default_value_t = gridpin::points::MAX_PAIRS)]
+        max_pairs: u64,
+        /// the column that names a row in the output (default: id, else its line number)
+        #[arg(long)]
+        id_column: Option<String>,
+        /// the address column of the first file
+        #[arg(long)]
+        a_column: Option<String>,
+        /// the address column of the second file
+        #[arg(long)]
+        b_column: Option<String>,
+        /// output file (default: standard output)
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+    },
+    /// Attach a table by a code: the statistics a publisher gives by tract, statistical area or grid cell, joined
+    /// to rows that carry the code (or a point it is computed from), with the year of the boundaries checked
+    #[command(hide = true)]
+    Attach {
+        /// the rows: a CSV or TSV with the code column, or with gp_lat and gp_lon (or lat and lon)
+        rows: PathBuf,
+        /// the table passport (<name>.table.json) beside the table file
+        #[arg(long)]
+        table: PathBuf,
+        /// the column of the rows that holds the code (not for a key computed from the point)
+        #[arg(long)]
+        on: Option<String>,
+        /// the year of the boundaries the rows' codes belong to; must equal the table's
+        #[arg(long)]
+        key_vintage: Option<String>,
+        /// the day the table's dates of validity are read at (YYYY-MM-DD); required by a table with dates
+        #[arg(long)]
+        as_of: Option<String>,
+        /// write the rows even when a complete table misses more codes than its passport allows
+        #[arg(long)]
+        allow_absent: bool,
+        /// write the counts, edition, licence and caveat as JSON to this file
+        #[arg(long)]
+        report: Option<PathBuf>,
         /// output file (default: standard output)
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
@@ -528,6 +649,17 @@ enum Cmd {
         /// also write each row with its answer and its distance to the truth (CSV)
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
+        /// the same figures for each value of this column of the input (state, kind of place); a slice under 300
+        /// rows is marked a probe
+        #[arg(long, hide = true)]
+        by: Option<String>,
+        /// judge answers already collected from another engine instead of geocoding: a CSV with id, lat, lon
+        /// (no row for an id, or empty lat, lon: no answer); the input needs the same id column
+        #[arg(long, hide = true)]
+        answers: Option<PathBuf>,
+        /// the id column of the input and of --answers (default: id)
+        #[arg(long, hide = true, default_value = "id")]
+        id_column: String,
     },
 }
 
@@ -871,6 +1003,109 @@ fn sheets_command(cmd: SheetsCmd) -> anyhow::Result<()> {
 /// own panic boundary; the CLI query/reverse/batch paths need one too. A caught panic yields the
 /// type's default (empty results) so the process exits cleanly instead of aborting the host.
 /// Like `panic_safe` for answers without a neutral value: a caught panic becomes an error.
+struct MatchArgs {
+    index: PathBuf,
+    a: PathBuf,
+    b: PathBuf,
+    out: PathBuf,
+    a_column: Option<String>,
+    b_column: Option<String>,
+    level: String,
+    lenient: bool,
+    unmatched: bool,
+}
+
+/// `gridpin match`: both tables answered by the sheet, keyed (`match_tables::key_of`) and hash-joined.
+fn match_tables(m: MatchArgs) -> anyhow::Result<()> {
+    use gridpin::match_tables as mt;
+    use rayon::prelude::*;
+    let level = mt::Level::parse(&m.level)
+        .ok_or_else(|| anyhow::anyhow!("--level {}: house or street", m.level))?;
+    let idx = query::Index::open_address(&m.index)?;
+    let started = std::time::Instant::now();
+    let lines = |path: &PathBuf, column: Option<&str>| -> anyhow::Result<Vec<String>> {
+        let mut reader = csv::ReaderBuilder::new()
+            .flexible(true)
+            .from_reader(gridpin::tabular::open_table(path)?);
+        let headers = reader.headers()?.clone();
+        let cols = gridpin::tabular::query_columns(&headers, column)?;
+        reader
+            .records()
+            .map(|r| Ok(gridpin::tabular::query_text(&r?, &cols)))
+            .collect()
+    };
+    let (la, lb) = (
+        lines(&m.a, m.a_column.as_deref())?,
+        lines(&m.b, m.b_column.as_deref())?,
+    );
+    let keys = |side: &[String]| -> Vec<Result<String, &'static str>> {
+        side.par_iter()
+            .map(|q| {
+                let hits = panic_safe(|| query::query_cascade(&idx, None, q, 1));
+                mt::key_of(hits.first(), level, m.lenient)
+            })
+            .collect()
+    };
+    let joined = mt::join(&keys(&la), &keys(&lb));
+    let mut w = csv::Writer::from_path(&m.out)?;
+    w.write_record([
+        "a_row",
+        "b_row",
+        "level",
+        "a_matches",
+        "b_matches",
+        "reason",
+        "a_address",
+        "b_address",
+    ])?;
+    for p in &joined.pairs {
+        w.write_record([
+            (p.a + 1).to_string(),
+            (p.b + 1).to_string(),
+            level.as_str().to_string(),
+            p.a_matches.to_string(),
+            p.b_matches.to_string(),
+            String::new(),
+            la[p.a].clone(),
+            lb[p.b].clone(),
+        ])?;
+    }
+    if m.unmatched {
+        for &(i, why) in &joined.only_a {
+            let row = (i + 1).to_string();
+            w.write_record([&row, "", "", "0", "", why, &la[i], ""])?;
+        }
+        for &(j, why) in &joined.only_b {
+            let row = (j + 1).to_string();
+            w.write_record(["", &row, "", "", "0", why, "", &lb[j]])?;
+        }
+    }
+    w.flush()?;
+    let reasons = |rows: &[(usize, &'static str)]| {
+        let mut n: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for (_, why) in rows {
+            *n.entry(why).or_default() += 1;
+        }
+        n.iter()
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    eprintln!(
+        "A {} rows, B {} rows: {} pairs at {}; without a pair A {} ({}), B {} ({}); {:.1} s",
+        la.len(),
+        lb.len(),
+        joined.pairs.len(),
+        level.as_str(),
+        joined.only_a.len(),
+        reasons(&joined.only_a),
+        joined.only_b.len(),
+        reasons(&joined.only_b),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 fn guarded<T>(f: impl FnOnce() -> T) -> anyhow::Result<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
         .map_err(|_| anyhow::anyhow!("the engine failed on this line (corrupt sheet or input)"))
@@ -953,6 +1188,78 @@ fn parse_cli() -> Cli {
     }
     let matches = unhide(Cli::command()).get_matches();
     Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+}
+
+/// `bench --answers`: the answers another engine gave, by id, judged on the truth of the input. Prints coverage,
+/// ids of the answer file that are not in the input, and ids given more than once (the first is used).
+fn bench_answers(
+    headers: &csv::StringRecord,
+    rows: &[(csv::StringRecord, String, (f64, f64))],
+    path: &std::path::Path,
+    id_column: &str,
+    keys: Option<&[String]>,
+) -> anyhow::Result<serde_json::Value> {
+    let id_at = headers
+        .iter()
+        .position(|h| h == id_column)
+        .ok_or_else(|| anyhow::anyhow!("--answers needs an {id_column:?} column in the input"))?;
+    let mut reader = csv::Reader::from_reader(gridpin::tabular::open_table(path)?);
+    let head = reader.headers()?.clone();
+    let col = |names: &[&str]| {
+        head.iter()
+            .position(|h| names.contains(&h.to_ascii_lowercase().as_str()))
+    };
+    let (aid, alat, alon) = (
+        col(&[id_column]).ok_or_else(|| anyhow::anyhow!("--answers: no {id_column:?} column"))?,
+        col(&gridpin::tabular::LAT_NAMES)
+            .ok_or_else(|| anyhow::anyhow!("--answers: no lat column"))?,
+        col(&gridpin::tabular::LON_NAMES)
+            .ok_or_else(|| anyhow::anyhow!("--answers: no lon column"))?,
+    );
+    let mut given: std::collections::HashMap<String, Option<(f64, f64)>> = Default::default();
+    let mut duplicates = 0usize;
+    for r in reader.records() {
+        let r = r?;
+        let id = r.get(aid).unwrap_or("").to_string();
+        let num = |i: usize| r.get(i).and_then(|s| s.trim().parse::<f64>().ok());
+        let point = num(alat)
+            .zip(num(alon))
+            .filter(|(la, lo)| la.is_finite() && lo.is_finite());
+        match given.entry(id) {
+            std::collections::hash_map::Entry::Occupied(_) => duplicates += 1,
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(point);
+            }
+        }
+    }
+    let ids: std::collections::HashSet<&str> = rows
+        .iter()
+        .map(|(r, _, _)| r.get(id_at).unwrap_or(""))
+        .collect();
+    let unknown = given.keys().filter(|k| !ids.contains(k.as_str())).count();
+    let pairs: Vec<gridpin::bench::PointRow> = rows
+        .iter()
+        .map(|(r, _, t)| (given.get(r.get(id_at).unwrap_or("")).copied().flatten(), *t))
+        .collect();
+    let covered = rows
+        .iter()
+        .filter(|(r, _, _)| given.contains_key(r.get(id_at).unwrap_or("")))
+        .count();
+    let mut out = serde_json::json!({
+        "all": gridpin::bench::summarize_points(&pairs),
+        "answer_rows_for_input": covered,
+        "coverage": covered as f64 / rows.len().max(1) as f64,
+        "ids_not_in_input": unknown,
+        "duplicate_ids": duplicates,
+    });
+    if let Some(keys) = keys {
+        let slices: Vec<gridpin::bench::Row> = pairs
+            .iter()
+            .map(|(p, t)| (p.map(|p| (p, "answered")), *t))
+            .collect();
+        out["by"] = gridpin::bench::by_slices(keys, &slices, false);
+    }
+    Ok(out)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -1054,6 +1361,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             lon,
             k,
             with,
+            format,
         } => {
             // reverse on a POI-only sheet would mark a place as a `house` — refuse it as primary
             // too, consistent with query/batch; POI belongs to the cascade only.
@@ -1064,10 +1372,21 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let hits = idx
                 .try_reverse(lat, lon, k)
                 .map_err(|e| anyhow::anyhow!(e))?;
+            let mut lines = Vec::with_capacity(hits.len());
             for h in hits {
-                match &extras {
-                    None => println!("{}", serde_json::to_string(&h)?),
-                    Some(e) => println!("{}", e.hit_json(&h, &idx, None)?),
+                lines.push(match &extras {
+                    None => serde_json::to_string(&h)?,
+                    Some(e) => e.hit_json(&h, &idx, None)?,
+                });
+            }
+            if format.as_deref() == Some("md") {
+                print!(
+                    "{}",
+                    gridpin::md::answers(&lines, &format!("No address near {lat}, {lon}."))?
+                );
+            } else {
+                for line in lines {
+                    println!("{line}");
                 }
             }
         }
@@ -1183,10 +1502,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             also,
             also_after,
             aliases,
+            postcode_layer,
             with,
             strict,
             lenient,
             abbrev,
+            format,
         } => {
             let idx = open_address_also(&index, also.as_deref(), also_after.as_deref())?;
             let mut extras = gridpin::extras::Extras::new(with.as_deref(), &idx)?;
@@ -1207,6 +1528,16 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 .as_deref()
                 .map(gridpin::aliases::Aliases::load)
                 .transpose()?;
+            if let Some(path) = &postcode_layer {
+                let layer = gridpin::postcode_layer::PostcodeLayer::open(path)?;
+                let hits = layer.hits(&q, k);
+                if !hits.is_empty() {
+                    for h in hits {
+                        println!("{}", serde_json::to_string(&h)?);
+                    }
+                    return Ok(());
+                }
+            }
             // a question or the reason of a silence goes to stderr; stdout stays the answers of before
             if near.is_none() && aliases.is_none() && tolerance == query::Tolerance::Default {
                 tell(&gridpin::outcome::query_outcome(
@@ -1225,17 +1556,33 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     }),
                 })
             });
+            if format.as_deref() == Some("valhalla") {
+                let line =
+                    gridpin::valhalla::location(&hits, &idx).map_err(|e| anyhow::anyhow!(e))?;
+                println!("{line}");
+                return Ok(());
+            }
             gridpin::extras::for_query(&q, || -> anyhow::Result<()> {
+                let mut lines = Vec::with_capacity(hits.len());
                 for h in hits {
-                    match (&name, &extras) {
-                        (None, None) => println!("{}", serde_json::to_string(&h)?),
+                    lines.push(match (&name, &extras) {
+                        (None, None) => serde_json::to_string(&h)?,
                         (Some(name), None) => {
-                            println!("{}", gridpin::aliases::hit_json(&h, Some(name))?)
+                            gridpin::aliases::hit_json(&h, Some(name))?.to_string()
                         }
-                        (name, extras) => println!(
-                            "{}",
+                        (name, extras) => {
                             gridpin::extras::hit_text(&h, extras.as_ref(), &idx, name.as_deref())?
-                        ),
+                        }
+                    });
+                }
+                if format.as_deref() == Some("md") {
+                    print!(
+                        "{}",
+                        gridpin::md::answers(&lines, &format!("No answer for {q:?}."))?
+                    );
+                } else {
+                    for line in lines {
+                        println!("{line}");
                     }
                 }
                 Ok(())
@@ -1323,10 +1670,25 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 );
             }
             let table = input_format != gridpin::tabular::Format::Jsonl;
+            let md = output_format
+                .as_deref()
+                .is_some_and(|f| f.eq_ignore_ascii_case("md"));
             let output_format = match output_format.as_deref() {
                 None => input_format,
+                Some(_) if md => gridpin::tabular::Format::Csv,
                 Some(name) => gridpin::tabular::Format::parse(name)?,
             };
+            if md {
+                if !table {
+                    anyhow::bail!("batch: --output-format md needs a CSV/TSV input");
+                }
+                let delimiter = match delimiter.as_deref() {
+                    Some(raw) => gridpin::tabular::parse_delimiter(raw)?,
+                    None if input_format == gridpin::tabular::Format::Tsv => b'\t',
+                    None => b',',
+                };
+                gridpin::md::check_input_rows(&input, delimiter)?;
+            }
             if table && (dump || diagnose) {
                 anyhow::bail!("batch: --dump and --diagnose read JSONL only");
             }
@@ -1495,6 +1857,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let mut nq = 0u64;
             let tq = std::time::Instant::now();
             let mut without_address = 0u64;
+            let repeat_cap = gridpin::repeats::cap_from_env();
+            let mut repeated = 0u64;
+            let mut repeats: gridpin::repeats::Repeats<String, (String, bool)> =
+                gridpin::repeats::Repeats::new(if table { 0 } else { repeat_cap });
             if table {
                 let opts = gridpin::tabular::Options {
                     input_format,
@@ -1508,8 +1874,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     extras: extras.as_ref().map(|e| (e, &idx)),
                     aggregate: cells.as_ref().map(|c| (c, min_count)),
                     mask: mask.as_ref().map(|m| (m, &idx)),
+                    repeat_cap,
                 };
-                let stats = gridpin::tabular::run(&input, &mut out, &opts, &pool, |row| {
+                let mut md_buf = Vec::new();
+                let sink: &mut dyn Write = if md { &mut md_buf } else { &mut out };
+                let stats = gridpin::tabular::run(&input, sink, &opts, &pool, |row| {
                     use gridpin::tabular::RowQuery;
                     query::with_tolerance(tolerance, || {
                         panic_safe(|| match row {
@@ -1540,8 +1909,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                         })
                     })
                 })?; // on Err, Drop cleans the temp
+                if md {
+                    out.write_all(gridpin::md::table_from_csv(&md_buf)?.as_bytes())?;
+                }
                 nq = stats.rows;
                 without_address = stats.without_address;
+                repeated = stats.repeated;
             }
             // input is JSONL: {"q": "..."} per line. Lines without a usable "q" would
             // silently yield empty results, so they are counted and reported.
@@ -1612,11 +1985,17 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     eprint!("\rrows {nq} · {rate:.0} rows/s   ");
                     last_progress = std::time::Instant::now();
                 }
-                let results: Vec<String> = pool.install(|| {
-                lines
+                // a line that repeats an earlier line of the run is answered once (gridpin::repeats); --dump and
+                // --diagnose answer every line, their output reports the work done for that line
+                let keys: Vec<Option<String>> = lines
+                    .iter()
+                    .map(|l| (!dump && !diagnose).then(|| l.clone()))
+                    .collect();
+                let answered: Vec<(String, bool)> = repeats.answer(&keys, |rows| pool.install(|| {
+                rows
                     .par_iter()
-                    .enumerate()
-                    .map(|(at, line)| {
+                    .map(|&at| {
+                        let line = &lines[at];
                         let v: serde_json::Value = serde_json::from_str(line).unwrap_or_default();
                         let q = v.get("q").and_then(|x| x.as_str()).unwrap_or("").trim();
                         // field as string OR number ("housenumber":5 / postcode:75001); a blank or
@@ -1631,14 +2010,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                         // Dispatch: dump > structured (non-blank "street", address-index only) >
                         // free-form ("q", full address+POI cascade). A line is usable if it has a
                         // free-form "q" OR a structured "street"; only genuinely empty lines are malformed.
-                        if q.is_empty() && fld("street").is_none() && !dump {
-                            malformed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            first_bad.fetch_min(window_start + at as u64, std::sync::atomic::Ordering::Relaxed);
-                        }
+                        let bad = q.is_empty() && fld("street").is_none() && !dump;
                         // each per-line query is panic-guarded: a corrupt-but-openable
                         // sheet must not abort the whole batch — a panicking line yields empty.
                         let diagnosis = diagnose.then(gridpin::diagnosis::Scope::new);
-                        if dump {
+                        let text = if dump {
                             let cands: Vec<serde_json::Value> = panic_safe(|| idx.query_feats(q, k))
                                 .into_iter()
                                 .map(|(h, f)| serde_json::json!({"f": f, "lat": h.lat, "lon": h.lon}))
@@ -1699,10 +2075,21 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                             } else {
                                 serde_json::json!({ "results": hits }).to_string()
                             }
-                        }
+                        };
+                        (text, bad)
                     })
                     .collect()
-            });
+            }));
+                for (at, (_, bad)) in answered.iter().enumerate() {
+                    if *bad {
+                        malformed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        first_bad.fetch_min(
+                            window_start + at as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                }
+                let results: Vec<String> = answered.into_iter().map(|(text, _)| text).collect();
                 for r in &results {
                     out.write_all(r.as_bytes())?;
                     out.write_all(b"\n")?;
@@ -1719,6 +2106,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 dt,
                 nq as f64 / dt
             );
+            repeated += repeats.repeated;
+            if repeated > 0 {
+                eprintln!(
+                    "note: {repeated} of {nq} rows repeat an earlier row and were answered once"
+                );
+            }
             if without_address > 0 {
                 // a blank address cell is data, not a format error: the row is kept with empty gp_* columns
                 eprintln!(
@@ -1778,11 +2171,22 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             port,
             threads,
             aliases,
+            postcode_layer,
             probe,
+            ids,
+            key_file,
+            require_key,
         } => {
             if let Some(url) = probe {
                 return gridpin::serve::probe(&url);
             }
+            // the key is read before the sheet opens: a bad key fails at once, not after the sheet's seconds
+            let gate = gridpin::serve::key_gate(
+                std::env::var(gridpin::serve::KEY_ENV).ok(),
+                key_file.as_deref(),
+                require_key
+                    || std::env::var(gridpin::serve::REQUIRE_KEY_ENV).is_ok_and(|v| v == "1"),
+            )?;
             let index = index.expect("clap requires the index without --probe");
             let mut engine = gridpin::serve::Engine::open(&index, poi.as_deref())?;
             for extra in &sheets {
@@ -1798,12 +2202,27 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 .as_deref()
                 .map(gridpin::aliases::Aliases::load)
                 .transpose()?;
+            engine.ids = ids;
+            engine.postcodes = postcode_layer
+                .as_deref()
+                .map(gridpin::postcode_layer::PostcodeLayer::open)
+                .transpose()?;
             let threads = threads.unwrap_or_else(|| {
                 std::thread::available_parallelism()
                     .map(|c| c.get().saturating_sub(2).max(1))
                     .unwrap_or(2)
             });
-            gridpin::serve::run(engine, index, &host, port, threads)?;
+            match gate {
+                Some(gate) => gridpin::serve::run_gated(
+                    engine,
+                    index,
+                    &host,
+                    port,
+                    threads,
+                    std::sync::Arc::new(gate),
+                )?,
+                None => gridpin::serve::run(engine, index, &host, port, threads)?,
+            }
         }
         Cmd::Sheets { cmd } => sheets_command(cmd)?,
         Cmd::Nearest {
@@ -1848,6 +2267,83 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 eprintln!(
                     "{} of {} rows have no answer ({} without a point)",
                     counts.rows_without_answer, counts.rows, counts.rows_without_point
+                );
+            }
+        }
+        Cmd::Attach {
+            rows,
+            table,
+            on,
+            key_vintage,
+            as_of,
+            allow_absent,
+            report,
+            output,
+        } => {
+            use gridpin::keyed;
+            let table = keyed::Table::open(&table)?;
+            let opts = keyed::Options {
+                on: on.as_deref(),
+                key_vintage: key_vintage.as_deref(),
+                as_of: as_of.as_deref(),
+                allow_absent,
+            };
+            let mut summary = None;
+            write_rows(output.as_deref(), |out| {
+                summary = Some(keyed::attach(&rows, &table, &opts, out)?);
+                Ok(())
+            })?;
+            if let Some(s) = summary {
+                eprint!("{}", s.text(&table));
+                if let Some(path) = report {
+                    std::fs::write(&path, serde_json::to_string_pretty(&s.json(&table))? + "\n")
+                        .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", path.display()))?;
+                }
+            }
+        }
+        Cmd::Distance {
+            a,
+            b,
+            sheet,
+            key,
+            matrix,
+            max_pairs,
+            id_column,
+            a_column,
+            b_column,
+            output,
+        } => {
+            use gridpin::points;
+            let idx = sheet
+                .as_deref()
+                .map(query::Index::open_address)
+                .transpose()?;
+            let geocoder = idx.as_ref().map(sheet_geocoder);
+            let geocode = geocoder.as_ref().map(|f| f as &gridpin::points::Geocode);
+            let first = points::read_points(&a, a_column.as_deref(), geocode)?;
+            let second = points::read_points(&b, b_column.as_deref(), geocode)?;
+            let options = points::DistanceOptions {
+                key: key.as_deref(),
+                matrix,
+                max_pairs,
+                id_column: id_column.as_deref(),
+            };
+            let mut counts = None;
+            write_rows(output.as_deref(), |out| {
+                counts = Some(points::write_distance(&first, &second, &options, out)?);
+                Ok(())
+            })?;
+            if let Some(c) = counts {
+                if !matrix && second.rows.len() > first.rows.len() && key.is_none() {
+                    eprintln!(
+                        "note: {} rows of {} have no partner in the first file and are not written",
+                        second.rows.len() - first.rows.len(),
+                        b.display()
+                    );
+                }
+                eprintln!(
+                    "{} distances, {} pairs without one ({} placed by a weak answer)",
+                    c.pairs, c.without_distance, c.weak
                 );
             }
         }
@@ -2153,8 +2649,19 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 println!("{}", gridpin::iso20022::json(&o, true));
             }
         }
+        Cmd::Format { index, q, out, .. } if out == "parts" || out == "fhir" => {
+            let idx = query::Index::open_address(&index)?;
+            let hits = guarded(|| query::query_cascade(&idx, None, &q, 1))?;
+            let h = hits.first();
+            let v = if out == "parts" {
+                serde_json::to_value(gridpin::parts::of(&idx, &q, h))?
+            } else {
+                gridpin::parts::fhir_json(&idx, &q, h)
+            };
+            println!("{v}");
+        }
         Cmd::Format { out, .. } if out != "postal" => {
-            anyhow::bail!("--out {out}: postal or iso20022")
+            anyhow::bail!("--out {out}: postal, iso20022, parts or fhir")
         }
         Cmd::Format { xml: true, .. } => anyhow::bail!("--xml goes with --out iso20022"),
         Cmd::Format {
@@ -2228,6 +2735,28 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let reading = guarded(|| gridpin::compare::read(&idx, poi_idx.as_ref(), &q))?;
             println!("{}", serde_json::to_string(&reading)?);
         }
+        Cmd::Match {
+            index,
+            a,
+            b,
+            out,
+            column,
+            a_column,
+            b_column,
+            level,
+            lenient,
+            unmatched,
+        } => match_tables(MatchArgs {
+            index,
+            a,
+            b,
+            out,
+            a_column: a_column.or(column.clone()),
+            b_column: b_column.or(column),
+            level,
+            lenient,
+            unmatched,
+        })?,
         Cmd::Same {
             index,
             lines,
@@ -2269,6 +2798,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             lon_column,
             min_match_rate,
             output,
+            by,
+            answers: answers_file,
+            id_column,
         } => {
             use rayon::prelude::*;
             let idx = query::Index::open_address(&index)?;
@@ -2311,6 +2843,28 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     gridpin::tabular::query_text(&record, &cols),
                     truth,
                 ));
+            }
+            let by_at = by
+                .as_deref()
+                .map(|b| {
+                    headers
+                        .iter()
+                        .position(|h| h == b)
+                        .ok_or_else(|| anyhow::anyhow!("--by {b}: no such column"))
+                })
+                .transpose()?;
+            let keys: Vec<String> = by_at
+                .map(|i| {
+                    rows.iter()
+                        .map(|(r, _, _)| r.get(i).unwrap_or("").to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(path) = &answers_file {
+                let summary =
+                    bench_answers(&headers, &rows, path, &id_column, by_at.map(|_| &keys[..]))?;
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+                return Ok(());
             }
             let answers: Vec<Option<query::Hit>> = rows
                 .par_iter()
@@ -2357,13 +2911,24 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 w.flush()?;
             }
-            println!("{}", serde_json::to_string_pretty(&summary)?);
+            if by_at.is_some() {
+                let slices: Vec<gridpin::bench::Row> = pairs
+                    .iter()
+                    .map(|(h, t)| (h.map(|h| ((h.lat, h.lon), query::match_level(h).0)), *t))
+                    .collect();
+                let out = serde_json::json!({
+                    "all": summary,
+                    "by_column": by,
+                    "by": gridpin::bench::by_slices(&keys, &slices, true),
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            }
+            let rate = summary.match_rate.unwrap_or(0.0);
             if let Some(min) = min_match_rate {
-                if summary.match_rate < min {
-                    eprintln!(
-                        "bench: match rate {:.3} is below --min-match-rate {min}",
-                        summary.match_rate
-                    );
+                if rate < min {
+                    eprintln!("bench: match rate {rate:.3} is below --min-match-rate {min}");
                     std::process::exit(1);
                 }
             }

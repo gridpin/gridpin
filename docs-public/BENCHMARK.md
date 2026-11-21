@@ -110,7 +110,7 @@ Nominatim 60.80% are level (not proof of parity).
 | andalusia | gridpin | 2000 | 1802 | 198 | 887 | 1184 | 1490 | 1638 |
 | andalusia | nominatim | 2000 | 1666 | 334 | 700 | 1216 | 1568 | 1613 |
 | andalusia | photon | 2000 | 1938 | 62 | 726 | 1270 | 1760 | 1894 |
-| distorted | gridpin | 1590 | 1051 | 539 | 387 | 541 | 741 | 961 |
+| distorted | gridpin | 1590 | 1051 | 539 | 388 | 542 | 743 | 961 |
 | distorted | nominatim | 1590 | 511 | 1079 | 226 | 331 | 443 | 465 |
 | distorted | photon | 1590 | 875 | 715 | 347 | 470 | 626 | 692 |
 
@@ -120,8 +120,8 @@ Exact paired two-sided McNemar tests at ≤150 m:
 |---|---|---:|---:|---:|---:|---:|---|
 | andalusia | Nominatim | 377 | 409 | 807 | 407 | 0.268831 | level — not proof of parity |
 | andalusia | Photon | 358 | 444 | 826 | 372 | 0.00266489 | Photon ahead |
-| distorted | Nominatim | 342 | 132 | 199 | 917 | 1.58319e-22 | GridPin ahead |
-| distorted | Photon | 299 | 228 | 242 | 821 | 0.00226359 | GridPin ahead |
+| distorted | Nominatim | 343 | 132 | 199 | 916 | 1.09429e-22 | GridPin ahead |
+| distorted | Photon | 299 | 227 | 243 | 821 | 0.00193531 | GridPin ahead |
 
 Services: GridPin ran `batch -k 1`, one thread, on 2026-09-28 against the release sheet `spain.bin` (v0.3.0).
 Andalusia competitors, 2026-09-25: public Nominatim 5.3.0 (`data_updated` 2026-09-25T02:01:59Z before and
@@ -157,10 +157,10 @@ well ahead of Nominatim 9.64%. Health-facility register: GridPin 36.80% leads bo
 
 | Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| clean | gridpin | 2376 | 1549 | 827 | 271 | 554 | 974 | 1252 |
+| clean | gridpin | 2376 | 1550 | 826 | 271 | 554 | 974 | 1252 |
 | clean | nominatim | 2376 | 1009 | 1367 | 172 | 412 | 783 | 884 |
 | clean | photon | 2376 | 1494 | 882 | 311 | 607 | 1114 | 1271 |
-| distorted | gridpin | 2376 | 1370 | 1006 | 230 | 494 | 847 | 1094 |
+| distorted | gridpin | 2376 | 1370 | 1006 | 230 | 494 | 847 | 1095 |
 | distorted | nominatim | 2376 | 514 | 1862 | 100 | 229 | 413 | 461 |
 | distorted | photon | 2376 | 1206 | 1170 | 241 | 471 | 879 | 996 |
 | cnes | gridpin | 1000 | 752 | 248 | 270 | 368 | 604 | 707 |
@@ -213,18 +213,18 @@ DC are excluded equally for all three engines. These sets are not observed human
 
 **What it shows.** Distorted addresses: GridPin 37.37% leads Photon 28.45% and Nominatim 24.32%, beyond chance.
 Historic-places register: GridPin 64.10% leads Photon 38.90% and Nominatim 52.30%, beyond chance. Clean addresses:
-on clean US addresses Nominatim and Photon both lead (42.5% and 41.3% vs 39.2%). One nationwide sheet with point
+on clean US addresses Nominatim and Photon both lead (42.5% and 41.3% vs 39.3%). One nationwide sheet with point
 addresses in 35 states and Census address ranges elsewhere; range answers are interpolated.
 
 | Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| clean | gridpin | 3655 | 3476 | 179 | 847 | 1432 | 2103 | 2296 |
+| clean | gridpin | 3655 | 3480 | 175 | 849 | 1436 | 2108 | 2301 |
 | clean | nominatim | 3655 | 3222 | 433 | 991 | 1553 | 2192 | 2338 |
 | clean | photon | 3655 | 3490 | 165 | 1010 | 1510 | 2224 | 2482 |
-| distorted | gridpin | 3655 | 3365 | 290 | 809 | 1366 | 1981 | 2166 |
+| distorted | gridpin | 3655 | 3371 | 284 | 812 | 1371 | 1988 | 2173 |
 | distorted | nominatim | 3655 | 1796 | 1859 | 571 | 889 | 1330 | 1427 |
 | distorted | photon | 3655 | 2864 | 791 | 698 | 1040 | 1601 | 1804 |
-| nrhp | gridpin | 1000 | 895 | 105 | 468 | 641 | 763 | 825 |
+| nrhp | gridpin | 1000 | 915 | 85 | 488 | 664 | 793 | 848 |
 | nrhp | nominatim | 1000 | 810 | 190 | 359 | 523 | 707 | 774 |
 | nrhp | photon | 1000 | 880 | 120 | 271 | 389 | 642 | 783 |
 
@@ -232,12 +232,12 @@ Exact paired two-sided McNemar tests at ≤150 m:
 
 | Set | Comparator | GridPin only | Comparator only | Both | Neither | p | Reading |
 |---|---|---:|---:|---:|---:|---:|---|
-| clean | Nominatim | 350 | 471 | 1,082 | 1,752 | 2.72734e-05 | Nominatim ahead |
-| clean | Photon | 476 | 554 | 956 | 1,669 | 0.0163881 | Photon ahead |
-| distorted | Nominatim | 707 | 230 | 659 | 2,059 | 4.67802e-57 | GridPin ahead |
-| distorted | Photon | 670 | 344 | 696 | 1,945 | 7.33638e-25 | GridPin ahead |
-| nrhp | Nominatim | 176 | 58 | 465 | 301 | 5.22407e-15 | GridPin ahead |
-| nrhp | Photon | 309 | 57 | 332 | 302 | 5.28401e-43 | GridPin ahead |
+| clean | Nominatim | 353 | 470 | 1,083 | 1,749 | 5.12535e-05 | Nominatim ahead |
+| clean | Photon | 478 | 552 | 958 | 1,667 | 0.022884 | Photon ahead |
+| distorted | Nominatim | 711 | 229 | 660 | 2,055 | 4.37353e-58 | GridPin ahead |
+| distorted | Photon | 673 | 342 | 698 | 1,942 | 1.43248e-25 | GridPin ahead |
+| nrhp | Nominatim | 198 | 57 | 466 | 279 | 2.01292e-19 | GridPin ahead |
+| nrhp | Photon | 325 | 50 | 339 | 286 | 1.65829e-50 | GridPin ahead |
 
 Services: public Nominatim and public Photon, answers collected 2026-10-20 and retained; no new competitor
 requests were made for the GridPin build measured on 2026-10-23. Top-1 great-circle distance to independent
@@ -277,18 +277,18 @@ traffic.
 
 **What it shows.** Distorted addresses: GridPin 55.98% leads Photon 45.21% and Nominatim 32.68%, beyond chance.
 Radio-station sites: GridPin 39.30% and Photon 39.30% are level (not proof of parity), both ahead of Nominatim
-25.20%. Clean addresses: on clean Canadian addresses Photon leads (59.1% vs 57.5%; Nominatim 57.2%); the set cannot tell the three apart beyond chance. One
+25.20%. Clean addresses: on clean Canadian addresses Photon leads (59.1% vs 57.6%; Nominatim 57.2%); the set cannot tell the three apart beyond chance. One
 nationwide sheet with point addresses in all provinces and territories; answers carry the Canadian postal code.
 
 | Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| clean | gridpin | 2785 | 2703 | 82 | 1060 | 1602 | 1951 | 2048 |
+| clean | gridpin | 2785 | 2703 | 82 | 1062 | 1605 | 1953 | 2049 |
 | clean | nominatim | 2785 | 2587 | 198 | 1011 | 1593 | 1912 | 2035 |
 | clean | photon | 2785 | 2751 | 34 | 1038 | 1646 | 1988 | 2110 |
-| distorted | gridpin | 2785 | 2664 | 121 | 1033 | 1559 | 1899 | 2001 |
+| distorted | gridpin | 2785 | 2664 | 121 | 1035 | 1562 | 1901 | 2002 |
 | distorted | nominatim | 2785 | 1493 | 1292 | 602 | 910 | 1109 | 1185 |
 | distorted | photon | 2785 | 2453 | 332 | 827 | 1259 | 1535 | 1652 |
-| tafl | gridpin | 1000 | 809 | 191 | 184 | 393 | 623 | 699 |
+| tafl | gridpin | 1000 | 810 | 190 | 186 | 395 | 625 | 701 |
 | tafl | nominatim | 1000 | 605 | 395 | 131 | 252 | 425 | 537 |
 | tafl | photon | 1000 | 806 | 194 | 204 | 393 | 607 | 696 |
 
@@ -296,12 +296,12 @@ Exact paired two-sided McNemar tests at ≤150 m:
 
 | Set | Comparator | GridPin only | Comparator only | Both | Neither | p | Reading |
 |---|---|---:|---:|---:|---:|---:|---|
-| clean | Nominatim | 393 | 384 | 1,209 | 799 | 0.774135 | level |
-| clean | Photon | 349 | 393 | 1,253 | 790 | 0.114372 | level |
-| distorted | Nominatim | 868 | 219 | 691 | 1,007 | 7.51195e-92 | GridPin ahead |
-| distorted | Photon | 626 | 326 | 933 | 900 | 1.47901e-22 | GridPin ahead |
-| tafl | Nominatim | 200 | 59 | 193 | 548 | 4.10126e-19 | GridPin ahead |
-| tafl | Photon | 120 | 120 | 273 | 487 | 1 | level |
+| clean | Nominatim | 395 | 383 | 1,210 | 797 | 0.693335 | level |
+| clean | Photon | 350 | 391 | 1,255 | 789 | 0.141662 | level |
+| distorted | Nominatim | 870 | 218 | 692 | 1,005 | 1.18103e-92 | GridPin ahead |
+| distorted | Photon | 627 | 324 | 935 | 899 | 5.20771e-23 | GridPin ahead |
+| tafl | Nominatim | 202 | 59 | 193 | 546 | 1.70685e-19 | GridPin ahead |
+| tafl | Photon | 122 | 120 | 273 | 485 | 0.948763 | level |
 
 Services: public Nominatim and public Photon, answers collected 2026-10-28 and retained; no new competitor
 requests were made for the GridPin build measured on 2026-10-30. Top-1 great-circle distance to independent
@@ -348,10 +348,10 @@ nationwide sheet; answers carry the postal code where the source has one.
 
 | Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| clean | gridpin | 2000 | 1247 | 753 | 437 | 587 | 852 | 1013 |
+| clean | gridpin | 2000 | 1247 | 753 | 437 | 588 | 853 | 1014 |
 | clean | nominatim | 2000 | 668 | 1332 | 110 | 202 | 416 | 462 |
 | clean | photon | 2000 | 1046 | 954 | 186 | 318 | 697 | 818 |
-| distorted | gridpin | 2000 | 1079 | 921 | 357 | 482 | 678 | 814 |
+| distorted | gridpin | 2000 | 1079 | 921 | 357 | 483 | 679 | 815 |
 | distorted | nominatim | 2000 | 487 | 1513 | 84 | 153 | 302 | 340 |
 | distorted | photon | 2000 | 1026 | 974 | 154 | 276 | 631 | 757 |
 | sic | gridpin | 1000 | 616 | 384 | 200 | 280 | 422 | 533 |
@@ -362,10 +362,10 @@ Exact paired two-sided McNemar tests at ≤150 m:
 
 | Set | Comparator | GridPin only | Comparator only | Both | Neither | p | Reading |
 |---|---|---:|---:|---:|---:|---:|---|
-| clean | Nominatim | 473 | 88 | 114 | 1,325 | 1.05138e-64 | GridPin ahead |
-| clean | Photon | 433 | 164 | 154 | 1,249 | 5.98336e-29 | GridPin ahead |
-| distorted | Nominatim | 412 | 83 | 70 | 1,435 | 1.89426e-53 | GridPin ahead |
-| distorted | Photon | 385 | 179 | 97 | 1,339 | 2.53319e-18 | GridPin ahead |
+| clean | Nominatim | 474 | 88 | 114 | 1,324 | 6.22989e-65 | GridPin ahead |
+| clean | Photon | 434 | 164 | 154 | 1,248 | 4.11653e-29 | GridPin ahead |
+| distorted | Nominatim | 413 | 83 | 70 | 1,434 | 1.13679e-53 | GridPin ahead |
+| distorted | Photon | 386 | 179 | 97 | 1,338 | 1.84993e-18 | GridPin ahead |
 | sic | Nominatim | 216 | 38 | 64 | 682 | 2.09717e-31 | GridPin ahead |
 | sic | Photon | 200 | 93 | 80 | 627 | 3.80807e-10 | GridPin ahead |
 
@@ -451,6 +451,114 @@ Authority information.
 | acma gridpin raw | `05713c08f281fd6fa1f4edbc98cb32331fca15b3f035f5b42995e93d03488d41` |
 | acma nominatim raw | `a59b4aa49ae4be830ae84033de7720766e9219e1ddbfb2b269e02eb2b8cf5112` |
 | acma photon raw | `5509c3bd20eece12d3331111332ee72c2151ffc447abc5138107b84b736009b8` |
+
+</details>
+
+## New Zealand · 2026-11-19 · 3 sets
+
+**What we tested.** Three sets with known coordinates: 2,000 clean addresses (623 places from Wikidata and 1,377 schools: the address from the Ministry of Education directory, the point at the centre of the school site in LINZ NZ Facilities, sites up to 4 ha), the same 2,000 with one mechanical distortion each, and 1,000 polling places of the 2023 General Election, addresses as the Electoral Commission wrote them (the hall name, a note, the suburb; no town, no postcode). These sets are not observed human search traffic.
+
+**What it shows.** Distorted addresses: GridPin leads both (84.0% vs 79.4% and 59.5%), beyond chance. Polling places: GridPin leads both (88.8% vs 70.2% and 25.6%), beyond chance. Clean addresses: GridPin is ahead of Nominatim beyond chance and level with Photon (85.7% vs 84.3% and 75.8%; the difference from Photon is not significant); on Wikidata places 70.3% vs 68.2% and 58.9%, on schools 92.7% vs 91.6% and 83.5%. The reference point of a school or a hall is the building or the centre of the site, often away from the address point, so a right answer can stand beyond 150 m.
+
+| Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| clean | gridpin | 2000 | 1985 | 15 | 643 | 1714 | 1892 | 1944 |
+| clean | nominatim | 2000 | 1731 | 269 | 1089 | 1517 | 1660 | 1719 |
+| clean | photon | 2000 | 1946 | 54 | 1061 | 1687 | 1857 | 1915 |
+| distorted | gridpin | 2000 | 1966 | 34 | 635 | 1681 | 1861 | 1915 |
+| distorted | nominatim | 2000 | 1483 | 517 | 833 | 1189 | 1387 | 1465 |
+| distorted | photon | 2000 | 1908 | 92 | 989 | 1588 | 1772 | 1855 |
+| polling | gridpin | 1000 | 973 | 27 | 601 | 888 | 945 | 962 |
+| polling | nominatim | 1000 | 266 | 734 | 132 | 256 | 265 | 265 |
+| polling | photon | 1000 | 756 | 244 | 395 | 702 | 741 | 747 |
+
+| Set | Comparator | GridPin only | Comparator only | Both | Neither | p | Reading |
+|---|---|---:|---:|---:|---:|---:|---|
+| clean | Nominatim | 275 | 78 | 1,439 | 208 | 7.14162e-27 | GridPin ahead |
+| clean | Photon | 132 | 105 | 1,582 | 181 | 0.0910311 | no clear difference |
+| distorted | Nominatim | 565 | 73 | 1,116 | 246 | 3.50347e-95 | GridPin ahead |
+| distorted | Photon | 216 | 123 | 1,465 | 196 | 4.98192e-07 | GridPin ahead |
+| polling | Nominatim | 654 | 22 | 234 | 90 | 7.54436e-163 | GridPin ahead |
+| polling | Photon | 237 | 51 | 651 | 61 | 7.95582e-30 | GridPin ahead |
+
+Services: public Nominatim and public Photon; answers collected 2026-11-17 and retained. Top-1 great-circle distance to
+independent truth, computed with `wikidata4_regress.py`. Polling places: Electoral Commission New Zealand, 2023 General Election statistics, Voting Place Geographic Coordinates (archived copy of 2026-01-30); the file carries no open licence, so only counts are published. Schools: Ministry of Education school directory and LINZ NZ Facilities (CC BY 4.0).
+
+<details><summary>Data fingerprints (SHA-256)</summary>
+
+| Artifact | SHA-256 |
+|---|---|
+| Measured GridPin binary | `c39ba3edb42b247e2b82b81b94eda6c14b43b2e2df22d6efd5be7f7d5560aba7` |
+| Sheet `nz.bin`, measured | `f95fc5b2a28edd09f5ae5c671998d45e0a733e411275fbe20aedf1a4c20cd0d9` |
+| clean queries | `182f1ddff21b2f1fbaccaebb589cbcca1dde7691436f689146608bd7d9fb71be` |
+| clean truth | `7f7c9560d0d25023e352ba60727b85243784c8caaddee39f458d8857605ebaff` |
+| clean gridpin raw | `3345eacc892170d2d6fad55800e72b8894ddc4c0e2ef68102edde52c1ee22d42` |
+| clean nominatim raw | `8ea4ca6c5f8e92f7d5c614c183e892894278b38a573926f876cc7a4045c284e5` |
+| clean photon raw | `b8ffab53a3ddaec395157b71835499e176819761c5f0a07c8ea8e55b148c8c17` |
+| distorted queries | `165fd74cd1f457d4e5059cbb4e5b876c3cfc9a2a60a64947a33f806df85c0861` |
+| distorted truth | `14c29ca2c2952fdf6404723ddd67b56f3d552d714fb6abae675014c338d8a409` |
+| distorted gridpin raw | `fa10faa97db6f5639e9bf5d92799045b4b7b68d310a9a30d2527e276dbabe78d` |
+| distorted nominatim raw | `552b2554b3defa210f0b3aea1b3d2a317ff46bbb6e8385cb31c5291c36264d40` |
+| distorted photon raw | `a58635b7ee84a1939e8ef5df1febd9ee42247451bbba203fa45ee8c4fd7c390b` |
+| polling queries | `cf33456c5c852a1055fc1ee21aea8519fc96b5309f426ba4456e9b35335fb6ff` |
+| polling truth | `da89ee04994c40579d41c0b3cfd4398130e5e01bf66d4fe7c30d51f9eeecf409` |
+| polling gridpin raw | `124a258c9632acbd410f18e08286e4ba5b417ae1e9866a226fe23d6d444ef54f` |
+| polling nominatim raw | `169e9ab0de3cae93b9f17a215d6d1a94840f21dc9461437cf6d78cc20b8706d6` |
+| polling photon raw | `007a93ee8316d40cada182cf8559108070406d55b3479f86980085ea086b2706` |
+
+</details>
+
+## Poland · 2026-11-15 · 3 sets
+
+**What we tested.** Three sets with known coordinates: 3,104 clean addresses of places from Wikidata (mostly monuments: 1,531 points from Wiki Loves Monuments, 848 imported from the Polish Wikipedia, 475 citing zabytek.pl), the same 3,104 with one mechanical distortion each, and 1,000 base-station sites from the UKE permit lists, addresses as the operators write them. Three Wikidata rows that lie outside Poland are excluded. These sets are not observed human search traffic.
+
+**What it shows.** Distorted addresses: GridPin leads both (44.3% vs 37.0% and 14.7%), beyond chance. Base-station sites: GridPin leads both (67.5% vs 44.7% and 31.0%), beyond chance. Clean addresses: GridPin leads both (47.7% vs 42.9% and 27.6%); on Wiki Loves Monuments points 41.1% vs 33.2% and 31.1%, on the Polish Wikipedia 63.0% vs 60.1% and 21.7%, on zabytek.pl 31.6% vs 32.0% and 23.8% (even with Photon on zabytek.pl). The reference point of a monument is the building, often away from the address point, and many queries give only a street and a number with no town, so a right answer can stand beyond 150 m.
+
+| Set | Engine | N | Found | Empty | ≤50 m | ≤150 m | ≤1,000 m | ≤5,000 m |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| clean | gridpin | 3104 | 2956 | 148 | 1237 | 1482 | 1616 | 1651 |
+| clean | nominatim | 3104 | 2273 | 831 | 712 | 857 | 943 | 970 |
+| clean | photon | 3104 | 3016 | 88 | 1071 | 1332 | 1503 | 1550 |
+| distorted | gridpin | 3104 | 2882 | 222 | 1148 | 1374 | 1503 | 1534 |
+| distorted | nominatim | 3104 | 1453 | 1651 | 361 | 456 | 538 | 568 |
+| distorted | photon | 3104 | 2914 | 190 | 922 | 1148 | 1312 | 1367 |
+| uke | gridpin | 1000 | 980 | 20 | 394 | 675 | 875 | 921 |
+| uke | nominatim | 1000 | 478 | 522 | 209 | 310 | 420 | 456 |
+| uke | photon | 1000 | 781 | 219 | 291 | 447 | 588 | 627 |
+
+| Set | Comparator | GridPin only | Comparator only | Both | Neither | p | Reading |
+|---|---|---:|---:|---:|---:|---:|---|
+| clean | Nominatim | 785 | 160 | 697 | 1,462 | 1.30737e-99 | GridPin ahead |
+| clean | Photon | 418 | 268 | 1,064 | 1,354 | 1.12381e-08 | GridPin ahead |
+| distorted | Nominatim | 984 | 66 | 390 | 1,664 | 1.01389e-210 | GridPin ahead |
+| distorted | Photon | 463 | 237 | 911 | 1,493 | 9.54992e-18 | GridPin ahead |
+| uke | Nominatim | 390 | 25 | 285 | 300 | 2.20006e-85 | GridPin ahead |
+| uke | Photon | 262 | 34 | 413 | 291 | 8.98813e-45 | GridPin ahead |
+
+Services: public Nominatim and public Photon; answers collected 2026-11-13 and retained. Top-1 great-circle distance to
+independent truth, computed with `wikidata4_regress.py`. Base-station sites: based on data of Urząd Komunikacji Elektronicznej (UKE), permit lists as of 2026-10-26, retrieved 2026-11-13, processed by GridPin (sites selected, coordinates converted to decimal degrees, query assembled).
+
+<details><summary>Data fingerprints (SHA-256)</summary>
+
+| Artifact | SHA-256 |
+|---|---|
+| Measured GridPin binary | `50d36517f0835fd79e378b589b9dc58b11be08fc2b410fe4e37a2732097aa966` |
+| Sheet `pl.bin`, measured | `3b11285aaddfff0c3f6b9ef52bab24bf0a8e1d8a9cdbd72a30c868d7b444457e` |
+| clean queries | `33629b4e0da3845c2db5835ed73bc96f01925e288b9a9dd55c7ae991fc7e24ef` |
+| clean truth | `864e19a90fd13d9e8193a2c23c7b15f1641598dd67e482a4de8c7145256ff398` |
+| clean gridpin raw | `7fe24c6fc245036b62ec7dc88c2c3f7fed34821d1dfe0bafadab8c9929cfa262` |
+| clean nominatim raw | `1c53b8bf679c029bc6b0d568e1233417e91d8983a978d910231f234652112e74` |
+| clean photon raw | `7d4a2e6e858d4faacc5ce736e9aa4ea9c66bb06ded85c4b8d435becdb8bc6cf8` |
+| distorted queries | `2f36f93e6d7c76df91d43a2be82551611291375a3b6faa5fe9767b68d4f5e0e3` |
+| distorted truth | `1d9616d548846bea23d4fea3fcc0a8f544f50fe168c1f1e5a78fbc711d912146` |
+| distorted gridpin raw | `2f4d8acf8d0d52424202d56ace14b816515949415552692de65c8fb1c33990cc` |
+| distorted nominatim raw | `4b2222b5d2aa582b3afc363dcb15da2380eed3abea2269805d5629602d8c9fa9` |
+| distorted photon raw | `e0a7fe19ed92394992830271b8f30ae26bba6c72558543a192938863cd2a984d` |
+| uke queries | `366e0ee5acc17217422bf505efe2c95e158b7325d62fc3efe49437bb61e4dd94` |
+| uke truth | `2b98daf40e9270229e47469227671ac4f420a392aa058ef4f760001d23f5f43f` |
+| uke gridpin raw | `3b2573717ca5f98175dddd134213e02836e75efd24fa8dbc2c4184d11861ad69` |
+| uke nominatim raw | `02f2d58d672b20d76bca1368364796cb0a80e5431888e4ec48808460954898c7` |
+| uke photon raw | `3caa8c697cb3be82c5509d9946ddba7f5a6bbadb88fef86d70c3182164cd741f` |
 
 </details>
 

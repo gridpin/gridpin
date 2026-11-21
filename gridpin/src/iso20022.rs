@@ -334,6 +334,13 @@ fn postcode_of(q: &str, sheet_code: &str) -> String {
         .map_or_else(|| sheet_code.to_string(), str::to_string)
 }
 
+/// `PstCd`: the postcode of `postcode_of` written as the post of the sheet's country writes it ("00624" -> "00-624"
+/// on a Polish sheet, `postal_formats.tsv`).
+fn pst_cd_of(q: &str, h: &Hit, idx: &Index) -> String {
+    let layout = crate::extras::postal_layout_of(crate::extras::SHEET_LAYOUT, idx);
+    crate::extras::postcode_as_written(&postcode_of(q, &h.postcode), Some(layout))
+}
+
 fn non_latin(adr: &PstlAdr) -> bool {
     adr.elements()
         .iter()
@@ -362,6 +369,12 @@ pub fn build(idx: &Index, q: &str, h: Option<&Hit>) -> Outcome {
     // a weak answer does not confirm a payment address ("350 Fifth Avenue, New York" answered in York, Alabama): the
     // line is treated as one the sheet did not answer
     let weak = h.is_some_and(crate::query::hit_is_weak);
+    // weak because the line names a town the sheet does not have: that is the reason, not a doubt of the engine
+    let weak_reason = if h.is_some_and(|h| h.flags.contains(&crate::query::TOWN_NOT_ON_SHEET)) {
+        crate::query::TOWN_NOT_ON_SHEET
+    } else {
+        "weak_answer"
+    };
     let h = h.filter(|_| !weak);
     // a house in another town than the one the line names ("Sparkassenstraße 5, 80331 München" answered in
     // Petershagen): the answer is not the payer's address, the line is treated as one the sheet did not answer
@@ -377,7 +390,7 @@ pub fn build(idx: &Index, q: &str, h: Option<&Hit>) -> Outcome {
         // street to answer), anything else is hybrid, the town and the country with the rest in the address lines
         let (Some(ctry), Some((twn_nm, code))) = (&ctry, written_town(idx, q)) else {
             let why = if weak {
-                vec!["weak_answer".into(), "town_unconfirmed".into()]
+                vec![weak_reason.into(), "town_unconfirmed".into()]
             } else if off_town {
                 vec![exists.reason.into(), "town_unconfirmed".into()]
             } else {
@@ -420,7 +433,7 @@ pub fn build(idx: &Index, q: &str, h: Option<&Hit>) -> Outcome {
             (Mode::Hybrid, adr, vec!["street_unknown".to_string()])
         };
         if weak {
-            checks.insert(0, "weak_answer".into());
+            checks.insert(0, weak_reason.into());
         } else if off_town {
             checks.insert(0, exists.reason.into());
         }
@@ -479,7 +492,7 @@ pub fn build(idx: &Index, q: &str, h: Option<&Hit>) -> Outcome {
             flr: flr.clone(),
             pst_bx: po_box.clone().unwrap_or_default(),
             room: room.clone(),
-            pst_cd: postcode_of(q, &h.postcode),
+            pst_cd: pst_cd_of(q, h, idx),
             twn_nm: town_of(idx, q, h),
             ctry_sub_dvsn: h.region.clone().unwrap_or_default(),
             ctry: ctry.clone(),
@@ -512,7 +525,7 @@ pub fn build(idx: &Index, q: &str, h: Option<&Hit>) -> Outcome {
         return none(checks, exists);
     }
     let pst_cd = if h.flags.contains(&"pc_exact") {
-        postcode_of(q, &h.postcode)
+        pst_cd_of(q, h, idx)
     } else {
         String::new()
     };

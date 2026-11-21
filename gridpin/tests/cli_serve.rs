@@ -512,7 +512,7 @@ fn bad_requests_get_their_own_status_and_cors_is_open() {
     let (_dir, bin) = sheet("errors");
     let s = Server::start(&bin, &[]);
     assert_eq!(s.get("/nope").0, 404);
-    assert_eq!(s.get("/search?q=x&format=xml").0, 400);
+    assert_eq!(s.get("/search?q=x&format=html").0, 400);
     assert_eq!(s.get("/search?format=json").0, 400, "no q");
     assert_eq!(s.get("/search?q=x&limit=0").0, 400);
     assert_eq!(s.get("/v1/reverse?lat=abc&lon=1").0, 400);
@@ -1121,4 +1121,1359 @@ fn every_path_of_a_server_of_several_sheets_asks_and_signs_the_sheet_it_chose() 
         home.contains("rs.bin (rs)") && home.contains("ca.bin (ca)"),
         "{home}"
     );
+}
+
+#[test]
+fn the_nominatim_prefix_answers_as_the_root_and_nothing_else_moves_under_it() {
+    let (_dir, bin) = sheet("prefix");
+    let s = Server::start(&bin, &[]);
+    for target in [
+        "/search?q=1+rue+a+ville&format=jsonv2&addressdetails=1&namedetails=1",
+        "/search.php?q=rue+a+ville&format=json",
+        "/search?q=ville&format=geojson",
+        "/reverse?lat=43.73&lon=7.42&format=jsonv2",
+        "/reverse.php?lat=43.73&lon=7.42",
+        "/status?format=json",
+        "/status.php",
+    ] {
+        let root = s.get(target);
+        let prefixed = s.get(&format!("/nominatim{target}"));
+        assert_eq!(root.0, 200, "{target}: {}", root.1);
+        assert_eq!(prefixed, root, "{target}");
+    }
+    // only the Nominatim paths take the prefix: the native and Google paths keep their own address
+    for target in [
+        "/nominatim/v1/geocode?q=ville",
+        "/nominatim/maps/api/geocode/json?address=ville",
+        "/nominatim/",
+        "/nominatim",
+    ] {
+        assert_eq!(s.get(target).0, 404, "{target}");
+    }
+}
+
+#[test]
+fn a_nominatim_answer_carries_name_addresstype_country_and_namedetails() {
+    let (_dir, bin) = sheet("nominatim-fields");
+    let s = Server::start(&bin, &[]);
+    let house = &s.json("/search?q=1+rue+a+ville&format=jsonv2&addressdetails=1&namedetails=1")[0];
+    assert_eq!(house["name"], "");
+    assert_eq!(house["addresstype"], "place");
+    assert_eq!(house["namedetails"], serde_json::json!({}));
+    assert_eq!(house["address"]["country"], "Monaco");
+    assert_eq!(house["address"]["country_code"], "mc");
+    let street = &s.json("/search?q=rue+a+ville&format=json&namedetails=1")[0];
+    assert_eq!(
+        (street["type"].as_str(), street["name"].as_str()),
+        (Some("street"), Some("Rue A"))
+    );
+    assert_eq!(
+        street["place_rank"], 26,
+        "json writes place_rank as Nominatim does"
+    );
+    assert_eq!(street["namedetails"]["name"], "Rue A");
+    let city = &s.json("/search?q=ville&format=geojson")["features"][0]["properties"];
+    assert_eq!(
+        (city["name"].as_str(), city["addresstype"].as_str()),
+        (Some("Ville"), Some("city"))
+    );
+    let back = s.json("/reverse?lat=43.73&lon=7.42&format=json");
+    assert_eq!(
+        back["address"]["country"], "Monaco",
+        "reverse has address details by default"
+    );
+    assert!(
+        back.get("namedetails").is_none(),
+        "namedetails only when asked"
+    );
+    let named = s.json("/reverse?lat=43.73&lon=7.42&format=jsonv2&namedetails=1");
+    assert_eq!(
+        named["namedetails"],
+        serde_json::json!({}),
+        "reverse reads namedetails too"
+    );
+}
+
+#[test]
+fn a_preflight_gets_back_the_headers_it_asked_for() {
+    let (_dir, bin) = sheet("preflight");
+    let s = Server::start(&bin, &[]);
+    let (code, head, _) = s.raw(
+        "OPTIONS /search HTTP/1.1\r\nOrigin: http://example.org\r\nAccess-Control-Request-Method: GET\r\n\
+         Access-Control-Request-Headers: user-agent, x-foo\r\n\r\n",
+    );
+    assert_eq!(code, 204);
+    assert!(
+        head.contains("Access-Control-Allow-Headers: user-agent, x-foo\r\n"),
+        "{head}"
+    );
+    let (_, head, _) =
+        s.raw("OPTIONS /search HTTP/1.1\r\nAccess-Control-Request-Headers: a;b\r\n\r\n");
+    assert!(
+        head.contains("Access-Control-Allow-Headers: Content-Type\r\n"),
+        "{head}"
+    );
+    let (_, head, _) = s.raw("GET /health HTTP/1.1\r\n\r\n");
+    assert!(
+        head.contains("Access-Control-Allow-Headers: Content-Type\r\n"),
+        "{head}"
+    );
+}
+
+/// The coordinates of a Photon answer, feature by feature, beside those of `/v1/geocode` asked for as many.
+fn photon_points(v: &serde_json::Value) -> Vec<(f64, f64)> {
+    v["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            let c = &f["geometry"]["coordinates"];
+            (c[1].as_f64().unwrap(), c[0].as_f64().unwrap())
+        })
+        .collect()
+}
+
+fn native_points(v: &serde_json::Value) -> Vec<(f64, f64)> {
+    v["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| (h["lat"].as_f64().unwrap(), h["lon"].as_f64().unwrap()))
+        .collect()
+}
+
+#[test]
+fn the_photon_paths_answer_what_the_native_api_answers_in_photon_shape() {
+    let (_dir, bin) = sheet_of(
+        "photon-shape",
+        "rue a,001,ville,10000,1,,7.42,43.73,Rue A,Ville\nrue a,001,ville,10000,3,,7.4205,43.7302,Rue A,Ville\n",
+    );
+    let s = Server::start(&bin, &[]);
+    let v = s.json("/photon/api?q=1+rue+a+ville");
+    assert_eq!(v["type"], "FeatureCollection");
+    // Photon's default limit is 15: the same list as the native API asked for 15
+    assert_eq!(
+        photon_points(&v),
+        native_points(&s.json("/v1/geocode?q=1+rue+a+ville&k=15"))
+    );
+    let p = &v["features"][0]["properties"];
+    assert_eq!(v["features"][0]["type"], "Feature");
+    assert_eq!(
+        (
+            p["type"].as_str(),
+            p["housenumber"].as_str(),
+            p["street"].as_str()
+        ),
+        (Some("house"), Some("1"), Some("Rue A"))
+    );
+    assert_eq!(
+        (p["countrycode"].as_str(), p["country"].as_str()),
+        (Some("MC"), Some("Monaco"))
+    );
+    assert_eq!(p["extra"]["match_level"], "PointAddress");
+    assert!(p.get("osm_id").is_none(), "no OSM object is invented: {p}");
+    // the path with a slash at the end answers the same (Mobilizon asks /api/)
+    assert_eq!(
+        s.get("/photon/api/?q=1+rue+a+ville"),
+        s.get("/photon/api?q=1+rue+a+ville")
+    );
+    let one = s.json("/photon/api?q=1+rue+a+ville&limit=1");
+    assert_eq!(
+        photon_points(&one),
+        native_points(&s.json("/v1/geocode?q=1+rue+a+ville&k=1"))
+    );
+    // limit is held within its bounds, as Photon does, not refused
+    assert_eq!(
+        s.json("/photon/api?q=1+rue+a+ville&limit=0")["features"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // an unknown parameter is skipped: Traccar adds `key`, Atlas `dedupe`; an excluded tag is one no answer carries
+    assert_eq!(
+        s.get("/photon/api?q=1+rue+a+ville&key=k&lang=fr&zoom=12&dedupe=1&osm_tag=!place"),
+        s.get("/photon/api?q=1+rue+a+ville")
+    );
+    // nothing found is an empty array, never null or an absent key (geopy reads `features` by key)
+    assert_eq!(
+        s.json("/photon/api?q=zzzz+qqqq")["features"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn photon_filters_by_layer_box_country_and_point_without_new_answers() {
+    let (_dir, bin) = sheet_of(
+        "photon-filters",
+        "rue a,001,ville,10000,1,,7.42,43.73,Rue A,Ville\nrue a,001,ville,10000,3,,7.4205,43.7302,Rue A,Ville\n\
+         rue a,002,autre,10001,1,,7.50,43.80,Rue A,Autre\n",
+    );
+    let s = Server::start(&bin, &[]);
+    let n = |path: &str| s.json(path)["features"].as_array().unwrap().len();
+    // the nearest answer of a point is a house: a filter on streets leaves nothing
+    assert_eq!(n("/photon/reverse?lat=43.73&lon=7.42&layer=street"), 0);
+    assert_eq!(
+        n("/photon/reverse?lat=43.73&lon=7.42&layer=house"),
+        n("/photon/reverse?lat=43.73&lon=7.42")
+    );
+    assert_eq!(
+        n("/photon/api?q=1+rue+a+ville&layer=house"),
+        n("/photon/api?q=1+rue+a+ville")
+    );
+    assert_eq!(
+        n("/photon/api?q=1+rue+a+ville&layer=city"),
+        0,
+        "a house is not a city"
+    );
+    let streets = s.json("/photon/api?q=rue+a+ville&layer=street");
+    assert!(streets["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|f| f["properties"]["type"] == "street"));
+    assert!(n("/photon/api?q=rue+a+ville&layer=street") >= 1);
+    // the box holds the point or does not
+    assert_eq!(
+        n("/photon/api?q=1+rue+a+ville&bbox=7.4,43.7,7.5,43.8"),
+        n("/photon/api?q=1+rue+a+ville")
+    );
+    assert_eq!(n("/photon/api?q=1+rue+a+ville&bbox=8,44,9,45"), 0);
+    // a filter reads the engine's longest list, not its first answer: the street of the other town is found
+    let boxed = s.json("/photon/api?q=rue+a&bbox=7.45,43.75,7.55,43.85&limit=1");
+    assert_eq!(
+        boxed["features"][0]["properties"]["city"], "Autre",
+        "{boxed}"
+    );
+    // countrycode names the sheet: this one is Monaco
+    assert_eq!(
+        n("/photon/api?q=1+rue+a+ville&countrycode=MC"),
+        n("/photon/api?q=1+rue+a+ville")
+    );
+    assert_eq!(n("/photon/api?q=1+rue+a+ville&countrycode=de"), 0);
+    // lat and lon pull toward the point as `near` of the native API does: the same street in another town wins
+    let toward = s.json("/photon/api?q=1+rue+a&lat=43.80&lon=7.50&limit=2");
+    assert_eq!(
+        toward["features"][0]["properties"]["city"], "Autre",
+        "{toward}"
+    );
+    assert_eq!(
+        photon_points(&toward),
+        native_points(&s.json("/v1/geocode?q=1+rue+a&near=43.80,7.50&k=2"))
+    );
+    let away = s.json("/photon/api?q=1+rue+a&lat=43.73&lon=7.42&limit=2");
+    assert_eq!(away["features"][0]["properties"]["city"], "Ville", "{away}");
+}
+
+#[test]
+fn photon_answers_nothing_to_a_tag_it_cannot_hold_and_ignores_an_excluded_one() {
+    let (_dir, bin) = sheet_of(
+        "photon-osm-tag",
+        "rue a,001,ville,10000,1,,7.42,43.73,Rue A,Ville\n",
+    );
+    let s = Server::start(&bin, &[]);
+    let n = |path: &str| s.json(path)["features"].as_array().unwrap().len();
+    let plain = n("/photon/api?q=1+rue+a+ville");
+    assert!(plain >= 1);
+    // Dawarich Atlas searches a category as a name plus the tags of the category: a sheet has no tags, so nothing
+    for tag in ["shop", "shop:supermarket", ":cafe", "amenity:cafe"] {
+        assert_eq!(
+            n(&format!("/photon/api?q=1+rue+a+ville&osm_tag={tag}")),
+            0,
+            "{tag}"
+        );
+    }
+    assert_eq!(
+        n("/photon/api?q=1+rue+a+ville&osm_tag=!shop&osm_tag=shop:supermarket"),
+        0,
+        "one asked tag is enough"
+    );
+    // an exclusion of a tag no answer carries leaves every answer in place
+    for tag in ["!shop", "!amenity:cafe", "shop:!bakery"] {
+        assert_eq!(
+            n(&format!("/photon/api?q=1+rue+a+ville&osm_tag={tag}")),
+            plain,
+            "{tag}"
+        );
+    }
+    let empty = s.json("/photon/api?q=1+rue+a+ville&osm_tag=shop");
+    assert_eq!(empty["type"], "FeatureCollection");
+}
+
+#[test]
+fn photon_refuses_in_its_own_form_and_reverse_keeps_to_its_radius() {
+    let (_dir, bin) = sheet("photon-refusals");
+    let s = Server::start(&bin, &[]);
+    for (target, code) in [
+        ("/photon/api", 400),
+        ("/photon/api?q=+", 400),
+        ("/photon/api?q=x&limit=abc", 400),
+        ("/photon/api?q=x&bbox=1,2,3", 400),
+        ("/photon/api?q=x&bbox=9,2,3,4", 400),
+        ("/photon/api?q=x&lat=43.7", 400),
+        ("/photon/api?q=x&lat=95&lon=7", 400),
+        ("/photon/api?q=x&layer=planet", 400),
+        ("/photon/reverse?lat=43.73", 400),
+        ("/photon/reverse?lat=43.73&lon=7.42&radius=-1", 400),
+    ] {
+        let (status, body) = s.get(target);
+        assert_eq!(status, code, "{target}: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v["message"].is_string(), "{target}: {body}");
+    }
+    let (status, body) = s.get(&format!("/photon/api?q={}", "a".repeat(2000)));
+    assert_eq!(status, 414, "{body}");
+    let back = s.json("/photon/reverse?lat=43.73&lon=7.42");
+    assert_eq!(
+        photon_points(&back),
+        native_points(&s.json("/v1/reverse?lat=43.73&lon=7.42&k=15"))
+    );
+    assert_eq!(back["features"][0]["properties"]["housenumber"], "1");
+    // Leaflet Control Geocoder asks the path with a slash at the end
+    assert_eq!(
+        s.get("/photon/reverse/?lat=43.73&lon=7.42"),
+        s.get("/photon/reverse?lat=43.73&lon=7.42")
+    );
+    // about 1.7 km north: outside Photon's default radius of 1 km, inside 2 km
+    assert_eq!(
+        s.json("/photon/reverse?lat=43.745&lon=7.42")["features"],
+        serde_json::json!([])
+    );
+    let far = s.json("/photon/reverse?lat=43.745&lon=7.42&radius=2");
+    assert_eq!(
+        far["features"][0]["properties"]["type"], "house",
+        "the nearest house far away is a house"
+    );
+    assert_eq!(
+        s.json("/photon/reverse?lat=43.745&lon=7.42&radius=2")["features"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let st = s.json("/photon/status");
+    assert_eq!(
+        (st["status"].as_str(), st["import_date"].as_str()),
+        (Some("Ok"), Some("test-release"))
+    );
+}
+
+#[test]
+fn photon_on_a_server_of_several_sheets_asks_the_sheet_countrycode_names() {
+    let dir = Scratch::dir("serve-photon-sheets");
+    let mc = country_sheet(
+        &dir,
+        "mc",
+        "rue a,001,ville,10000,1,,7.42,43.73,Rue A,Ville\n",
+        None,
+    );
+    let rs = country_sheet(&dir, "rs", RS_ROWS, None);
+    let s = Server::start(&mc, &["--sheets", rs.to_str().unwrap()]);
+    let v = s.json("/photon/api?q=ulica+b+1+grad&countrycode=rs");
+    let p = &v["features"][0]["properties"];
+    assert_eq!(
+        (p["countrycode"].as_str(), p["street"].as_str()),
+        (Some("RS"), Some("Ulica B"))
+    );
+    assert_eq!(
+        photon_points(&v),
+        native_points(&s.json("/v1/geocode?q=ulica+b+1+grad&k=15&country=rs"))
+    );
+    assert_eq!(
+        s.json("/photon/api?q=ulica+b+1+grad&countrycode=de")["features"],
+        serde_json::json!([])
+    );
+    let back = s.json("/photon/reverse?lat=45.25&lon=19.84&limit=1");
+    assert_eq!(
+        back["features"][0]["properties"]["countrycode"], "RS",
+        "the nearest sheet answers"
+    );
+}
+
+#[test]
+fn the_server_writes_the_valhalla_location_the_command_line_writes() {
+    let (_dir, bin) = sheet("valhalla");
+    let s = Server::start(&bin, &[]);
+    let (status, body) = s.get("/v1/geocode?q=1+rue+a+ville&format=valhalla");
+    assert_eq!(status, 200, "{body}");
+    let cli = Command::new(BIN)
+        .args([
+            "query",
+            bin.to_str().unwrap(),
+            "1 rue a ville",
+            "-k",
+            "1",
+            "--format",
+            "valhalla",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    assert_eq!(
+        body,
+        String::from_utf8_lossy(&cli.stdout).trim_end(),
+        "one line, byte for byte"
+    );
+    let (status, body) = s.get("/v1/geocode?q=ville&format=valhalla");
+    assert_eq!(status, 422, "a weak answer is no location: {body}");
+    assert!(body.contains("weak"), "{body}");
+    assert_eq!(s.get("/v1/geocode?q=zzzz+qqqq&format=valhalla").0, 422);
+    // another format is left unread, as before format=valhalla existed
+    assert_eq!(
+        s.get("/v1/geocode?q=1+rue+a+ville&format=jsonv2"),
+        s.get("/v1/geocode?q=1+rue+a+ville")
+    );
+}
+
+#[test]
+fn xml_is_answered_as_xml_with_the_coordinates_of_jsonv2() {
+    let (_dir, bin) = sheet("nominatim-xml");
+    let s = Server::start(&bin, &[]);
+    let (status, head, body) =
+        s.raw("GET /search?q=1+rue+a+ville&format=xml&addressdetails=1 HTTP/1.1\r\n\r\n");
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        head.contains("Content-Type: text/xml; charset=utf-8"),
+        "{head}"
+    );
+    let v2 = &s.json("/search?q=1+rue+a+ville&format=jsonv2")[0];
+    let lat = v2["lat"].as_str().unwrap();
+    assert!(body.contains(&format!(" lat=\"{lat}\"")), "{body}");
+    assert!(body.contains("<road>Rue A</road>"), "{body}");
+    // the same under the prefix, and json_callback leaves an XML answer as it is
+    assert_eq!(
+        s.get("/nominatim/search?q=1+rue+a+ville&format=xml&addressdetails=1")
+            .1
+            .split("querystring")
+            .nth(1),
+        body.split("querystring").nth(1)
+    );
+    let (_, wrapped) = s.get("/search?q=1+rue+a+ville&format=xml&json_callback=cb");
+    assert!(wrapped.starts_with("<?xml"), "{wrapped}");
+    let (status, back) = s.get("/reverse?lat=43.73&lon=7.42&format=xml");
+    assert_eq!(status, 200);
+    assert!(
+        back.contains("<addressparts>") && back.contains("<house_number>1</house_number>"),
+        "{back}"
+    );
+    assert!(s
+        .get("/reverse?lat=0&lon=0&format=xml")
+        .1
+        .contains("<error>Unable to geocode</error>"));
+    // reverse without format keeps answering jsonv2, as since 0.7.0
+    assert!(s
+        .json("/reverse?lat=43.73&lon=7.42")
+        .get("category")
+        .is_some());
+}
+
+#[test]
+fn geocodejson_carries_the_coordinates_of_jsonv2_in_every_feature() {
+    let (_dir, bin) = sheet("nominatim-geocodejson");
+    let s = Server::start(&bin, &[]);
+    let v = s.json("/search?q=1+rue+a+ville&format=geocodejson&addressdetails=1&namedetails=1");
+    assert_eq!(v["geocoding"]["query"], "1 rue a ville");
+    assert_eq!(
+        v["geocoding"]["licence"], "t",
+        "the licence of the sheet's passport"
+    );
+    let f = &v["features"][0];
+    let v2 = &s.json("/search?q=1+rue+a+ville&format=jsonv2")[0];
+    let c = &f["geometry"]["coordinates"];
+    assert_eq!(
+        format!("{:.7}", c[1].as_f64().unwrap()),
+        v2["lat"].as_str().unwrap()
+    );
+    assert_eq!(
+        format!("{:.7}", c[0].as_f64().unwrap()),
+        v2["lon"].as_str().unwrap()
+    );
+    assert_eq!(f["properties"]["geocoding"]["housenumber"], "1");
+    assert_eq!(
+        s.json("/search?q=zzzz+qqqq&format=geocodejson")["features"],
+        serde_json::json!([])
+    );
+    let back = s.json("/reverse?lat=43.7301&lon=7.42&format=geocodejson");
+    assert_eq!(
+        back["features"][0]["properties"]["geocoding"]["accuracy"],
+        11
+    );
+    assert_eq!(
+        s.json("/reverse?lat=0&lon=0&format=geocodejson"),
+        serde_json::json!({"error": "Unable to geocode"})
+    );
+}
+
+#[test]
+fn reverse_zoom_answers_house_street_or_town_and_holds_19_at_18() {
+    let (_dir, bin) = sheet("nominatim-zoom");
+    let s = Server::start(&bin, &[]);
+    let at = |z: &str| {
+        s.json(&format!(
+            "/reverse?lat=43.73&lon=7.42&format=jsonv2&zoom={z}"
+        ))
+    };
+    assert_eq!(at("19"), at("18"), "TeslaMate asks 19");
+    assert_eq!(at("18")["type"], "house");
+    assert_eq!(at("16")["type"], "street");
+    assert!(at("16")["address"].get("house_number").is_none());
+    assert_eq!(at("13")["type"], "city");
+    assert_eq!(at("13")["name"], "Ville");
+    assert_eq!(s.get("/reverse?lat=43.73&lon=7.42&zoom=x").0, 400);
+    assert_eq!(
+        s.json("/reverse?lat=43.73&lon=7.42&format=jsonv2"),
+        at("18"),
+        "18 is the default"
+    );
+}
+
+#[test]
+fn without_ids_no_answer_carries_an_object_number_and_with_ids_every_format_does() {
+    let (_dir, bin) = sheet("nominatim-ids");
+    let plain = Server::start(&bin, &[]);
+    let ids = Server::start(&bin, &["--ids"]);
+    let paths = [
+        "/search?q=1+rue+a+ville&format=jsonv2",
+        "/search?q=1+rue+a+ville&format=json",
+        "/search?q=1+rue+a+ville&format=geojson",
+        "/search?q=1+rue+a+ville&format=geocodejson",
+        "/search?q=1+rue+a+ville&format=xml",
+        "/reverse?lat=43.73&lon=7.42&format=jsonv2",
+        "/photon/api?q=1+rue+a+ville",
+    ];
+    for path in paths {
+        let (_, body) = plain.get(path);
+        assert!(!body.contains("osm_id"), "{path}: {body}");
+        let (_, body) = ids.get(path);
+        assert!(body.contains("osm_id"), "{path}: {body}");
+    }
+    let v = &ids.json("/search?q=1+rue+a+ville&format=jsonv2")[0];
+    assert_eq!(v["osm_type"], "node");
+    assert!(
+        v["osm_id"].as_i64().unwrap() < 0,
+        "negative: never an OpenStreetMap object"
+    );
+    let p = &ids.json("/photon/api?q=1+rue+a+ville")["features"][0]["properties"];
+    assert_eq!(
+        (p["osm_type"].as_str(), &p["osm_id"]),
+        (Some("N"), &v["osm_id"])
+    );
+    let g = &ids.json("/search?q=1+rue+a+ville&format=geocodejson")["features"][0]["properties"]
+        ["geocoding"];
+    assert_eq!(g["osm_id"], v["osm_id"]);
+    let (_, x) = ids.get("/search?q=1+rue+a+ville&format=xml");
+    assert!(
+        x.contains(&format!(" osm_type=\"node\" osm_id=\"{}\"", v["osm_id"])),
+        "{x}"
+    );
+}
+
+#[test]
+fn lookup_answers_the_house_of_its_own_number_and_nothing_else() {
+    let (_dir, bin) = sheet_of(
+        "nominatim-lookup",
+        "rue a,001,ville,10000,1,,7.42,43.73,Rue A,Ville\nrue a,001,ville,10000,3,,7.4205,43.7302,Rue A,Ville\n",
+    );
+    let s = Server::start(&bin, &["--ids"]);
+    let one = s.json("/search?q=1+rue+a+ville&format=jsonv2")[0].clone();
+    let three = s.json("/search?q=3+rue+a+ville&format=jsonv2")[0].clone();
+    let (a, b) = (
+        one["osm_id"].as_i64().unwrap(),
+        three["osm_id"].as_i64().unwrap(),
+    );
+    assert_ne!(a, b);
+    let found = s.json(&format!("/lookup?osm_ids=N{a},N{b}&format=jsonv2"));
+    assert_eq!(found.as_array().unwrap().len(), 2, "{found}");
+    assert_eq!(
+        (&found[0]["lat"], &found[0]["lon"], &found[0]["osm_id"]),
+        (&one["lat"], &one["lon"], &one["osm_id"])
+    );
+    assert_eq!(
+        found[1]["address"]["house_number"], "3",
+        "address details are on by default"
+    );
+    // someone else's number (an OpenStreetMap id), a way, garbage and a street's number give nothing
+    let street = s.json("/search?q=rue+a+ville&format=jsonv2")[0]["osm_id"]
+        .as_i64()
+        .unwrap();
+    for bad in [
+        "N123",
+        "W-5",
+        "garbage",
+        &format!("N{street}"),
+        &format!("N{}", a - 1),
+    ] {
+        assert_eq!(
+            s.json(&format!("/lookup?osm_ids={bad}")),
+            serde_json::json!([]),
+            "{bad}"
+        );
+    }
+    let many = vec![format!("N{a}"); 51].join(",");
+    assert_eq!(s.get(&format!("/lookup?osm_ids={many}")).0, 400);
+    assert_eq!(s.get("/lookup").0, 400);
+    let (_, x) = s.get(&format!("/lookup?osm_ids=N{a}&format=xml"));
+    assert!(
+        x.contains("<lookupresults ") && x.contains("<house_number>1</house_number>"),
+        "{x}"
+    );
+    assert_eq!(
+        s.json(&format!("/nominatim/lookup?osm_ids=N{a}")),
+        s.json(&format!("/lookup?osm_ids=N{a}"))
+    );
+}
+
+#[test]
+fn two_addresses_at_one_point_never_answer_for_each_other() {
+    // a house with two numbers: the same point, two addresses
+    let rows: String = (1..=12)
+        .map(|n| format!("rue b,001,ville,10000,{n},,7.43,43.74,Rue B,Ville\n"))
+        .collect();
+    let (_dir, bin) = sheet_of("nominatim-lookup-shared", &rows);
+    let s = Server::start(&bin, &["--ids"]);
+    let mut parted = 0;
+    for n in 1..=12 {
+        let v = s.json(&format!("/search?q={n}+rue+b+ville&format=jsonv2"))[0].clone();
+        assert_eq!(
+            v["address"].get("house_number"),
+            None,
+            "no address details asked"
+        );
+        let id = v["osm_id"].as_i64().unwrap();
+        let found = s.json(&format!("/lookup?osm_ids=N{id}"));
+        match found.as_array().unwrap().as_slice() {
+            [] => {}
+            [one] => {
+                assert_eq!(
+                    one["address"]["house_number"],
+                    n.to_string(),
+                    "another house under the number of {n}"
+                );
+                parted += 1;
+            }
+            more => panic!("{} answers for one number", more.len()),
+        }
+    }
+    // three bits part most of twelve numbers at one point; those that share them give no answer
+    assert!(parted >= 3, "{parted} of 12 found back");
+}
+
+#[test]
+fn more_addresses_at_one_point_than_the_lookup_sees_answer_for_none_of_them() {
+    // 41 numbers at one point: more than the 40 nearest answers /lookup reads. The numbers are chosen so that among
+    // the 40 it sees (the smallest) exactly one, 1, shares the three address bits of the hidden 900: read as all of
+    // the cell, the list would answer 1 for 900
+    let numbers = [
+        1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 27, 28,
+        29, 31, 32, 33, 34, 35, 36, 37, 39, 40, 42, 43, 44, 45, 46, 900,
+    ];
+    let rows: String = numbers
+        .iter()
+        .map(|n| format!("rue c,001,ville,10000,{n},,7.44,43.75,Rue C,Ville\n"))
+        .collect();
+    let (_dir, bin) = sheet_of("nominatim-lookup-crowded", &rows);
+    let s = Server::start(&bin, &["--ids"]);
+    for n in numbers {
+        let id = s.json(&format!("/search?q={n}+rue+c+ville&format=jsonv2"))[0]["osm_id"]
+            .as_i64()
+            .unwrap();
+        let found = s.json(&format!("/lookup?osm_ids=N{id}"));
+        for f in found.as_array().unwrap() {
+            assert_eq!(
+                f["address"]["house_number"],
+                n.to_string(),
+                "another house under the number of {n}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_darktable_search_word_for_word_gets_places_with_what_darktable_reads() {
+    // darktable's own default, plugins/map/geotagging_search_url, with %s and %d filled as it fills them
+    // (src/libs/location.c: g_strdup_printf(search_url, text, 5)); it reads display_name, lat, lon, boundingbox, type
+    let (_dir, bin) = sheet("darktable");
+    let s = Server::start(&bin, &[]);
+    let (status, body) = s.get("/search?q=1+rue+a+ville&format=xml&limit=5&polygon_text=1");
+    assert_eq!(status, 200, "{body}");
+    let place = body
+        .split("<place ")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no <place>: {body}"));
+    for attribute in [
+        "display_name=\"1 Rue A, Ville, 10000\"",
+        "lat=\"43.7300000\"",
+        "lon=\"7.4200000\"",
+        "boundingbox=\"",
+        "type=\"house\"",
+    ] {
+        assert!(place.contains(attribute), "{attribute}: {place}");
+    }
+    let bbox = place
+        .split("boundingbox=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert_eq!(
+        bbox.split(',').count(),
+        4,
+        "four numbers, latitudes then longitudes: {bbox}"
+    );
+}
+
+/// Step A.3 of plan K1/K9: the BAN (Addok) dialect answers as the French service does, Lambert-93 on France only.
+#[test]
+fn ban_search_and_reverse_answer_in_the_shape_of_the_french_service() {
+    let dir = Scratch::dir("serve-ban-fr");
+    let rows = "rue des lilas,80021,amiens,80000,8,,2.290084,49.897442,Rue des Lilas,Amiens\n\
+                rue des lilas,80021,amiens,80000,10,,2.2902,49.8975,Rue des Lilas,Amiens\n";
+    let bin = country_sheet(&dir, "fr", rows, None);
+    let s = Server::start(&bin, &[]);
+    let v = s.json("/ban/search?q=8+rue+des+lilas+amiens&limit=1");
+    assert_eq!(v["type"], "FeatureCollection");
+    assert_eq!(v["query"], "8 rue des lilas amiens");
+    let f = &v["features"][0];
+    let p = &f["properties"];
+    assert_eq!(p["type"], "housenumber", "{v}");
+    assert_eq!(p["housenumber"], "8");
+    assert_eq!(p["street"], "Rue des Lilas");
+    assert_eq!(p["name"], "8 Rue des Lilas");
+    assert_eq!(p["label"], "8 Rue des Lilas 80000 Amiens");
+    assert_eq!(p["postcode"], "80000");
+    assert_eq!(p["city"], "Amiens");
+    for absent in ["citycode", "context", "importance", "banId", "id"] {
+        assert!(
+            p.get(absent).is_none(),
+            "{absent} is not kept in a sheet: {p}"
+        );
+    }
+    let native = s.json("/v1/geocode?q=8+rue+des+lilas+amiens&k=1&with=crs:EPSG:2154");
+    let top = &native["results"][0];
+    assert_eq!(
+        f["geometry"]["coordinates"],
+        serde_json::json!([top["lon"], top["lat"]])
+    );
+    assert_eq!(
+        p["score"].as_f64().unwrap(),
+        top["confidence"].as_f64().unwrap()
+    );
+    assert_eq!(p["x"], top["extras"]["crs"]["x"]);
+    assert_eq!(p["y"], top["extras"]["crs"]["y"]);
+    // the trailing slash of Mobilizon's base URL is the same path
+    assert_eq!(
+        s.json("/ban/search/?q=8+rue+des+lilas+amiens&limit=1")["features"],
+        v["features"]
+    );
+    let r = s.json("/ban/reverse?lat=49.89745&lon=2.29009&limit=1");
+    assert_eq!(r["features"][0]["properties"]["housenumber"], "8");
+    let d = r["features"][0]["properties"]["distance"].as_i64().unwrap();
+    assert!((0..=10).contains(&d), "{r}");
+    assert!(r.get("query").is_none());
+    // a street is a street: number and street never come apart
+    // a type filter keeps only that type: the houses of an address query are not a street or a town
+    for t in ["street", "municipality"] {
+        let only = s.json(&format!("/ban/search?q=8+rue+des+lilas+amiens&type={t}"));
+        for f in only["features"].as_array().unwrap() {
+            assert_eq!(f["properties"]["type"], t, "{only}");
+        }
+    }
+    let st = s.json("/ban/search?q=rue+des+lilas+amiens&type=street");
+    assert!(!st["features"].as_array().unwrap().is_empty(), "{st}");
+    for f in st["features"].as_array().unwrap() {
+        assert_eq!(f["properties"]["type"], "street");
+        assert!(f["properties"].get("housenumber").is_none(), "{f}");
+    }
+    assert!(
+        !s.json("/ban/search?q=8+rue+des+lilas+amiens&postcode=80000")["features"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        s.json("/ban/search?q=8+rue+des+lilas+amiens&postcode=80001")["features"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn ban_refuses_what_it_cannot_check_in_its_own_form_and_scores_a_weak_answer_low() {
+    let (_d, bin) = sheet_of(
+        "ban-mc",
+        "rue des lilas,001,ville,10000,1,,7.42,43.73,Rue des Lilas,Ville\n\
+         rue des lilas,001,ville,10000,3,,7.4205,43.7302,Rue des Lilas,Ville\n",
+    );
+    let s = Server::start(&bin, &["--ids"]);
+    let ok = s.json("/ban/search?q=1+rue+des+lilas+ville&limit=1");
+    let p = &ok["features"][0]["properties"];
+    assert!(
+        p.get("x").is_none() && p.get("y").is_none(),
+        "Lambert-93 is for France only: {p}"
+    );
+    assert!(
+        p["id"].as_str().unwrap().starts_with('-'),
+        "with --ids the answer carries its own number: {p}"
+    );
+    for (path, word) in [
+        ("/ban/search?q=", "q: required param"),
+        ("/ban/search?q=1+rue+des+lilas&citycode=75056", "citycode"),
+        ("/ban/search?q=1+rue+des+lilas&type=house", "type"),
+        ("/ban/search?q=1+rue+des+lilas&index=poi", "index"),
+        ("/ban/reverse?lat=43.73", "lat and lon"),
+        ("/ban/search?q=1+rue+des+lilas&limit=x", "limit"),
+    ] {
+        let (status, body) = s.get(path);
+        assert_eq!(status, 400, "{path}: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["code"], 400, "{path}");
+        assert_eq!(v["message"], "Failed parsing query", "{path}");
+        assert!(
+            v["detail"][0].as_str().unwrap().contains(word),
+            "{path}: {body}"
+        );
+    }
+    let native = s.json("/v1/geocode?q=1+rue+des+lila&k=1");
+    assert_eq!(native["results"][0]["weak"], true, "{native}");
+    let weak = s.json("/ban/search?q=1+rue+des+lila&limit=1");
+    let score = weak["features"][0]["properties"]["score"].as_f64().unwrap();
+    assert!(score <= 0.4, "a weak answer never scores above 0.4: {weak}");
+}
+
+#[test]
+fn census_lists_only_firm_houses_as_address_matches_and_refuses_as_the_census_service() {
+    let (_d, bin) = sheet_of(
+        "census",
+        "rue des lilas,001,ville,10000,1,,7.42,43.73,Rue des Lilas,Ville\n\
+         rue des lilas,001,ville,10000,3,,7.4205,43.7302,Rue des Lilas,Ville\n",
+    );
+    let s = Server::start(&bin, &[]);
+    let base = "/census/geocoder/locations";
+    let v = s.json(&format!("{base}/onelineaddress?address=1+rue+des+lilas+ville&benchmark=Public_AR_Current&format=json"));
+    assert_eq!(
+        v["result"]["input"]["address"]["address"],
+        "1 rue des lilas ville"
+    );
+    assert_eq!(
+        v["result"]["input"]["benchmark"]["benchmarkName"],
+        "Public_AR_Current"
+    );
+    let m = &v["result"]["addressMatches"][0];
+    assert_eq!(m["matchedAddress"], "1 RUE DES LILAS, VILLE, 10000");
+    assert_eq!(m["addressComponents"]["fromAddress"], "1");
+    assert_eq!(m["addressComponents"]["zip"], "10000");
+    assert!(m.get("tigerLine").is_none());
+    let native = s.json("/v1/geocode?q=1+rue+des+lilas+ville&k=1");
+    assert_eq!(m["coordinates"]["x"], native["results"][0]["lon"]);
+    assert_eq!(m["coordinates"]["y"], native["results"][0]["lat"]);
+    // a street, the neighbour's door and a weak answer are not address matches
+    for q in [
+        "rue+des+lilas+ville",
+        "9+rue+des+lilas+ville",
+        "1+rue+des+lila",
+    ] {
+        let n = s.json(&format!("{base}/onelineaddress?address={q}&benchmark=4"));
+        assert_eq!(
+            n["result"]["addressMatches"],
+            serde_json::json!([]),
+            "{q}: {n}"
+        );
+    }
+    let parts = s.json(&format!(
+        "{base}/address?street=1+rue+des+lilas&city=ville&zip=10000&benchmark=4&format=json"
+    ));
+    assert_eq!(
+        parts["result"]["addressMatches"][0]["addressComponents"]["fromAddress"],
+        "1"
+    );
+    assert_eq!(
+        parts["result"]["input"]["address"]["street"],
+        "1 rue des lilas"
+    );
+    for (path, status, word) in [
+        (
+            format!("{base}/address?city=ville&state=DC&benchmark=4"),
+            400,
+            "Street address cannot be empty",
+        ),
+        (
+            format!("{base}/onelineaddress?address=1+rue+des+lilas&benchmark=garbage"),
+            400,
+            "Invalid benchmark",
+        ),
+        (
+            format!("{base}/onelineaddress?benchmark=4"),
+            400,
+            "Address cannot be empty",
+        ),
+        (
+            "/census/geocoder/geographies/onelineaddress?address=x&benchmark=4&vintage=4"
+                .to_string(),
+            501,
+            "gridpin-pro",
+        ),
+    ] {
+        let (got, body) = s.get(&path);
+        assert_eq!(got, status, "{path}: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["status"], status.to_string(), "{path}");
+        assert!(
+            v["errors"][0].as_str().unwrap().contains(word),
+            "{path}: {body}"
+        );
+    }
+}
+
+fn multipart(fields: &[(&str, &str)]) -> (String, String) {
+    let boundary = "gpXboundary";
+    let mut body = String::new();
+    for (name, value) in fields {
+        let file = if *name == "addressFile" {
+            "; filename=\"a.csv\"\r\nContent-Type: text/csv"
+        } else {
+            ""
+        };
+        body.push_str(&format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"{file}\r\n\r\n{value}\r\n"));
+    }
+    body.push_str(&format!("--{boundary}--\r\n"));
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+#[test]
+fn census_batch_answers_a_csv_line_per_row_on_the_batch_path_and_on_the_one_line_path() {
+    let (_d, bin) = sheet_of(
+        "census-batch",
+        "rue des lilas,001,ville,10000,1,,7.42,43.73,Rue des Lilas,Ville\n\
+         rue des lilas,001,ville,10000,3,,7.4205,43.7302,Rue des Lilas,Ville\n",
+    );
+    let s = Server::start(&bin, &[]);
+    let file = "7,1 rue des lilas,ville,,10000\n8,qqqq zzzz,,,\n9,1 rue des lila,,,\n";
+    for path in [
+        "/census/geocoder/locations/addressbatch",
+        "/census/geocoder/locations/onelineaddress",
+    ] {
+        let (ct, body) = multipart(&[
+            ("addressFile", file),
+            ("benchmark", "Public_AR_Current"),
+            ("vintage", "Current_Current"),
+        ]);
+        let (status, _, out) = s.raw(&format!(
+            "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: {ct}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ));
+        assert_eq!(status, 200, "{path}: {out}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "{out}");
+        assert!(lines[0].starts_with("\"7\",\"1 rue des lilas, ville, , 10000\",\"Match\",\"Exact\",\"1 RUE DES LILAS, VILLE, 10000\",\"7.42,43.73\""), "{out}");
+        assert_eq!(lines[1], "\"8\",\"qqqq zzzz, , , \",\"No_Match\"", "{out}");
+        assert!(
+            lines[2].contains("\"No_Match\""),
+            "a weak answer is no match: {out}"
+        );
+    }
+    let (ct, body) = multipart(&[("addressFile", file), ("benchmark", "garbage")]);
+    let (status, _, out) = s.raw(&format!(
+        "POST /census/geocoder/locations/addressbatch HTTP/1.1\r\nHost: x\r\nContent-Type: {ct}\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    ));
+    assert_eq!(status, 400);
+    assert!(out.contains("Invalid benchmark"), "{out}");
+    let (ct, body) = multipart(&[("benchmark", "4")]);
+    let (status, _, out) = s.raw(&format!(
+        "POST /census/geocoder/locations/addressbatch HTTP/1.1\r\nHost: x\r\nContent-Type: {ct}\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    ));
+    assert_eq!(status, 400);
+    assert!(out.contains("addressFile"), "{out}");
+    // other paths still take GET only
+    let (status, _, _) =
+        s.raw("POST /ban/search?q=x HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n");
+    assert_eq!(status, 405);
+}
+
+/// Step B.5 of plan K1/K9: the Pelias dialect answers in Pelias' GeoJSON, its gid opens the place again, and without
+/// --ids there is no gid at all.
+#[test]
+fn pelias_paths_answer_in_its_shape_and_a_gid_opens_its_place() {
+    let (_d, bin) = sheet_of(
+        "pelias",
+        "rue des lilas,001,ville,10000,1,,7.42,43.73,Rue des Lilas,Ville\n\
+         rue des lilas,001,ville,10000,3,,7.4205,43.7302,Rue des Lilas,Ville\n",
+    );
+    let s = Server::start(&bin, &["--ids"]);
+    let v = s.json("/pelias/v1/search?text=1+rue+des+lilas+ville&size=1");
+    assert_eq!(v["type"], "FeatureCollection");
+    assert_eq!(v["geocoding"]["query"]["text"], "1 rue des lilas ville");
+    let f = &v["features"][0];
+    let p = &f["properties"];
+    assert_eq!(p["layer"], "address");
+    assert_eq!(p["housenumber"], "1");
+    assert_eq!(p["street"], "Rue des Lilas");
+    assert_eq!(p["locality"], "Ville");
+    assert_eq!(p["postalcode"], "10000");
+    assert_eq!(p["match_type"], "exact");
+    assert_eq!(p["source"], "gridpin");
+    let native = s.json("/v1/geocode?q=1+rue+des+lilas+ville&k=1");
+    assert_eq!(
+        f["geometry"]["coordinates"],
+        serde_json::json!([native["results"][0]["lon"], native["results"][0]["lat"]])
+    );
+    let gid = p["gid"].as_str().unwrap().to_string();
+    assert!(gid.starts_with("gridpin:address:-"), "{gid}");
+    let place = s.json(&format!("/pelias/v1/place?ids={gid}"));
+    assert_eq!(place["features"][0]["geometry"], f["geometry"]);
+    // only our own source's numbers are read: the same number under another source opens nothing
+    let number = gid.trim_start_matches("gridpin:address:");
+    assert_eq!(
+        s.json(&format!(
+            "/pelias/v1/place?ids=openstreetmap:address:{number}"
+        ))["features"],
+        serde_json::json!([])
+    );
+    // autocomplete answers each suggestion of the typed start with its address, which carries a gid too: the
+    // street of "rue des l" comes back as the firm answer to "Rue des Lilas, Ville", not the weak guess of the start
+    let ac = s.json("/pelias/v1/autocomplete?text=rue+des+l&size=3");
+    let first = &ac["features"][0]["properties"];
+    assert_eq!(first["name"], "Rue des Lilas", "{ac}");
+    assert!(first["gid"].is_string());
+    assert!(first["confidence"].as_f64().unwrap() > 0.3, "{ac}");
+    let r = s.json("/pelias/v1/reverse?point.lat=43.73&point.lon=7.42&size=1");
+    assert_eq!(r["features"][0]["properties"]["housenumber"], "1");
+    // a weak answer is never an exact match
+    let weak = s.json("/pelias/v1/search?text=1+rue+des+lila&size=1");
+    assert_ne!(
+        weak["features"][0]["properties"]["match_type"], "exact",
+        "{weak}"
+    );
+    // layers keep only that layer; another country answers nothing; the sheet's own, by two or three letters, answers
+    for f in s.json("/pelias/v1/search?text=1+rue+des+lilas+ville&layers=street")["features"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(f["properties"]["layer"], "street");
+    }
+    assert_eq!(
+        s.json("/pelias/v1/search?text=1+rue+des+lilas&boundary.country=DEU")["features"],
+        serde_json::json!([])
+    );
+    assert!(
+        !s.json("/pelias/v1/search?text=1+rue+des+lilas&boundary.country=MCO")["features"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    for (path, word) in [
+        ("/pelias/v1/search?text=", "text"),
+        ("/pelias/v1/autocomplete", "text"),
+        ("/pelias/v1/reverse?point.lat=43.73", "point.lat"),
+        ("/pelias/v1/place", "ids"),
+        ("/pelias/v1/search?text=x&size=y", "size"),
+    ] {
+        let (status, body) = s.get(path);
+        assert_eq!(status, 400, "{path}: {body}");
+        let e: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            e["geocoding"]["errors"][0].as_str().unwrap().contains(word),
+            "{path}: {body}"
+        );
+    }
+    drop(s);
+    // without --ids there is no number to open, and no gid at all
+    let plain = Server::start(&bin, &[]);
+    let p = &plain.json("/pelias/v1/search?text=1+rue+des+lilas+ville&size=1")["features"][0]
+        ["properties"];
+    assert!(p.get("gid").is_none() && p.get("id").is_none(), "{p}");
+}
+
+/// GET /v1/addresses (address finder): the houses of a postcode, narrowed by the number and by street words.
+#[test]
+fn addresses_of_a_postcode_narrowed_by_number_and_street() {
+    let (_dir, bin) = sheet_of(
+        "addresses",
+        "rue a,001,ville,10000,1,,7.42,43.73,Rue A,Ville\n\
+         rue a,001,ville,10000,1,b,7.4201,43.7301,Rue A,Ville\n\
+         rue a,001,ville,10000,12,,7.4202,43.7302,Rue A,Ville\n\
+         rue b,001,ville,10000,1,,7.43,43.74,Rue B,Ville\n\
+         rue c,002,autre,20000,1,,7.90,43.90,Rue C,Autre\n",
+    );
+    let srv = Server::start(&bin, &[]);
+    let labels = |target: &str| -> (Vec<String>, bool) {
+        let v = srv.json(target);
+        let list = v["addresses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["label"].as_str().unwrap().to_string())
+            .collect();
+        (list, v["more"].as_bool().unwrap())
+    };
+    let (all, more) = labels("/v1/addresses?postcode=10000");
+    assert_eq!(all.len(), 4, "{all:?}");
+    assert!(!more && all.iter().all(|l| l.contains("10000")), "{all:?}");
+    let (ones, _) = labels("/v1/addresses?postcode=10000&number=1");
+    assert_eq!(ones.len(), 3, "1, 1b and the 1 of Rue B; not 12: {ones:?}");
+    assert!(ones.iter().all(|l| !l.contains(" 12")), "{ones:?}");
+    let (b, _) = labels("/v1/addresses?postcode=10000&number=rue+b+1");
+    assert_eq!(b.len(), 1, "{b:?}");
+    assert!(b[0].contains("Rue B"), "{b:?}");
+    let (cut, more) = labels("/v1/addresses?postcode=10000&limit=1");
+    assert_eq!(cut.len(), 1);
+    assert!(more, "a cut list says so");
+    let (none, more) = labels("/v1/addresses?postcode=99999");
+    assert!(none.is_empty() && !more);
+    let (other, _) = labels("/v1/addresses?postcode=20000");
+    assert_eq!(other.len(), 1);
+    assert!(other[0].contains("Autre"));
+    let (status, body) = srv.get("/v1/addresses");
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("missing postcode"));
+    let (status, _) = srv.get("/v1/addresses?postcode=10000&limit=0");
+    assert_eq!(status, 400);
+}
+
+/// --postcode-layer (Brazil's eight-digit CEP, plan K6.3): a query that is only a code answers its street from the
+/// layer, on the CLI and in /v1/geocode alike; /ws/<cep>/json/ answers in the shape of ViaCEP; every other query and
+/// a server without the layer answer as before.
+#[test]
+fn a_postcode_layer_answers_a_code_alone_and_the_viacep_path() {
+    let (dir, bin) = sheet("postcode-layer");
+    let layer = dir.join("cep.tsv");
+    std::fs::write(
+        &layer,
+        "#gridpin postcode layer 1\tcountry=BR\trelease=test\n\
+         01001000\t\t\tSao Paulo\tSP\t-23.5496830\t-46.6336900\t4715\n\
+         01310100\tAvenida Paulista\t\tSao Paulo\tSP\t-23.5645260\t-46.6525040\t89\n\
+         01310100\tRua Stray\t\tSao Paulo\tSP\t-23.9000000\t-46.7000000\t1\n",
+    )
+    .unwrap();
+    let (b, l) = (bin.to_str().unwrap(), layer.to_str().unwrap());
+
+    let hits = cli(&["query", b, "01310-100", "-k", "5", "--postcode-layer", l]);
+    assert_eq!(hits.len(), 2, "{hits:?}");
+    assert_eq!(hits[0]["street"], "Avenida Paulista");
+    assert_eq!(hits[0]["postcode"], "01310-100");
+    assert_eq!(hits[0]["precision"], "street");
+    assert_eq!(hits[0]["weak"], false);
+    assert_eq!(hits[1]["weak"], true, "one house of ninety: a stray street");
+    // an address, not a code, answers from the sheet as without the layer
+    let plain = cli(&["query", b, "1 rue a ville"]);
+    assert_eq!(
+        cli(&["query", b, "1 rue a ville", "--postcode-layer", l]),
+        plain
+    );
+
+    let srv = Server::start(&bin, &["--postcode-layer", l]);
+    let v = srv.json("/v1/geocode?q=01310100&k=1");
+    assert_eq!(v["results"][0]["street"], "Avenida Paulista");
+    assert_eq!(v["results"][0]["flags"][0], "postcode_layer");
+    let post = srv.post(
+        "/v1/geocode",
+        r#"{"queries":["01310-100","1 rue a ville"]}"#,
+    );
+    assert_eq!(post.0, 200);
+    let post: serde_json::Value = serde_json::from_str(&post.1).unwrap();
+    assert_eq!(post["results"][0][0]["street"], "Avenida Paulista");
+    assert_eq!(post["results"][1][0]["street"], plain[0]["street"]);
+
+    for path in ["/ws/01310100/json/", "/ws/01310-100/json"] {
+        let v = srv.json(path);
+        assert_eq!(v["cep"], "01310-100", "{path}");
+        assert_eq!(
+            v["logradouro"], "Avenida Paulista",
+            "the street with most houses"
+        );
+        assert_eq!(
+            (v["localidade"].as_str(), v["uf"].as_str()),
+            (Some("Sao Paulo"), Some("SP"))
+        );
+        assert!(v["lat"].as_f64().unwrap() < -23.5 && v["lon"].as_f64().unwrap() < -46.6);
+        assert_eq!(v["bairro"], "", "the layer has no district");
+    }
+    let town = srv.json("/ws/01001000/json/");
+    assert_eq!(
+        (town["logradouro"].as_str(), town["localidade"].as_str()),
+        (Some(""), Some("Sao Paulo"))
+    );
+    assert_eq!(
+        srv.json("/ws/99999999/json/"),
+        serde_json::json!({"erro": "true"})
+    );
+    for bad in ["/ws/0131010/json/", "/ws/abc/json/", "/ws/013101000/json/"] {
+        assert_eq!(srv.get(bad).0, 400, "{bad}");
+    }
+    assert_eq!(srv.get("/ws/01310100/xml/").0, 404);
+    assert_eq!(srv.json("/health")["postcode_layer"]["rows"], 3);
+
+    let without = Server::start(&bin, &[]);
+    let (status, body) = without.get("/ws/01310100/json/");
+    assert_eq!(status, 404, "{body}");
+    assert!(body.contains("--postcode-layer"), "{body}");
+    assert!(without.json("/health").get("postcode_layer").is_none());
+    assert!(without.json("/v1/geocode?q=01310-100")["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|h| h["flags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f != "postcode_layer")));
+}
+
+#[test]
+fn suggest_near_puts_the_streets_near_the_point_first_and_changes_nothing_without_it() {
+    // Rue A of Ville is the biggest (three houses); Rue A of Loin, 1 house, lies 2 km off; Rue A of Ailleurs, 1 house,
+    // more than 50 km away
+    let (_d, bin) = sheet_of(
+        "suggest-near",
+        "rue a,001,ville,10000,1,,7.42,43.73,Rue A,Ville\n\
+         rue a,001,ville,10000,2,,7.421,43.731,Rue A,Ville\n\
+         rue a,001,ville,10000,3,,7.422,43.732,Rue A,Ville\n\
+         rue a,002,loin,20000,1,,7.44,43.745,Rue A,Loin\n\
+         rue a,003,ailleurs,30000,1,,8.5,44.5,Rue A,Ailleurs\n",
+    );
+    let server = Server::start(&bin, &[]);
+    let communes = |target: &str| -> Vec<String> {
+        let (status, body) = server.get(target);
+        assert_eq!(status, 200, "{target}: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        v["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["commune"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let plain = server.get("/v1/suggest?q=rue+a").1;
+    assert_eq!(
+        communes("/v1/suggest?q=rue+a")[0],
+        "Ville",
+        "the biggest first"
+    );
+    // near Loin: Loin first, Ville next (within 50 km, farther), Ailleurs last (outside the radius, in the usual order)
+    assert_eq!(
+        communes("/v1/suggest?q=rue+a&near=43.745,7.44"),
+        ["Loin", "Ville", "Ailleurs"]
+    );
+    // near Ailleurs: the only street within the radius comes first, the rest keep the usual order
+    assert_eq!(
+        communes("/v1/suggest?q=rue+a&near=44.5,8.5"),
+        ["Ailleurs", "Ville", "Loin"]
+    );
+    // a point with nothing within the radius (the ocean): the usual order, the very same answer
+    assert_eq!(server.get("/v1/suggest?q=rue+a&near=0,-30").1, plain);
+    for bad in ["near=abc", "near=91,7", "near=43.7"] {
+        assert_eq!(
+            server.get(&format!("/v1/suggest?q=rue+a&{bad}")).0,
+            400,
+            "{bad}"
+        );
+    }
+}
+
+/// The coordinates of a Mapbox v5 answer, feature by feature.
+fn carmen_points(v: &serde_json::Value) -> Vec<(f64, f64)> {
+    v["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            let c = &f["center"];
+            (c[1].as_f64().unwrap(), c[0].as_f64().unwrap())
+        })
+        .collect()
+}
+
+#[test]
+fn the_mapbox_v5_path_answers_what_the_native_api_answers_in_carmen_shape() {
+    let (_dir, bin) = sheet_of(
+        "mapbox-shape",
+        "rue a,001,ville,10000,1,,7.42,43.73,Rue A,Ville\nrue a,001,ville,10000,3,,7.4205,43.7302,Rue A,Ville\n",
+    );
+    let s = Server::start(&bin, &[]);
+    let base = "/geocoding/v5/mapbox.places";
+    // autocomplete=false: the geocoder, the same points as the native API asked for as many
+    let v = s.json(&format!(
+        "{base}/1%20rue%20a%20ville.json?autocomplete=false&access_token=pk.x"
+    ));
+    assert_eq!(v["type"], "FeatureCollection");
+    assert_eq!(
+        carmen_points(&v),
+        native_points(&s.json("/v1/geocode?q=1+rue+a+ville&k=5"))
+    );
+    let f = &v["features"][0];
+    assert_eq!(f["geometry"]["coordinates"], f["center"]);
+    assert_eq!(
+        (f["address"].as_str(), f["text"].as_str()),
+        (Some("1"), Some("Rue A"))
+    );
+    assert_eq!(f["place_type"][0], "address");
+    assert_eq!(f["properties"]["accuracy"], "rooftop");
+    assert_eq!(f["properties"]["weak"], false);
+    assert!(f["id"].as_str().unwrap().starts_with("address."));
+    assert_eq!(v["query"], serde_json::json!(["1", "rue", "a", "ville"]));
+    // a token is never checked: any value answers the same
+    assert_eq!(
+        s.get(&format!(
+            "{base}/1%20rue%20a%20ville.json?autocomplete=false&access_token=other"
+        )),
+        s.get(&format!(
+            "{base}/1%20rue%20a%20ville.json?autocomplete=false"
+        ))
+    );
+    // autocomplete (Mapbox's default): the suggestions of an address field
+    let sug = s.json(&format!("{base}/rue%20a.json"));
+    assert_eq!(sug["features"][0]["properties"]["suggestion"], true);
+    assert_eq!(sug["features"][0]["text"], "Rue A");
+    // a whole address has no suggestion: the geocoder answers it
+    let whole = s.json(&format!("{base}/1%20rue%20a%20ville.json"));
+    assert_eq!(
+        carmen_points(&whole)[0],
+        native_points(&s.json("/v1/geocode?q=1+rue+a+ville&k=5"))[0]
+    );
+    // two numbers are a reverse query, lon first, one feature by default
+    let r = s.json(&format!("{base}/7.42,43.73.json"));
+    assert_eq!(r["query"], serde_json::json!([7.42, 43.73]));
+    assert_eq!(r["features"].as_array().unwrap().len(), 1);
+    assert_eq!(carmen_points(&r)[0], (43.73, 7.42));
+    // limit, types and country
+    assert_eq!(
+        s.json(&format!(
+            "{base}/1%20rue%20a%20ville.json?autocomplete=false&limit=1"
+        ))["features"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        s.json(&format!("{base}/1%20rue%20a%20ville.json?country=fr"))["features"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        carmen_points(&s.json(&format!(
+            "{base}/1%20rue%20a%20ville.json?autocomplete=false&country=mc"
+        ))),
+        carmen_points(&v)
+    );
+    // refusals in Mapbox's shape
+    for (path, code) in [
+        (format!("{base}/%20.json"), 422),
+        (format!("{base}/x.json?types=poi"), 422),
+        (format!("{base}/x.json?limit=11"), 422),
+        (format!("{base}/x.json?proximity=a,b"), 422),
+    ] {
+        let (status, _, body) = s.raw(&format!("GET {path} HTTP/1.1\r\n\r\n"));
+        assert_eq!(status, code, "{path}: {body}");
+        assert!(body.contains("\"message\""), "{body}");
+    }
+    // only the v5 places paths are ours
+    let (status, _, _) = s.raw("GET /geocoding/v6/mapbox.places/x.json HTTP/1.1\r\n\r\n");
+    assert_eq!(status, 404);
 }

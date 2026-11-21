@@ -7,11 +7,17 @@ preservation (lower memory use).
 
 Override via environment variables: GRIDPIN_THREADS, GRIDPIN_MEM.  Heavy,
 explicitly supervised runs may additionally isolate and cap their spill with
-GRIDPIN_DUCKDB_TEMP_DIR and GRIDPIN_DUCKDB_MAX_TEMP_BYTES.  Both are opt-in so
-the established country pipelines keep their previous defaults.
+GRIDPIN_DUCKDB_TEMP_DIR and GRIDPIN_DUCKDB_MAX_TEMP_BYTES.
+
+Without an explicit cap the spill is capped at the free space of the temp
+directory's disk minus 8 GiB, read when the connection opens (ANSWERS §361 item 2):
+a query that would spill past it fails instead of taking the disk below the
+5 GiB stop line (PRINCIPLES 4.5; 22.10.2026 a join wrote 20 GB of spill).  With
+8 GiB free or less the connection is refused before it opens.
 """
 import os
 import re
+import shutil
 
 import duckdb
 
@@ -19,6 +25,30 @@ import duckdb
 _TEMP_DIR_ENV = "GRIDPIN_DUCKDB_TEMP_DIR"
 _MAX_TEMP_BYTES_ENV = "GRIDPIN_DUCKDB_MAX_TEMP_BYTES"
 _MAX_SETTING_BYTES = 2**63 - 1
+_DISK_RESERVE_BYTES = 8 * 2**30
+
+
+def _free_bytes(path: str) -> int:
+    """Free bytes of the disk that holds `path`, read at its nearest existing ancestor."""
+    probe = os.path.abspath(path)
+    while not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    return shutil.disk_usage(probe).free
+
+
+def _default_max_temp_bytes(tmp: str) -> int:
+    """The spill cap without an explicit one: free space minus 8 GiB; refuse at 8 GiB free or less."""
+    free = _free_bytes(tmp)
+    cap = free - _DISK_RESERVE_BYTES
+    if cap < 1:
+        raise RuntimeError(
+            f"DuckDB: {free / 2**30:.1f} GiB free on the disk of {tmp}, not more than the 8 GiB reserve; "
+            f"free space or set {_MAX_TEMP_BYTES_ENV} explicitly"
+        )
+    return cap
 
 
 def _sql_string(value: str) -> str:
@@ -77,6 +107,8 @@ def connect_tuned(
     # closed without beginning any DuckDB work.
     tmp = _temp_directory(temp_directory)
     max_temp_bytes = _max_temp_bytes(max_temp_directory_size_bytes)
+    if max_temp_bytes is None:
+        max_temp_bytes = _default_max_temp_bytes(tmp)
     threads = int(os.environ.get("GRIDPIN_THREADS", max(2, (os.cpu_count() or 4) // 2)))
     mem = os.environ.get("GRIDPIN_MEM", "3GB")
     con = duckdb.connect()
@@ -88,9 +120,22 @@ def connect_tuned(
     con.execute("SET preserve_insertion_order = false")
     os.makedirs(tmp, exist_ok=True)
     con.execute("SET temp_directory = " + _sql_string(tmp))
-    if max_temp_bytes is not None:
-        con.execute(f"SET max_temp_directory_size='{max_temp_bytes}B'")
+    con.execute(f"SET max_temp_directory_size='{max_temp_bytes}B'")
     return con
+
+def cap_spill(con: "duckdb.DuckDBPyConnection") -> "duckdb.DuckDBPyConnection":
+    """Cap the spill of a connection opened with `duckdb.connect()` the way `connect_tuned` does: an explicit
+    GRIDPIN_DUCKDB_MAX_TEMP_BYTES, else free space minus 8 GiB on the disk of the connection's temp directory (as
+    set at the call; a relative one is read from the current directory).  DuckDB's own default, 90 % of the free
+    space, leaves 4.6 GiB of 46 — under the 5 GiB stop line.  Call it after the connection's own SET temp_directory."""
+    tmp = con.execute("SELECT current_setting('temp_directory')").fetchone()[0] or ".tmp"
+    tmp = os.path.abspath(tmp)
+    cap = _max_temp_bytes(None)
+    if cap is None:
+        cap = _default_max_temp_bytes(tmp)
+    con.execute(f"SET max_temp_directory_size='{cap}B'")
+    return con
+
 
 # Single source for the pinned Overture release. Monthly step X+7:
 # check docs.overturemaps.org/release-calendar and bump BEFORE rebuilding sheets.

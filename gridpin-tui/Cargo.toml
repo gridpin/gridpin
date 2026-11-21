@@ -1,0 +1,27 @@
+[package]
+name = "gridpin-tui"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "A terminal search box over a GridPin sheet: candidates as you type, details, the point copied with Enter"
+publish = false
+
+[[bin]]
+name = "gridpin-tui"
+path = "src/main.rs"
+
+[lib]
+name = "gridpin_tui"
+path = "src/lib.rs"
+
+[dependencies]
+gridpin = { path = "../gridpin" }
+# no default features: the default set pulls a second terminal backend whose licence texts the inventory cannot find
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = "0.29"
+
+[profile.release]
+lto = "thin"
+
+[dev-dependencies]
+serde_json = "1"

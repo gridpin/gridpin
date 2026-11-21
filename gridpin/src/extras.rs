@@ -7,7 +7,8 @@
 //! Fields: `h3[:res]` and `geohash[:len]` (cells), `placekey` (the "where" part of a Placekey, which is H3 at
 //! resolution 10 in Placekey's own alphabet), `codes` (Plus Code, MGRS, degrees-minutes-seconds), `street_point`
 //! (a point on the street in front of the house, from the houses across it), `links` (the point on five public
-//! maps) and `provenance` (the sheet: release, data date, licence, sources, SHA-256). Time zones are not here:
+//! maps), `provenance` (the sheet: release, data date, licence, sources, SHA-256) and `cell:<grid>` (the code of a
+//! statistical grid cell, `cells.rs`). Time zones are not here:
 //! the zone boundaries every library ships are ODbL data, and putting them in the engine is the owner's call.
 
 use std::collections::BTreeMap;
@@ -46,9 +47,15 @@ pub struct With {
     pub unit: bool,
     /// the ISO 20022 postal address (`PstlAdr`): structured, hybrid or none with the reasons (`iso20022.rs`)
     pub iso20022: bool,
+    /// the HL7 FHIR `Address` built on the same reading (`parts.rs`): its mode and the resource as JSON
+    pub fhir: bool,
+    /// how the answer's point was obtained (`point_method`), read from what the answer already says
+    pub method: bool,
+    /// `cell:<name>`: the code of a statistical grid cell (`cells.rs`: eu1km, de100m, jp1, jp2, jp3); repeatable
+    pub cells: Vec<&'static str>,
 }
 
-pub const NAMES: [&str; 15] = [
+pub const NAMES: [&str; 18] = [
     "h3",
     "geohash",
     "placekey",
@@ -64,7 +71,56 @@ pub const NAMES: [&str; 15] = [
     "area",
     "unit",
     "iso20022",
+    "fhir",
+    "method",
+    "cell",
 ];
+
+/// How the point of an answer was obtained, read from its `precision` and flags (plan K3.1; the inventory of every
+/// place a point is set, 17.11.2026, is in the plan's notes). Nothing is looked up: the answer already says it.
+///
+/// `registry_point` the stored point of the house (also a reverse answer far from any house: `approximate`);
+/// `range_interpolated` a point on a range of numbers of the street (TIGER, flag `range`); `between_neighbours`
+/// interpolated between the known numbers around it (`interp`); `nearest_house` the point of a neighbouring number of the
+/// street (`near`); `crossing_of_streets` the middle of the closest houses of two streets; `street_centre`; `place_table`
+/// the point of the sheet's table of places (flags `place_*`); `commune_centre`; `postcode_centre` a place read from a
+/// postcode alone; `postcode_layer` the point of a postcode layer (Brazil's CEP); `place_layer` the POI layer;
+/// `own_place` a place of `--aliases`.
+pub fn point_method(h: &Hit) -> &'static str {
+    let has = |f: &str| h.flags.contains(&f);
+    if has(crate::aliases::ALIAS_FLAG) {
+        return "own_place";
+    }
+    if has("poi_layer") {
+        return "place_layer";
+    }
+    if has(crate::postcode_layer::LAYER_FLAG) {
+        return "postcode_layer";
+    }
+    match h.precision {
+        "house" if has("range") => "range_interpolated",
+        "house" | "approximate" => "registry_point",
+        "interp" => "between_neighbours",
+        "near" => "nearest_house",
+        "intersection" => "crossing_of_streets",
+        "street" => "street_centre",
+        _ if has("postal_place") => "postcode_centre",
+        _ if h.flags.iter().any(|f| f.starts_with("place_")) => "place_table",
+        _ => "commune_centre",
+    }
+}
+
+/// The CSV columns of `--with fhir`: the mode and the `Address` resource as one JSON cell.
+pub const FHIR_COLUMNS: [&str; 2] = ["gp_fhir_mode", "gp_fhir_address"];
+
+fn fhir_cells(v: Option<&Value>) -> Vec<String> {
+    let mode = v.and_then(|v| v.get("mode")).and_then(Value::as_str);
+    let address = v.and_then(|v| v.get("address"));
+    vec![
+        mode.unwrap_or("").to_string(),
+        address.map_or(String::new(), Value::to_string),
+    ]
+}
 
 /// The CSV columns of `--with iso20022`: the mode, the elements of `PstlAdr`, two address lines and the checks.
 pub const ISO_COLUMNS: [&str; 13] = [
@@ -132,8 +188,10 @@ impl With {
                 })
                 .transpose()
             };
-            if arg.is_some() && !matches!(name, "h3" | "geohash" | "place" | "postal" | "crs") {
-                bail!("with {raw}: only h3, geohash, place, postal and crs take a level");
+            if arg.is_some()
+                && !matches!(name, "h3" | "geohash" | "place" | "postal" | "crs" | "cell")
+            {
+                bail!("with {raw}: only h3, geohash, place, postal, crs and cell take a level");
             }
             match name.to_ascii_lowercase().as_str() {
                 "h3" => w.h3 = Some(level(0, 15)?.unwrap_or(9) as u8),
@@ -148,6 +206,20 @@ impl With {
                 "area" => w.area = true,
                 "unit" => w.unit = true,
                 "iso20022" => w.iso20022 = true,
+                "fhir" => w.fhir = true,
+                "method" => w.method = true,
+                "cell" => {
+                    let kinds: Vec<&str> = crate::cells::KINDS.iter().map(|k| k.0).collect();
+                    let name = arg.ok_or_else(|| {
+                        anyhow::anyhow!("with cell: name the grid, one of {}", kinds.join(", "))
+                    })?;
+                    let (n, _) = crate::cells::KINDS.iter().find(|(n, _)| *n == name).ok_or_else(|| {
+                        anyhow::anyhow!("with cell:{name}: the grids are {}", kinds.join(", "))
+                    })?;
+                    if !w.cells.contains(n) {
+                        w.cells.push(n);
+                    }
+                }
                 "crs" => {
                     let code = arg.ok_or_else(|| anyhow::anyhow!("with crs: name the code, e.g. crs:EPSG:2154"))?;
                     w.crs = Some(crate::crs::parse(code).ok_or_else(|| {
@@ -230,6 +302,15 @@ impl With {
         }
         if self.iso20022 {
             c.extend(ISO_COLUMNS);
+        }
+        if self.fhir {
+            c.extend(FHIR_COLUMNS);
+        }
+        if self.method {
+            c.push("gp_point_method");
+        }
+        for name in &self.cells {
+            c.extend(crate::cells::column(name));
         }
         if self.postal.is_some() {
             c.push("gp_postal");
@@ -384,10 +465,49 @@ pub fn area(hits: &[Hit]) -> Value {
 const POSTAL_FORMATS: &str = include_str!("postal_formats.tsv");
 
 fn postal_rows() -> impl Iterator<Item = (&'static str, &'static str)> {
+    postal_rows_shaped().map(|(k, t, _)| (k, t))
+}
+
+/// Rows with their optional third column: the shape of the postcode ("99-999": 9 a digit, any other character
+/// written as it is), for a country whose sheet keeps the code as digits only (Poland, 17.11.2026).
+fn postal_rows_shaped() -> impl Iterator<Item = (&'static str, &'static str, Option<&'static str>)>
+{
     POSTAL_FORMATS
         .lines()
         .filter(|l| !l.starts_with('#'))
         .filter_map(|l| l.split_once('\t'))
+        .map(|(k, rest)| match rest.split_once('\t') {
+            Some((t, shape)) => (k, t, Some(shape.trim()).filter(|s| !s.is_empty())),
+            None => (k, rest, None),
+        })
+}
+
+/// The postcode as the post of `layout` writes it: digits only ("00624") put into the row's shape ("00-624") when
+/// their count is the shape's; any other code, and a layout without a shape, is returned as it is.
+pub fn postcode_as_written(code: &str, layout: Option<&str>) -> String {
+    let shape = layout.and_then(|cc| {
+        postal_rows_shaped()
+            .find(|(k, _, _)| k.eq_ignore_ascii_case(cc))
+            .and_then(|(_, _, shape)| shape)
+    });
+    let Some(shape) = shape else {
+        return code.to_string();
+    };
+    let slots = shape.chars().filter(|c| *c == '9').count();
+    if code.is_empty() || code.len() != slots || !code.chars().all(|c| c.is_ascii_digit()) {
+        return code.to_string();
+    }
+    let mut digits = code.chars();
+    shape
+        .chars()
+        .map(|c| {
+            if c == '9' {
+                digits.next().unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// The layout names of the table (`default` and country codes).
@@ -437,18 +557,25 @@ pub fn postal_template(country: Option<&str>) -> &'static str {
 /// The answer as the post of its country lays out an address: lines separated by "\n". A field the answer does
 /// not have is dropped together with the separator before it (or after it, at the start of a line).
 pub fn postal(h: &Hit, country: Option<&str>) -> String {
+    let postcode = postcode_as_written(&h.postcode, country);
     let field = |name: &str| -> &str {
         match name {
             "number" => h.housenumber.as_deref().unwrap_or(""),
             "street" => &h.street,
-            "postcode" => &h.postcode,
+            "postcode" => &postcode,
             "city" => &h.commune,
             "region" => h.region.as_deref().unwrap_or(""),
             _ => "", // neighborhood: a sheet keeps no neighbourhood yet
         }
     };
+    postal_lines(postal_template(country), field).join("\n")
+}
+
+/// The lines of `template` filled by `field`; a line whose fields are all empty is dropped (FHIR `text` takes the
+/// town lines of the sheet's layout this way, `parts.rs`).
+pub fn postal_lines<'a>(template: &str, field: impl Fn(&str) -> &'a str) -> Vec<String> {
     let mut lines = Vec::new();
-    for line in postal_template(country).split("\\n") {
+    for line in template.split("\\n") {
         // pieces: text between placeholders, and placeholders filled or empty
         let mut out = String::new();
         let mut pending_sep = String::new();
@@ -470,7 +597,7 @@ pub fn postal(h: &Hit, country: Option<&str>) -> String {
             lines.push(out);
         }
     }
-    lines.join("\n")
+    lines
 }
 
 /// (CSV column, JSON key, URL template with {lat} {lon})
@@ -533,13 +660,24 @@ impl Extras {
         }
     }
 
-    /// The `ISO_COLUMNS` cells of a line the sheet did not answer: `PstlAdr` can still be hybrid (a town of the sheet)
-    /// or a post box, and `none` says why. `None` without `--with iso20022`.
-    pub fn iso_cells_without_answer(&self, q: &str, idx: &Index) -> Option<Vec<String>> {
-        self.with.iso20022.then(|| {
+    /// The cells of a line the sheet did not answer, by column: `PstlAdr` can still be hybrid (a town of the sheet)
+    /// or a post box, and `none` says why; the FHIR `Address` of the same reading. Empty without `--with iso20022`
+    /// or `--with fhir`.
+    pub fn cells_without_answer(&self, q: &str, idx: &Index) -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        if self.with.iso20022 {
             let o = crate::iso20022::build(idx, q, None);
-            iso_cells(Some(&crate::iso20022::json(&o, false)))
-        })
+            out.extend(
+                ISO_COLUMNS
+                    .into_iter()
+                    .zip(iso_cells(Some(&crate::iso20022::json(&o, false)))),
+            );
+        }
+        if self.with.fhir {
+            let v = crate::parts::fhir_json(idx, q, None);
+            out.extend(FHIR_COLUMNS.into_iter().zip(fhir_cells(Some(&v))));
+        }
+        out
     }
 
     /// The fields of one answer, keys sorted.
@@ -625,6 +763,22 @@ impl Extras {
                 q.map_or(Value::Null, |q| {
                     crate::iso20022::json(&crate::iso20022::build(idx, &q, Some(h)), false)
                 }),
+            );
+        }
+        if w.method {
+            out.insert("point_method".into(), point_method(h).into());
+        }
+        for name in &w.cells {
+            out.insert(
+                format!("cell_{name}"),
+                crate::cells::code(name, h.lat, h.lon).map_or(Value::Null, Value::from),
+            );
+        }
+        if w.fhir {
+            let q = QUERY.with(|c| c.borrow().as_ref().map(|q| q.0.clone()));
+            out.insert(
+                "fhir".into(),
+                q.map_or(Value::Null, |q| crate::parts::fhir_json(idx, &q, Some(h))),
             );
         }
         if w.area {
@@ -740,6 +894,17 @@ impl Extras {
         }
         if w.iso20022 {
             by.extend(ISO_COLUMNS.into_iter().zip(iso_cells(map.get("iso20022"))));
+        }
+        if w.fhir {
+            by.extend(FHIR_COLUMNS.into_iter().zip(fhir_cells(map.get("fhir"))));
+        }
+        if w.method {
+            by.insert("gp_point_method", text(map.get("point_method")));
+        }
+        for name in &w.cells {
+            if let Some(col) = crate::cells::column(name) {
+                by.insert(col, text(map.get(&format!("cell_{name}"))));
+            }
         }
         if w.area {
             let a = map.get("area");
@@ -941,7 +1106,7 @@ pub fn placekey_where(lat: f64, lon: f64) -> Option<String> {
     Some(format!("@{}", groups.join("-")))
 }
 
-fn street_point(h: &Hit, idx: &Index) -> Option<(f64, f64)> {
+pub(crate) fn street_point(h: &Hit, idx: &Index) -> Option<(f64, f64)> {
     if !matches!(h.precision, "house" | "interp" | "near") {
         return None;
     }
@@ -1011,7 +1176,7 @@ fn answering_sheet<'a>(h: &Hit, idx: &'a Index) -> Option<&'a Index> {
 /// The post of the sheet's country writes the number before the street (`postal_formats.tsv`, the first line
 /// of the layout `--with postal` takes for the sheet): "37 Rue Sainte-Croix", not "Rue Sainte-Croix 37". The
 /// same lookup in a data table as `postal_layout_of` (ANSWERS §278), not a reading rule per country.
-fn number_written_first(idx: &Index) -> bool {
+pub(crate) fn number_written_first(idx: &Index) -> bool {
     let line = postal_template(Some(postal_layout_of(SHEET_LAYOUT, idx)))
         .split("\\n")
         .next()
@@ -1095,6 +1260,40 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn every_point_method_is_read_from_the_precision_and_flags_the_answer_carries() {
+        let h = |precision: &'static str, flags: &[&'static str]| Hit {
+            precision,
+            flags: flags.to_vec(),
+            ..addr("Rue A", "1", "", "Ville", None)
+        };
+        for (precision, flags, want) in [
+            ("house", &[][..], "registry_point"),
+            ("approximate", &[][..], "registry_point"),
+            ("house", &["range"][..], "range_interpolated"),
+            ("interp", &[][..], "between_neighbours"),
+            ("near", &[][..], "nearest_house"),
+            ("intersection", &[][..], "crossing_of_streets"),
+            ("street", &["street_exact"][..], "street_centre"),
+            ("city", &["postal_place"][..], "postcode_centre"),
+            ("city", &["place_exact"][..], "place_table"),
+            ("city", &[][..], "commune_centre"),
+            ("house", &["poi_layer"][..], "place_layer"),
+            (
+                "street",
+                &["postcode_layer", "postal_place"][..],
+                "postcode_layer",
+            ),
+            ("house", &["alias", "poi_layer"][..], "own_place"),
+        ] {
+            assert_eq!(
+                point_method(&h(precision, flags)),
+                want,
+                "{precision} {flags:?}"
+            );
+        }
+    }
+
     fn addr(street: &str, number: &str, postcode: &str, city: &str, region: Option<&str>) -> Hit {
         Hit {
             lat: 0.0,
@@ -1152,6 +1351,25 @@ mod tests {
         let one = area(&[far]);
         assert_eq!(one["spread_m"], 0.0);
         assert_eq!(one["candidates"], json!([]));
+    }
+
+    #[test]
+    fn a_polish_postcode_kept_as_digits_is_written_with_its_dash() {
+        // the Polish sheet keeps "00624"; the post, ISO 20022 and FHIR write "00-624" (17.11.2026)
+        let pl = addr("Marszałkowska", "1", "00624", "Warszawa", None);
+        assert_eq!(postal(&pl, Some("pl")), "Marszałkowska 1\n00-624 Warszawa");
+        assert_eq!(postcode_as_written("00624", Some("PL")), "00-624");
+        // a code of another length, letters, an empty code and a layout without a shape stay as they are
+        assert_eq!(postcode_as_written("0062", Some("pl")), "0062");
+        assert_eq!(postcode_as_written("00-624", Some("pl")), "00-624");
+        assert_eq!(postcode_as_written("", Some("pl")), "");
+        assert_eq!(postcode_as_written("01304", Some("br")), "01304");
+        assert_eq!(postcode_as_written("10115", Some("de")), "10115");
+        assert_eq!(postcode_as_written("00624", None), "00624");
+        assert_eq!(
+            postal_template(Some("pl")),
+            "{street} {number}\\n{postcode} {city}"
+        );
     }
 
     #[test]

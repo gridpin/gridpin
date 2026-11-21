@@ -18,7 +18,7 @@ import hashlib
 import random
 import re
 import unicodedata
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Pattern, Tuple
 
 __all__ = ["messy", "CLASSES", "Profile", "apply_form", "latin"]
 
@@ -39,14 +39,14 @@ class Profile:
     abbreviations: dict
     suffix_types: bool = False
 
-    def type_re(self):
+    def type_re(self) -> Pattern[str]:
         words = "|".join(sorted(self.abbreviations, key=len, reverse=True))
         if self.suffix_types:   # Dutch: the type ends the word («Kerkstraat»)
             return re.compile(r"(?<=\w)(" + words + r")(?!\w)", re.I)
         return re.compile(r"(?<!\w)(" + words + r")(?!\w)", re.I)
 
 
-def latin(text):
+def latin(text: str) -> str:
     out = []
     for ch in text:
         low = ch.lower()
@@ -58,7 +58,8 @@ def latin(text):
     return "".join(out)
 
 
-def apply_form(profile, domain, raw, row_id, ordinal, name):
+def apply_form(profile: Any, domain: bytes, raw: str, row_id: str, ordinal: int,
+               name: str) -> Tuple[Optional[str], str]:
     digest = hashlib.sha256(domain + row_id.encode()).digest()
     if name == "recipient_prefix":
         return profile.prefix + raw, "recipient_prefix"

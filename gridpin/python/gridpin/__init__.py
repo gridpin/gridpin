@@ -16,6 +16,8 @@ A sheet of one's own places (a campus, sites, depots), asked before the country'
     from gridpin.geopy import GridPin            # geopy/GeoPandas: pip install "gridpin[geopy]"
 """
 
+from typing import Any
+
 from . import sheets
 from ._gridpin import Geocoder
 
@@ -27,7 +29,7 @@ except ImportError:  # pragma: no cover - an older engine wheel under this packa
 __all__ = ["Geocoder", "build_places", "sheets", "geocode_df", "reverse_df"]
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> Any:
     # The DataFrame helpers live in gridpin.pandas, imported on first use so `import gridpin`
     # neither needs pandas nor pays for importing it.
     if name in ("geocode_df", "reverse_df"):

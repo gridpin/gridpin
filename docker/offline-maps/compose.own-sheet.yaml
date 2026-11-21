@@ -1,0 +1,7 @@
+# A sheet of your own, or a country without its own image: the engine image with the file mounted.
+#   GRIDPIN_SHEET=/path/to/sheet.bin docker compose -f compose.yaml -f compose.own-sheet.yaml up
+services:
+  geocoder:
+    image: ghcr.io/gridpin/gridpin:engine
+    volumes:
+      - ${GRIDPIN_SHEET:?set GRIDPIN_SHEET to the path of a .bin sheet}:/data/sheet.bin:ro

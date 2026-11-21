@@ -518,3 +518,307 @@ fn build_places_never_writes_over_its_own_table() {
         dir.join("ok.bin").to_str().unwrap(),
     ]));
 }
+
+/// A town sheet with Ville, its village Hameau 3 km east and a far town Autre, and a place layer with chapels of one
+/// name: in Hameau, in Autre and, when `edge` is set, only one 8 km east of Ville instead of the one in Hameau.
+fn town_and_chapels(name: &str, edge: bool) -> (Scratch, PathBuf, PathBuf) {
+    let dir = Scratch::dir(&format!("chapels-{name}"));
+    let mut rows = String::new();
+    for (street, code, town, lon, lat) in [
+        ("rue basse", "002", "hameau", 7.4572, 43.7300),
+        ("rue haute", "001", "ville", 7.4200, 43.7300),
+        ("rue neuve", "003", "autre", 8.4200, 43.7300),
+    ] {
+        // Autre is the big town, so the layer's ordinary choice among the namesakes is its chapel
+        for n in 1..=(if town == "autre" { 60 } else { 5 }) {
+            rows += &format!(
+                "{street},{code},{town},10000,{n},,{:.7},{lat:.7},{street},{town}\n",
+                lon + n as f64 * 0.0001
+            );
+        }
+    }
+    std::fs::write(dir.join("in.csv"), format!("{HDR}{rows}")).unwrap();
+    std::fs::write(
+        dir.join("m.json"),
+        r#"{"country":"mc","layer":"addresses","license":"t","source_release":"t","attribution":"t"}"#,
+    )
+    .unwrap();
+    let town = dir.join("town.bin");
+    ok(run(&[
+        "build",
+        dir.join("in.csv").to_str().unwrap(),
+        town.to_str().unwrap(),
+        "--meta",
+        dir.join("m.json").to_str().unwrap(),
+    ]));
+    let village = if edge {
+        "chapelle sainte anne,P2,lisiere,,1,,7.5200000,43.7300000,Chapelle Sainte Anne,Lisiere\n"
+    } else {
+        "chapelle sainte anne,P2,hameau,,1,,7.4600000,43.7300000,Chapelle Sainte Anne,Hameau\n"
+    };
+    std::fs::write(
+        dir.join("poi.csv"),
+        // Autre is the layer's biggest town too, so the layer's ordinary choice among the namesakes is its chapel
+        format!(
+            "{HDR}{village}chapelle sainte anne,P3,autre,,1,,8.4250000,43.7300000,Chapelle Sainte Anne,Autre\n\
+             ecole des pins,P3,autre,,1,,8.4260000,43.7310000,Ecole des Pins,Autre\n\
+             gare d autre,P3,autre,,1,,8.4270000,43.7320000,Gare d Autre,Autre\n\
+             musee du port,P3,autre,,1,,8.4280000,43.7330000,Musee du Port,Autre\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("pm.json"),
+        r#"{"country":"mc","layer":"poi","license":"t","source_release":"t","attribution":"t"}"#,
+    )
+    .unwrap();
+    let poi = dir.join("poi.bin");
+    ok(run(&[
+        "build",
+        dir.join("poi.csv").to_str().unwrap(),
+        poi.to_str().unwrap(),
+        "--meta",
+        dir.join("pm.json").to_str().unwrap(),
+    ]));
+    (dir, town, poi)
+}
+
+#[test]
+fn a_place_in_a_village_of_the_named_town_is_found_and_a_namesake_beyond_reach_is_not() {
+    // «Station Vinkeveen, De Ronde Venen»: the place is recorded under a village of the town the query names
+    let (_dir, town, poi) = town_and_chapels("village", false);
+    let h = query(
+        &town,
+        "Chapelle Sainte Anne Ville",
+        &["--poi", poi.to_str().unwrap()],
+    )
+    .unwrap();
+    assert_eq!(h["commune"], "Hameau", "{h}");
+    // a tail that only begins like the town names no town
+    let h = query(
+        &town,
+        "Chapelle Sainte Anne Vil",
+        &["--poi", poi.to_str().unwrap()],
+    )
+    .unwrap();
+    assert_eq!(h["commune"], "Autre", "{h}");
+    // without the town the layer keeps its ordinary choice, the chapel of the big town far away
+    let h = query(
+        &town,
+        "Chapelle Sainte Anne",
+        &["--poi", poi.to_str().unwrap()],
+    )
+    .unwrap();
+    assert_eq!(h["commune"], "Autre", "{h}");
+    // the reach (5 km) is held by the measurement, not here: a namesake 8 km away is also the ordinary answer of the
+    // layer in this fixture (at 15 km the sets lost 4 Italian rows, at 5 km none, 16.11.2026)
+}
+
+/// The town sheet of `town_and_chapels` (Ville, its village Hameau 3 km east, the far big town Autre) and a place layer
+/// of the given records (display name, commune, longitude; all on the latitude of the towns).
+fn town_and_layer(name: &str, records: &[(&str, &str, f64)]) -> (Scratch, PathBuf, PathBuf) {
+    let (dir, town, _) = town_and_chapels(name, false);
+    // Autre is the layer's biggest town, so the layer's ordinary choice among namesakes is there
+    let mut all: Vec<(String, String, f64)> = vec![
+        ("Ecole des Pins".into(), "Autre".into(), 8.426),
+        ("Gare d Autre".into(), "Autre".into(), 8.427),
+    ];
+    all.extend(
+        records
+            .iter()
+            .map(|(n, c, lon)| (n.to_string(), c.to_string(), *lon)),
+    );
+    all.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase())); // the builder takes rows in key order
+    let mut rows = String::new();
+    for (i, (shown, commune, lon)) in all.iter().enumerate() {
+        rows += &format!(
+            "{},P{i},{},,1,,{lon:.7},43.7300000,{shown},{commune}\n",
+            shown.to_lowercase(),
+            commune.to_lowercase()
+        );
+    }
+    std::fs::write(dir.join("poi.csv"), format!("{HDR}{rows}")).unwrap();
+    let poi = dir.join("poi.bin");
+    let _ = std::fs::remove_file(&poi);
+    ok(run(&[
+        "build",
+        dir.join("poi.csv").to_str().unwrap(),
+        poi.to_str().unwrap(),
+        "--meta",
+        dir.join("pm.json").to_str().unwrap(),
+    ]));
+    (dir, town, poi)
+}
+
+fn layer_answer(records: &[(&str, &str, f64)], tag: &str, q: &str) -> serde_json::Value {
+    let (_dir, town, poi) = town_and_layer(tag, records);
+    query(&town, q, &["--poi", poi.to_str().unwrap()]).unwrap_or(serde_json::Value::Null)
+}
+
+fn by_words(h: &serde_json::Value) -> bool {
+    h["flags"].to_string().contains("place_words")
+}
+
+#[test]
+fn a_place_written_otherwise_is_found_by_its_telling_words_near_the_named_town() {
+    // «chiesa di San Giacomo, Soragna» ↔ «Chiesa S. Giacomo Apostolo»: the record holds the query's telling words
+    let campo = [("Pieve di San Lorenzo in Campo", "Hameau", 7.45)];
+    let h = layer_answer(&campo, "words-found", "Chiesa di San Lorenzo Ville");
+    assert!(h["commune"] == "Hameau" && by_words(&h), "{h}");
+    // «chiesa di San Gaetano da Thiene, Serle» ↔ «Parrocchia di San Gaetano»: the shorter name holds half of them
+    let plain = [("Pieve di San Lorenzo", "Hameau", 7.45)];
+    let h = layer_answer(&plain, "words-half", "Chiesa di San Lorenzo in Campo Ville");
+    assert!(h["commune"] == "Hameau" && by_words(&h), "{h}");
+    // one of three is not enough («Instituto São José» is not «Escola José Anacleto Gomes»)
+    let h = layer_answer(
+        &plain,
+        "words-third",
+        "Chiesa di San Lorenzo in Campo Verde Ville",
+    );
+    assert!(!by_words(&h) && h["commune"] != "Hameau", "{h}");
+    // a record of another kind with the same saint is not the church
+    let cafe = [("Caffetteria San Lorenzo in Campo", "Hameau", 7.45)];
+    let h = layer_answer(&cafe, "words-kind", "Chiesa di San Lorenzo Ville");
+    assert!(!by_words(&h) && h["commune"] != "Hameau", "{h}");
+}
+
+#[test]
+fn the_words_of_the_named_town_tell_no_place_apart() {
+    // «Church In Arlington» is no answer to «Arlington Methodist Church (Arlington, Alabama), Arlington»
+    let ville = [("Pieve di Ville", "Hameau", 7.45)];
+    let h = layer_answer(&ville, "words-town", "Chiesa di San Rocco di Ville Ville");
+    assert!(!by_words(&h) && h["commune"] != "Hameau", "{h}");
+    // nor of the query («Fornaci romane di Lonato del Garda, Lonato del Garda» ↔ «Le Fornaci Romane»)
+    let plain = [("Pieve di San Lorenzo", "Hameau", 7.45)];
+    let h = layer_answer(
+        &plain,
+        "words-query-town",
+        "Chiesa di San Lorenzo di Ville in Campo Ville",
+    );
+    assert!(h["commune"] == "Hameau" && by_words(&h), "{h}");
+    // and a record that carries the town's name in its own is read without it
+    let named = [("Pieve di San Lorenzo di Ville", "Hameau", 7.45)];
+    let h = layer_answer(
+        &named,
+        "words-named",
+        "Chiesa di San Lorenzo in Campo Ville",
+    );
+    assert!(h["commune"] == "Hameau" && by_words(&h), "{h}");
+}
+
+#[test]
+fn two_qualifying_places_apart_an_exact_name_elsewhere_or_a_far_one_keep_the_words_out() {
+    // two churches of the saint in two villages of the town: neither is taken
+    let two = [
+        ("Pieve di San Lorenzo in Campo", "Hameau", 7.45),
+        ("Pieve di San Lorenzo in Campo", "Hameau", 7.432),
+    ];
+    let h = layer_answer(&two, "words-two", "Chiesa di San Lorenzo Ville");
+    assert!(!by_words(&h) && h["commune"] != "Hameau", "{h}");
+    // the layer knows the name exactly, far away: its answer stands (a big city whose place lies far from its point)
+    let exact = [
+        ("Pieve di San Lorenzo in Campo", "Hameau", 7.45),
+        ("Chiesa di San Lorenzo", "Autre", 8.425),
+    ];
+    let h = layer_answer(&exact, "words-exact", "Chiesa di San Lorenzo Ville");
+    assert!(h["commune"] == "Autre" && !by_words(&h), "{h}");
+    // beyond the reach of the words (3 km) nothing is taken
+    let far = [("Pieve di San Lorenzo in Campo", "Hameau", 7.47)];
+    let h = layer_answer(&far, "words-reach", "Chiesa di San Lorenzo Ville");
+    assert!(!by_words(&h) && h["commune"] != "Hameau", "{h}");
+}
+
+fn by_district(h: &serde_json::Value) -> bool {
+    h["flags"].to_string().contains("place_district")
+}
+
+/// Three records of the layer name the quarter «Quartier Bas», a district the town sheet has no town for, around
+/// 7.45 (between Ville and Hameau); the extra records are added to them.
+fn district_answer(extra: &[(&str, &str, f64)], tag: &str, q: &str) -> serde_json::Value {
+    let mut records = vec![
+        ("Mairie Quartier Bas", "Ville", 7.449),
+        ("Poste Quartier Bas", "Ville", 7.450),
+        ("Ecole Quartier Bas", "Ville", 7.451),
+    ];
+    records.extend_from_slice(extra);
+    layer_answer(&records, tag, q)
+}
+
+#[test]
+fn a_place_in_a_district_the_sheet_does_not_know_is_found_near_the_records_naming_it() {
+    // «Godesberger Stadthalle, Bad Godesberg»: the sheet knows Bonn only, and a namesake elsewhere won
+    let lake = [
+        ("Musee du Lac", "Ville", 7.452),
+        ("Musee du Lac", "Autre", 8.428),
+    ];
+    let h = district_answer(&lake, "district-found", "Musee du Lac Quartier Bas");
+    assert!(h["lon"].as_f64().unwrap() < 8.0 && by_district(&h), "{h}");
+    // without the district the layer keeps its ordinary choice, the namesake in the big town
+    let h = district_answer(&lake, "district-none", "Musee du Lac");
+    assert!(h["lon"].as_f64().unwrap() > 8.0 && !by_district(&h), "{h}");
+    // only a place of exactly that name is taken, not one written nearly so
+    let longer = [
+        ("Musee du Lacs", "Ville", 7.452),
+        ("Musee du Lac", "Autre", 8.428),
+    ];
+    let h = district_answer(&longer, "district-exact", "Musee du Lac Quartier Bas");
+    assert!(!by_district(&h) && h["lon"].as_f64().unwrap() > 8.0, "{h}");
+    // beyond the reach of the district (3 km) nothing is taken
+    let far = [
+        ("Musee du Lac", "Ville", 7.495),
+        ("Musee du Lac", "Autre", 8.428),
+    ];
+    let h = district_answer(&far, "district-reach", "Musee du Lac Quartier Bas");
+    assert!(!by_district(&h), "{h}");
+}
+
+#[test]
+fn a_district_named_by_too_few_or_by_scattered_records_gives_no_point() {
+    let lake = [
+        ("Musee du Lac", "Ville", 7.452),
+        ("Musee du Lac", "Autre", 8.428),
+    ];
+    // two records naming it are not enough
+    let mut two = vec![
+        ("Mairie Quartier Bas", "Ville", 7.449),
+        ("Poste Quartier Bas", "Ville", 7.450),
+    ];
+    two.extend_from_slice(&lake);
+    let h = layer_answer(&two, "district-two", "Musee du Lac Quartier Bas");
+    assert!(!by_district(&h), "{h}");
+    // four records of which one lies in the far town: three of four within 5 km is below the 80 % the point needs
+    let scattered = [
+        ("Musee du Lac", "Ville", 7.452),
+        ("Musee du Lac", "Autre", 8.428),
+        ("Gare Quartier Bas", "Autre", 8.429),
+    ];
+    let h = district_answer(
+        &scattered,
+        "district-scattered",
+        "Musee du Lac Quartier Bas",
+    );
+    assert!(!by_district(&h), "{h}");
+    // a word of two letters is no word of the district: «6e» does not narrow «arrondissement»
+    let short = [
+        ("Musee du Lac", "Ville", 7.452),
+        ("Musee du Lac", "Autre", 8.428),
+    ];
+    let h = district_answer(&short, "district-short", "Musee du Lac Le Quartier Bas");
+    assert!(by_district(&h), "{h}");
+}
+
+#[test]
+fn a_place_already_in_the_district_or_known_exactly_in_the_named_town_keeps_its_answer() {
+    // the ordinary answer already lies in the district: it stands, unflagged
+    let only = [("Musee du Lac", "Ville", 7.452)];
+    let h = district_answer(&only, "district-ordinary", "Musee du Lac Quartier Bas");
+    assert!(h["lon"].as_f64().unwrap() < 8.0 && !by_district(&h), "{h}");
+    // the layer knows the name exactly in the town the query names («Van der Valk Hotel Eindhoven»): a tail reaching
+    // into the name makes no district of it
+    let named = [
+        ("Musee du Lac", "Ville", 7.452),
+        ("Musee du Lac", "Quartier Bas", 8.428),
+    ];
+    let h = district_answer(&named, "district-named", "Musee du Lac Quartier Bas");
+    assert!(h["lon"].as_f64().unwrap() > 8.0 && !by_district(&h), "{h}");
+}

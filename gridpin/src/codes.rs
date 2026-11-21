@@ -506,6 +506,66 @@ pub fn dms_format(lat: f64, lon: f64) -> String {
 }
 
 /// Great-circle distance in metres on the sphere the evaluation tools use (6 371 000 m).
+/// DIGIPIN of India Post: a 4 × 4 grid split ten times over the box of India, one symbol per level, read as in the
+/// reference implementation (github.com/INDIAPOST-gov/digipin, src/digipin.js, commit a15339e8, read 17.11.2026).
+/// Since its edition of 2026-05-04 the code is ten symbols without separators; the older form with hyphens after the
+/// third and sixth symbol ("39J-49L-L8T4") is still read.
+const DIGIPIN_GRID: [&[u8; 4]; 4] = [b"FC98", b"J327", b"K456", b"LMPT"];
+const DIGIPIN_BOX: (f64, f64, f64, f64) = (2.5, 38.5, 63.5, 99.5);
+
+/// The DIGIPIN of a point, or `None` outside the box of the code (latitude 2.5–38.5, longitude 63.5–99.5).
+pub fn digipin_encode(lat: f64, lon: f64) -> Option<String> {
+    let (mut min_lat, mut max_lat, mut min_lon, mut max_lon) = DIGIPIN_BOX;
+    if !(min_lat..=max_lat).contains(&lat) || !(min_lon..=max_lon).contains(&lon) {
+        return None;
+    }
+    let mut code = String::with_capacity(10);
+    for _ in 0..10 {
+        let lat_div = (max_lat - min_lat) / 4.0;
+        let lon_div = (max_lon - min_lon) / 4.0;
+        let row = (3 - ((lat - min_lat) / lat_div).floor() as i64).clamp(0, 3) as usize;
+        let col = (((lon - min_lon) / lon_div).floor() as i64).clamp(0, 3) as usize;
+        code.push(DIGIPIN_GRID[row][col] as char);
+        max_lat = min_lat + lat_div * (4 - row) as f64;
+        min_lat += lat_div * (3 - row) as f64;
+        min_lon += lon_div * col as f64;
+        max_lon = min_lon + lon_div;
+    }
+    Some(code)
+}
+
+/// The centre of a DIGIPIN cell: ten symbols of the grid, any case, with or without the old hyphens or spaces.
+pub fn digipin_decode(code: &str) -> Option<(f64, f64)> {
+    let pin: Vec<u8> = code
+        .bytes()
+        .filter(|b| *b != b'-' && *b != b' ')
+        .map(|b| b.to_ascii_uppercase())
+        .collect();
+    if pin.len() != 10 {
+        return None;
+    }
+    let (mut min_lat, mut max_lat, mut min_lon, mut max_lon) = DIGIPIN_BOX;
+    for ch in pin {
+        let (r, c) = (0..4).find_map(|r| {
+            DIGIPIN_GRID[r]
+                .iter()
+                .position(|g| *g == ch)
+                .map(|c| (r, c))
+        })?;
+        let lat_div = (max_lat - min_lat) / 4.0;
+        let lon_div = (max_lon - min_lon) / 4.0;
+        (min_lat, max_lat) = (
+            max_lat - lat_div * (r + 1) as f64,
+            max_lat - lat_div * r as f64,
+        );
+        (min_lon, max_lon) = (
+            min_lon + lon_div * c as f64,
+            min_lon + lon_div * (c + 1) as f64,
+        );
+    }
+    Some(((min_lat + max_lat) / 2.0, (min_lon + max_lon) / 2.0))
+}
+
 pub fn haversine_m(a: (f64, f64), b: (f64, f64)) -> f64 {
     let (p1, p2) = (a.0.to_radians(), b.0.to_radians());
     let (dp, dl) = (p2 - p1, (b.1 - a.1).to_radians());
@@ -518,6 +578,49 @@ const _PI: f64 = PI;
 
 #[cfg(test)]
 mod tests {
+    /// Pairs computed by the reference implementation of India Post (digipin.js, commit a15339e8), not by this
+    /// code; the first is its README example, the second Dak Bhawan of its technical document ("39J 49L L8T4").
+    const DIGIPIN_PAIRS: [(f64, f64, &str, f64, f64); 10] = [
+        (13.11179621, 80.20264269, "4T396F42L7", 13.111780, 80.202635),
+        (28.622788, 77.213033, "39J49LL8T4", 28.622793, 77.213049),
+        (19.0760, 72.8777, "4FK5958823", 19.075983, 72.877707),
+        (2.5, 63.5, "LLLLLLLLLL", 2.500017, 63.500017),
+        (38.5, 99.5, "8888888888", 38.499983, 99.499983),
+        (22.5, 81.5, "2LFJLFJLFJ", 22.500010, 81.500017),
+        (8.0883, 77.5385, "M2K87CCKMF", 8.088316, 77.538485),
+        (34.0837, 74.7973, "C3LL343PK4", 34.083685, 74.797293),
+        (12.9716, 77.5946, "4P3JK852C9", 12.971601, 77.594584),
+        (26.9124, 75.7873, "33C635JK43", 26.912394, 75.787298),
+    ];
+
+    #[test]
+    fn digipin_matches_the_reference_implementation_both_ways() {
+        for (lat, lon, code, clat, clon) in DIGIPIN_PAIRS {
+            assert_eq!(
+                super::digipin_encode(lat, lon).as_deref(),
+                Some(code),
+                "{lat},{lon}"
+            );
+            let (dlat, dlon) = super::digipin_decode(code).unwrap();
+            assert!(
+                (dlat - clat).abs() < 1e-6 && (dlon - clon).abs() < 1e-6,
+                "{code}: {dlat},{dlon}"
+            );
+        }
+        assert_eq!(
+            super::digipin_decode("39J-49L-L8T4"),
+            super::digipin_decode("39j49ll8t4")
+        );
+        assert_eq!(super::digipin_encode(2.4, 80.0), None);
+        assert_eq!(super::digipin_encode(20.0, 99.6), None);
+        assert_eq!(super::digipin_decode("39J49LL8T"), None, "nine symbols");
+        assert_eq!(
+            super::digipin_decode("39J49LL8TA"),
+            None,
+            "A is not a symbol"
+        );
+    }
+
     use super::*;
 
     fn near(a: (f64, f64), b: (f64, f64), metres: f64) -> bool {

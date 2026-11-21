@@ -615,14 +615,16 @@ fn a_parquet_output_name_is_refused_rather_than_filled_with_csv() {
 #[test]
 fn a_closed_pipe_is_not_an_error() {
     let (_d, bin) = sheet("pipe");
-    let mut child = Command::new(BIN)
+    // The reader is gone before the program starts: five addresses fit the pipe buffer, and a reader
+    // closed after spawn sometimes lost the race to a child that had already written them all (14.11).
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = Command::new(BIN)
         .args(["list", bin.to_str().unwrap(), "--city", "ville"])
-        .stdout(std::process::Stdio::piped())
+        .stdout(writer)
         .stderr(std::process::Stdio::piped())
-        .spawn()
+        .output()
         .unwrap();
-    drop(child.stdout.take());
-    let out = child.wait_with_output().unwrap();
     assert!(
         out.status.success(),
         "{}",

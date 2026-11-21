@@ -1,7 +1,8 @@
 //! GridPin in WebAssembly: a few plain exports over linear memory, no wasm-bindgen.
 //!
 //! `gw_alloc(len)` gives a buffer the caller fills (the sheet's bytes, then each query as UTF-8); `gw_open(ptr, len)`
-//! takes the sheet (the buffer is consumed); `gw_geocode(ptr, len, k)` and `gw_reverse(lat, lon, k)` answer with a JSON
+//! takes the sheet (the buffer is consumed); `gw_geocode(ptr, len, k)`, `gw_suggest(ptr, len, k, near, lat, lon)` (the
+//! suggestions of an address field, as `/v1/suggest` of the server) and `gw_reverse(lat, lon, k)` answer with a JSON
 //! array whose address and length `gw_result_ptr()` and `gw_result_len()` give until the next call; `gw_free(ptr, len)`
 //! frees a buffer the caller no longer needs. One sheet per instance. `gridpin.js` wraps all of it.
 
@@ -69,13 +70,42 @@ pub unsafe extern "C" fn gw_geocode(ptr: *const u8, len: usize, k: usize) -> i32
     })
 }
 
+/// The suggestions for what a person has typed so far, as `/v1/suggest` answers them: streets, or the house of the
+/// typed number; with `near` set to 1, the streets near `lat`, `lon` first. A JSON array as the result; -1 without a
+/// sheet.
+///
+/// # Safety
+/// `ptr`, `len` point at `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn gw_suggest(
+    ptr: *const u8,
+    len: usize,
+    k: usize,
+    near: i32,
+    lat: f64,
+    lon: f64,
+) -> i32 {
+    let q = String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned();
+    let near = (near == 1 && (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon))
+        .then_some((lat, lon));
+    SHEET.with(|s| match s.borrow().as_ref() {
+        None => set_result("no sheet: call open first".into()) - 1,
+        Some(idx) => {
+            let found = idx.suggest_near(&q, k, near);
+            set_result(serde_json::to_string(&found).unwrap_or_else(|_| "[]".into()))
+        }
+    })
+}
+
 /// The nearest addresses of a point; a JSON array as the result.
 #[no_mangle]
 pub extern "C" fn gw_reverse(lat: f64, lon: f64, k: usize) -> i32 {
     SHEET.with(|s| match s.borrow().as_ref() {
         None => set_result("no sheet: call open first".into()) - 1,
         Some(idx) => {
-            let hits = idx.try_reverse(lat, lon, k.clamp(1, 10)).unwrap_or_default();
+            let hits = idx
+                .try_reverse(lat, lon, k.clamp(1, 10))
+                .unwrap_or_default();
             set_result(serde_json::to_string(&hits).unwrap_or_else(|_| "[]".into()))
         }
     })

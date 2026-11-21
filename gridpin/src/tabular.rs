@@ -132,6 +132,8 @@ pub struct Options<'a> {
     pub extras: Option<(&'a crate::extras::Extras, &'a crate::query::Index)>,
     /// `--aggregate`: counts by cell instead of rows, and the bar under which cells merge (`--min-count`)
     pub aggregate: Option<(&'a crate::publish::Cells, u64)>,
+    /// answers kept for rows that repeat an earlier row (`crate::repeats`); 0 answers every row
+    pub repeat_cap: usize,
     /// `--mask`: every point moved; adds `gp_masked_m` (and `gp_mask_k` with k), blanks street and number
     pub mask: Option<(&'a crate::publish::Mask, &'a crate::query::Index)>,
 }
@@ -140,6 +142,45 @@ pub struct Options<'a> {
 pub struct Stats {
     pub rows: u64,
     pub without_address: u64,
+    /// rows answered from an earlier row of the run with the same question (`crate::repeats`)
+    pub repeated: u64,
+}
+
+/// The question of a row as the repeat cache keys it: exactly the cells the row is read from, nothing normalised.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum AskKey {
+    Line(String),
+    Fields(
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+    ),
+    Point(u64, u64),
+}
+
+fn ask_key(q: &RowQuery) -> Option<AskKey> {
+    if q.is_empty() {
+        return None; // no question, nothing to look up: answered empty as before and not counted
+    }
+    Some(match q {
+        RowQuery::Line(text) => AskKey::Line(text.clone()),
+        RowQuery::Fields {
+            street,
+            number,
+            city,
+            region,
+            postcode,
+        } => AskKey::Fields(
+            street.clone(),
+            number.clone(),
+            city.clone(),
+            region.clone(),
+            postcode.clone(),
+        ),
+        RowQuery::Point(lat, lon) => AskKey::Point(lat.to_bits(), lon.to_bits()),
+    })
 }
 
 /// `--delimiter`: one ASCII character, or `tab` / `\t`.
@@ -508,7 +549,10 @@ where
     let mut stats = Stats {
         rows: 0,
         without_address: 0,
+        repeated: 0,
     };
+    let mut repeats: crate::repeats::Repeats<AskKey, (Vec<Hit>, Option<String>)> =
+        crate::repeats::Repeats::new(opts.repeat_cap);
     let mut records = reader.into_records();
     loop {
         let mut window: Vec<(csv::StringRecord, RowQuery)> = Vec::with_capacity(WINDOW.min(4096));
@@ -529,17 +573,19 @@ where
         }
         stats.rows += window.len() as u64;
         stats.without_address += window.iter().filter(|(_, q)| q.is_empty()).count() as u64;
-        let answers: Vec<(Vec<Hit>, Option<String>)> = pool.install(|| {
-            window
-                .par_iter()
-                .map(|(_, q)| match q {
-                    q if q.is_empty() => (Vec::new(), None),
-                    RowQuery::Line(line) => aliases::answer(opts.aliases, line, |text| {
-                        geocode(&RowQuery::Line(text.to_string()))
-                    }),
-                    q => (geocode(q), None),
-                })
-                .collect()
+        let keys: Vec<Option<AskKey>> = window.iter().map(|(_, q)| ask_key(q)).collect();
+        let answers: Vec<(Vec<Hit>, Option<String>)> = repeats.answer(&keys, |rows| {
+            pool.install(|| {
+                rows.par_iter()
+                    .map(|&at| match &window[at].1 {
+                        q if q.is_empty() => (Vec::new(), None),
+                        RowQuery::Line(line) => aliases::answer(opts.aliases, line, |text| {
+                            geocode(&RowQuery::Line(text.to_string()))
+                        }),
+                        q => (geocode(q), None),
+                    })
+                    .collect()
+            })
         });
         let first_row = stats.rows - window.len() as u64;
         if let Some((cells, _)) = opts.aggregate {
@@ -597,22 +643,18 @@ where
             };
             debug_assert_eq!(record.len(), width);
             if hits.is_empty() {
-                let iso = opts
+                let filled = opts
                     .extras
                     .zip(asked_text.as_deref())
-                    .and_then(|((e, idx), q)| {
-                        let at = head.iter().position(|c| *c == "gp_iso_mode")? - width;
-                        Some((at, e.iso_cells_without_answer(q, idx)?))
-                    });
-                match iso {
-                    Some((at, cells)) => {
-                        let mut row = empty.clone();
-                        row[at..at + cells.len()].clone_from_slice(&cells);
-                        writer.write_record(record.iter().chain(row.iter().map(String::as_str)))?;
+                    .map(|((e, idx), q)| e.cells_without_answer(q, idx))
+                    .unwrap_or_default();
+                let mut row = empty.clone();
+                for (col, cell) in filled {
+                    if let Some(at) = head.iter().position(|c| *c == col) {
+                        row[at - width] = cell;
                     }
-                    None => writer
-                        .write_record(record.iter().chain(empty.iter().map(String::as_str)))?,
                 }
+                writer.write_record(record.iter().chain(row.iter().map(String::as_str)))?;
                 continue;
             }
             for (rank, hit) in hits.iter().take(opts.k).enumerate() {
@@ -650,6 +692,7 @@ where
             }
         }
     }
+    stats.repeated = repeats.repeated;
     writer.flush()?;
     if let Some((_, min_count)) = opts.aggregate {
         let mut out = writer.into_inner().map_err(|e| anyhow!("{e}"))?;

@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Offline map</title>
+<link rel="stylesheet" href="/data/lib/maplibre-gl.css">
+<style>
+  :root { --ink: #1f2933; --muted: #5a6c7d; --line: #d9dee4; --accent: #1a5490; --warn: #9a6400; }
+  html, body { margin: 0; height: 100%; font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; color: var(--ink); }
+  #map { position: absolute; inset: 0; }
+  #panel { position: absolute; top: 12px; left: 12px; width: min(380px, calc(100% - 24px)); background: #fff; border: 1px solid var(--line);
+           border-radius: 10px; padding: 10px 12px; box-shadow: 0 2px 10px rgba(0,0,0,.12); z-index: 2; }
+  #panel form { display: flex; gap: 6px; }
+  #panel input { flex: 1; min-width: 0; font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+  #panel button { font: inherit; padding: 6px 10px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; }
+  #panel .row { margin-top: 8px; font-size: 13.5px; }
+  #panel .row b { display: inline-block; width: 1.4em; }
+  #panel .weak { color: var(--warn); }
+  #panel .muted { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+  #panel .clear { background: none; color: var(--accent); padding: 0; margin-left: 6px; text-decoration: underline; }
+  .pin { width: 16px; height: 16px; border-radius: 50%; border: 3px solid var(--accent); background: var(--accent); box-sizing: border-box; }
+  .pin.weak { background: #fff; border-color: var(--warn); }
+  #foot { position: absolute; left: 12px; bottom: 8px; z-index: 2; font-size: 11.5px; color: var(--muted); background: rgba(255,255,255,.85);
+          padding: 2px 6px; border-radius: 4px; max-width: calc(100% - 24px); }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+  <form id="search" autocomplete="off">
+    <input id="q" list="suggestions" placeholder="An address" aria-label="Address">
+    <datalist id="suggestions"></datalist>
+    <button type="submit">Find</button>
+  </form>
+  <div id="answers"></div>
+  <div id="route" class="row"></div>
+  <div class="muted">Two addresses give a route between them. Nothing leaves this machine.</div>
+</div>
+<div id="foot">Sheet: <span id="licence">…</span> · Map and routes: © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, <a href="https://protomaps.com">Protomaps</a></div>
+<script src="/data/lib/maplibre-gl.js"></script>
+<script src="/data/lib/pmtiles.js"></script>
+<script src="/data/lib/basemaps.js"></script>
+<script>
+"use strict";
+const origin = location.origin;
+const protocol = new pmtiles.Protocol();
+maplibregl.addProtocol("pmtiles", protocol.tile);
+
+const map = new maplibregl.Map({
+  container: "map",
+  attributionControl: false,
+  style: {
+    version: 8,
+    glyphs: origin + "/data/fonts/{fontstack}/{range}.pbf",
+    sprite: origin + "/data/sprites/light",
+    sources: { protomaps: { type: "vector", url: "pmtiles://" + origin + "/data/basemap.pmtiles" } },
+    layers: basemaps.layers("protomaps", basemaps.namedFlavor("light"), { lang: "en" }),
+  },
+});
+map.addControl(new maplibregl.NavigationControl(), "top-right");
+fetch("/data/meta.json").then((r) => r.json()).then((m) => {
+  const [w, s, e, n] = m.bbox;
+  const dx = (e - w) * 0.25, dy = (n - s) * 0.25;
+  // the base map covers the country's box only: keep the view near it, and no closer than its tiles go deep
+  map.setMaxBounds([[w - dx, s - dy], [e + dx, n + dy]]);
+  map.fitBounds([[w, s], [e, n]], { padding: 20, duration: 0 });
+}).catch(() => {});
+
+// at most two answers: A and B; a third search replaces B
+const picked = [];
+const markers = [];
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+async function geocode(q) {
+  const u = "/api/search?" + new URLSearchParams({ q, format: "jsonv2", limit: "1", extratags: "1", with: "street_point" });
+  const r = await fetch(u);
+  if (!r.ok) throw new Error("the geocoder answered " + r.status);
+  const list = await r.json();
+  if (!list.length) return null;
+  const p = list[0];
+  if (p.licence) document.getElementById("licence").textContent = p.licence;
+  const street = p.extras && p.extras.street_point;
+  return {
+    q,
+    name: p.display_name,
+    lat: Number(p.lat),
+    lon: Number(p.lon),
+    weak: p.extratags && p.extratags.match_status === "T",
+    level: p.extratags && p.extratags.match_level,
+    street: street ? { lat: street.lat, lon: street.lon } : null,
+  };
+}
+
+function show() {
+  const box = document.getElementById("answers");
+  box.replaceChildren();
+  markers.forEach((m) => m.remove());
+  markers.length = 0;
+  picked.forEach((a, i) => {
+    const row = el("div", "row" + (a.weak ? " weak" : ""));
+    row.append(el("b", "", i ? "B" : "A"), a.name + (a.weak ? " — check this answer (" + a.level + ")" : ""));
+    box.append(row);
+    const pin = el("div", "pin" + (a.weak ? " weak" : ""));
+    pin.title = a.name;
+    markers.push(new maplibregl.Marker({ element: pin }).setLngLat([a.lon, a.lat]).addTo(map));
+  });
+  if (picked.length) {
+    const clear = el("button", "clear", "clear");
+    clear.type = "button";
+    clear.onclick = () => { picked.length = 0; show(); route(); };
+    box.append(clear);
+  }
+}
+
+// polyline6 of Valhalla
+function decode(s) {
+  const out = [];
+  let i = 0, lat = 0, lon = 0;
+  while (i < s.length) {
+    for (const k of [0, 1]) {
+      let shift = 0, result = 0, b;
+      do { b = s.charCodeAt(i++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+      const d = result & 1 ? ~(result >> 1) : result >> 1;
+      if (k === 0) lat += d; else lon += d;
+    }
+    out.push([lon / 1e6, lat / 1e6]);
+  }
+  return out;
+}
+
+function waypoint(a) {
+  // Valhalla routes to the street in front of the house; the house is handed back on display
+  return a.street ? { lat: a.street.lat, lon: a.street.lon, display_lat: a.lat, display_lon: a.lon } : { lat: a.lat, lon: a.lon };
+}
+
+function drawRoute(coords) {
+  const data = { type: "Feature", geometry: { type: "LineString", coordinates: coords } };
+  const draw = () => {
+    if (map.getSource("route")) map.getSource("route").setData(data);
+    else {
+      map.addSource("route", { type: "geojson", data });
+      map.addLayer({ id: "route", type: "line", source: "route", paint: { "line-color": "#1a5490", "line-width": 5, "line-opacity": 0.8 } });
+    }
+  };
+  // a search can come back before the map has finished loading its style
+  if (map.isStyleLoaded()) draw(); else map.once("load", draw);
+}
+
+async function route() {
+  const out = document.getElementById("route");
+  out.textContent = "";
+  if (picked.length < 2) { drawRoute([]); return; }
+  if (picked.some((a) => a.weak)) {
+    out.textContent = "No route: an answer is weak, check the address first.";
+    drawRoute([]);
+    return;
+  }
+  const body = { locations: picked.map(waypoint), costing: "auto", directions_options: { units: "kilometers" } };
+  try {
+    const r = await fetch("/route/route", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    // a stopped router answers 502 from the web server with no JSON at all
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.trip) throw new Error(j.error || (r.status >= 500 ? "the router is not running (HTTP " + r.status + ")" : "the router answered " + r.status));
+    const coords = j.trip.legs.flatMap((l) => decode(l.shape));
+    drawRoute(coords);
+    const s = j.trip.summary;
+    out.textContent = "Route: " + s.length.toFixed(1) + " km, " + Math.round(s.time / 60) + " min by car.";
+  } catch (e) {
+    out.textContent = "No route: " + e.message + ".";
+    drawRoute([]);
+  }
+}
+
+document.getElementById("search").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const q = document.getElementById("q").value.trim();
+  if (!q) return;
+  const out = document.getElementById("route");
+  try {
+    const a = await geocode(q);
+    if (!a) { out.textContent = "Not found: " + q; return; }
+    if (picked.length === 2) picked.pop();
+    picked.push(a);
+    show();
+    map.flyTo({ center: [a.lon, a.lat], zoom: Math.max(map.getZoom(), 15) });
+    await route();
+  } catch (e) {
+    out.textContent = "The geocoder is not reachable: " + e.message + ".";
+  }
+});
+
+let typed;
+document.getElementById("q").addEventListener("input", (ev) => {
+  clearTimeout(typed);
+  const q = ev.target.value.trim();
+  if (q.length < 3) return;
+  typed = setTimeout(async () => {
+    try {
+      const r = await fetch("/api/v1/suggest?" + new URLSearchParams({ q, k: "6" }));
+      const j = await r.json();
+      const list = document.getElementById("suggestions");
+      list.replaceChildren(...(j.suggestions || []).map((s) => { const o = el("option"); o.value = s.label; return o; }));
+    } catch (e) { /* suggestions are a convenience */ }
+  }, 200);
+});
+</script>
+</body>
+</html>

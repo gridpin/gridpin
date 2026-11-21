@@ -1,0 +1,13 @@
+# One origin for the page, the geocoder and the router: the page asks /api/… and /route/… of itself.
+:80 {
+	handle_path /api/* {
+		reverse_proxy geocoder:8080
+	}
+	handle_path /route/* {
+		reverse_proxy routing:8002
+	}
+	handle {
+		root * /srv
+		file_server
+	}
+}

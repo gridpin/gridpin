@@ -1,0 +1,19 @@
+# Render Blueprint (published at the root of the public repository as render.yaml; the button reads it there).
+# One GridPin server of the Serbia sheet on Render's free plan: Render makes the key itself (a random 256-bit value),
+# the server refuses to start without it, /health is Render's check. Another country: fork the repository, change
+# the image tag (and the plan, see docker/public/sheet-memory.txt) and use the button with your fork.
+services:
+  - type: web
+    name: gridpin-rs
+    runtime: image
+    image:
+      url: ghcr.io/gridpin/gridpin:rs
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: GRIDPIN_REQUIRE_KEY
+        value: "1"
+      - key: GRIDPIN_SERVE_KEY
+        generateValue: true

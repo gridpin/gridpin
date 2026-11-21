@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import html
 import math
+from typing import Any, List, Tuple
 
 __all__ = ["map", "svg"]
 
 W, H, PAD = 640, 420, 24
 
 
-def _points(data):
+def _points(data: Any) -> List[Tuple[float, float, str]]:
     if hasattr(data, "to_dicts"):        # polars: to_dict() there gives columns and takes no "records"
         rows = data.to_dicts()
     elif hasattr(data, "to_dict"):       # pandas
@@ -34,7 +35,7 @@ def _points(data):
     return out
 
 
-def svg(data) -> str:
+def svg(data: Any) -> str:
     pts = _points(data)
     if not pts:
         return f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="60"><text x="10" y="30">no point to draw</text></svg>'
@@ -59,13 +60,13 @@ def svg(data) -> str:
 
 
 class _Map:
-    def __init__(self, data):
+    def __init__(self, data: Any) -> None:
         self.markup = svg(data)
 
-    def _repr_html_(self):
+    def _repr_html_(self) -> str:
         return self.markup
 
 
-def map(data):  # noqa: A001 - the name users expect
+def map(data: Any) -> _Map:  # noqa: A001 - the name users expect
     """A widget that shows itself in Jupyter (`_repr_html_`)."""
     return _Map(data)

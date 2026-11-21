@@ -7,7 +7,7 @@ An [MCP](https://modelcontextprotocol.io) server that lets an agent geocode addr
 No API key, no rate limit, and no query leaves the machine. The only network step is
 downloading a country sheet once, verified against the signed GridPin release.
 
-Countries (release v0.9.0): United States, Canada, Germany, France, Italy, Spain, Australia, Mexico, Netherlands, Brazil, Serbia.
+Countries (release v0.10.0): Australia, Brazil, Canada, France, Germany, Italy, Mexico, Netherlands, New Zealand, Poland, Serbia, Spain, United States.
 
 ## Add it to an agent
 
@@ -57,7 +57,7 @@ If GridPin is useful to you, [a star on GitHub](https://github.com/gridpin/gridp
 | Tool | What it does |
 |---|---|
 | `list_countries` | covered countries, sheet sizes, which are downloaded |
-| `download_sheet` | fetch one country sheet (32 MB to 1.5 GB) once, verify its SHA-256; the only tool that uses the network |
+| `download_sheet` | fetch one country sheet (29 MB to 1.5 GB) once, verify its SHA-256; the only tool that uses the network |
 | `geocode` | address text -> ranked candidates with `lat`, `lon`, `precision`, `confidence` |
 | `reverse` | coordinates -> nearest indexed addresses with `distance_m` |
 | `batch` | up to 1000 addresses of one country per call, in input order |

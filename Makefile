@@ -14,7 +14,7 @@ GEONAMES_MX=data/geonames_mx.txt
 # All recipes are phony (not files). Without this, a file named like a target (e.g. `smoke`)
 # in the working dir makes `make` consider the target up to date and silently skip the recipe — which
 # let the release check skip its provenance verification.
-.PHONY: spark-venv test-spark engine bindings duckdb-ext third-party-licenses fr nl it rs es br us mx au de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi mc smoke test test-py test-duckdb test-node langchain-venv test-langchain test-qgis qgis-plugin-zip http public-bench-contract public-bench
+.PHONY: spark-venv test-spark orchestrators-venv test-orchestrators test-java test-node-red photos-venv test-photos test-libreoffice engine bindings duckdb-ext third-party-licenses fr nl it rs es br us mx au pl nz de de-recovery de-recovery-attempt-3 de-regress de-regress-dirty fr-poi poi mc smoke test test-py test-duckdb test-node langchain-venv test-langchain test-qgis qgis-plugin-zip http public-bench-contract public-bench
 
 engine:
 	cargo build --release --manifest-path gridpin/Cargo.toml
@@ -79,6 +79,57 @@ spark-venv:
 test-spark: mc
 	test -x $(SPARK_PY) || { echo 'Run make spark-venv first'; exit 1; }
 	PYTHONPATH=integrations/spark/src PYSPARK_PYTHON=$$PWD/$(SPARK_PY) $(SPARK_PY) -m pytest integrations/spark/tests -q -p no:cacheprovider
+
+# gridpin-orchestrators (integrations/orchestrators): the step runs for real in Airflow, Dagster and Prefect, each in its
+# own venv (their pins clash; about 290, 160 and 210 MB), on the Monaco smoke sheet, compared byte for byte with the CLI.
+# The engine wheel comes from this tree (make bindings builds it; gridpin.files is new in 0.10).
+ORCHESTRATORS := apache-airflow dagster prefect
+orchestrators-venv: bindings
+	for p in $(ORCHESTRATORS); do \
+	  python3 -m venv .venv-orch-$$p && .venv-orch-$$p/bin/python -m pip install --quiet pytest $$p && \
+	  .venv-orch-$$p/bin/python -m pip install --quiet --force-reinstall --no-deps gridpin/target/wheels-dev/gridpin-*.whl || exit 1; \
+	  if [ "$(UNAME_S)" = Darwin ]; then .venv-orch-$$p/bin/python .github/macho_align.py \
+	    "$$(.venv-orch-$$p/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["platlib"])')"/gridpin/_gridpin.abi3.so; fi; \
+	done
+
+test-orchestrators: mc engine
+	for p in $(ORCHESTRATORS); do \
+	  test -x .venv-orch-$$p/bin/python || { echo 'Run make orchestrators-venv first'; exit 1; }; \
+	  PYTHONPATH=integrations/orchestrators/src GRIDPIN_TEST_SHEET=$$PWD/data/mc.bin GRIDPIN_TEST_BIN=$$PWD/gridpin/target/release/gridpin \
+	    .venv-orch-$$p/bin/python -m pytest integrations/orchestrators/tests -q -p no:cacheprovider || exit 1; \
+	done
+
+# GridPin for Java (integrations/java): the wrapper over gridpin-ffi with the FFM API of JDK 22+, built here and checked
+# against the CLI on the Monaco smoke sheet (needs java and javac 22 or later on PATH).
+test-java: mc engine
+	python3 integrations/java/test/run.py
+
+# node-red-contrib-gridpin (integrations/node-red): the node in a real Node-RED runtime against gridpin serve on the
+# Monaco smoke sheet. Node-RED and the test helper (about 130 MB) go to the package's own node_modules.
+test-node-red: mc engine
+	cd integrations/node-red && npm install --no-fund --silent && \
+	  export GRIDPIN_TEST_BIN=$$PWD/../../gridpin/target/release/gridpin GRIDPIN_TEST_SHEET=$$PWD/../../data/mc.bin && \
+	  node --test test/gridpin.test.mjs && npx mocha test/runtime.spec.cjs
+
+# gridpin-photos (integrations/photos): captions of place for a folder of photos, in its own venv (exifread, the engine
+# wheel of this tree from make bindings), against the Monaco smoke sheet.
+PHOTOS_PY := .venv-photos/bin/python
+photos-venv: bindings
+	python3 -m venv .venv-photos
+	$(PHOTOS_PY) -m pip install --quiet -r integrations/photos/requirements-test.txt
+	$(PHOTOS_PY) -m pip install --quiet --force-reinstall --no-deps gridpin/target/wheels-dev/gridpin-*.whl
+ifeq ($(UNAME_S),Darwin)
+	$(PHOTOS_PY) .github/macho_align.py "$$($(PHOTOS_PY) -c 'import sysconfig; print(sysconfig.get_paths()["platlib"])')"/gridpin/_gridpin.abi3.so
+endif
+
+test-photos: mc
+	test -x $(PHOTOS_PY) || { echo 'Run make photos-venv first'; exit 1; }
+	PYTHONPATH=integrations/photos/src $(PHOTOS_PY) -m pytest integrations/photos/tests -q -p no:cacheprovider
+
+# GridPin in LibreOffice Calc (integrations/libreoffice): the macro inside a real headless LibreOffice, a throwaway
+# profile, gridpin serve on the Monaco smoke sheet (SOFFICE names soffice when it is not in /Applications).
+test-libreoffice: mc engine
+	python3 integrations/libreoffice/test/run.py
 
 # GridPin Geocoder for QGIS (integrations/qgis): tests inside the official QGIS images
 # (LTR and current release, pinned tags in the script), against the Monaco smoke sheet.
@@ -244,6 +295,26 @@ au: engine
 	GRIDPIN_MEM=6GB nice -n 19 python3 prep/export_build.py data/au_norm.parquet data/build_au.csv.gz
 	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_au.csv.gz data/au.bin $(MODELS) --meta data/au_manifest.json
 
+# Poland (ANSWERS §317-§318): Overture 2026-10-21.0, the 16 voivodeship datasets of PRG; every row has a place and a
+# gmina, and a village without streets keeps its place name as the street (prep/overture.py); no GeoNames umbrella
+# (the rule pack's place table comes from eval/reference/pl).
+nz: RULES=$(if $(wildcard rules),--rules rules/nz,)
+nz: engine
+	nice -n 19 python3 prep/overture.py NZ
+	$(if $(wildcard rules),python3 prep/nz_rules.py,)
+	GRIDPIN_MEM=6GB nice -n 19 python3 prep/export_build.py data/nz_norm.parquet data/build_nz.csv.gz
+	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_nz.csv.gz data/nz.bin $(MODELS) --meta data/nz_manifest.json
+
+pl: RULES=$(if $(wildcard rules),--rules rules/pl,)
+# The known houses (Overture places at a house, ANSWERS §330) are read from the build input, so the rule pack follows it.
+pl: engine
+	nice -n 19 python3 prep/overture.py PL
+	GRIDPIN_MEM=6GB nice -n 19 python3 prep/export_build.py data/pl_norm.parquet data/build_pl.csv.gz
+	$(if $(wildcard rules),nice -n 19 python3 prep/known_houses.py PL data/build_pl.csv.gz eval/reference/pl/known_houses.tsv.gz,)
+	$(if $(wildcard rules),python3 prep/unfolded_words.py data/build_pl.csv.gz eval/reference/pl/unfolded_words.tsv.gz,)
+	$(if $(wildcard rules),python3 prep/pl_rules.py,)
+	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_pl.csv.gz data/pl.bin $(MODELS) --meta data/pl_manifest.json
+
 rs: engine
 	test -f $(GEONAMES_RS) || python3 prep/fetch_zip.py https://download.geonames.org/export/dump/RS.zip RS.txt $(GEONAMES_RS)
 	nice -n 19 python3 prep/overture.py RS $(GEONAMES_RS)
@@ -273,7 +344,8 @@ de-recovery-attempt-3: engine
 # The output directory is content-addressed by track, HEAD, and shipping-sheet
 # hash.  A repeated run is fail-closed unless the caller explicitly sets
 # DE_REGRESS_FORCE=1; the manifest records that overwrite event.
-DE_REGRESS_INDEX ?= data/de.bin
+# Since 0.10.0 the baseline is measured on the release sheet with Bavaria.
+DE_REGRESS_INDEX ?= data/de_next.bin
 DE_REGRESS_BASELINE ?= eval/de_regress_baseline.json
 DE_REGRESS_OUTPUT_ROOT ?= eval/work/de_regress
 DE_REGRESS_TIMEOUT ?= 3600
@@ -318,6 +390,16 @@ fr-poi: engine
 	nice -n 19 python3 prep/overture_places_layer.py FR
 	nice -n 19 python3 prep/export_build.py data/fr_poi_norm.parquet data/build_frpoi.csv.gz
 	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_frpoi.csv.gz data/fr_poi.bin $(MODELS) --meta data/frpoi_manifest.json
+
+# The same layer for any country: make poi COUNTRY=us [POI_RELEASE=2026-10-21.0] -> data/us_poi.bin
+POI_RELEASE ?= 2026-10-21.0
+POI_MEM ?= 6GB
+poi: engine
+	@test -n "$(COUNTRY)" || { echo "usage: make poi COUNTRY=<two-letter country code>"; exit 2; }
+	# the US layer groups ~10M places: DuckDB's default 3GB cannot hold that grouping (it does not spill)
+	GRIDPIN_MEM=$(POI_MEM) nice -n 19 python3 prep/overture_places_layer.py $(COUNTRY) --release $(POI_RELEASE)
+	nice -n 19 python3 prep/export_build.py data/$(COUNTRY)_poi_norm.parquet data/build_$(COUNTRY)poi.csv.gz
+	GRIDPIN_REQUIRE_META=1 nice -n 19 $(BIN) build data/build_$(COUNTRY)poi.csv.gz data/$(COUNTRY)_poi.bin $(MODELS) --meta data/$(COUNTRY)poi_manifest.json
 
 # Public smoke: a tiny country built from scratch — pipeline + engine on built-in defaults
 mc: engine

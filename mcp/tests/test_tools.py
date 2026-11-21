@@ -94,7 +94,7 @@ def test_batch_keeps_input_order_and_pairs_queries(session):
     (lambda s: s.batch([], "fr"), "non-empty list"),
     (lambda s: s.batch([ADDRESS, 5], "fr"), "must be a string"),
     (lambda s: s.batch([ADDRESS] * (tools.MAX_BATCH + 1), "fr"), "at most 1000"),
-    (lambda s: s.geocode(ADDRESS, "Poland"), "unknown country"),
+    (lambda s: s.geocode(ADDRESS, "Japan"), "unknown country"),
 ])
 def test_bad_input_is_a_tool_error_that_says_what_to_do(session, call, message):
     with pytest.raises(tools.ToolError) as err:

@@ -1,0 +1,23 @@
+# Dawarich Atlas with GridPin as its place search, instead of Photon.
+#
+# Atlas asks Photon for search (/api), reverse (/reverse) and readiness (/status). GridPin answers the same paths
+# under /photon, so Atlas only needs a new PHOTON_URL. Its compose.yml writes that value in place, so this overlay
+# sets it; the Photon, libpostal and Placeholder containers are not needed (Atlas works without the last two).
+#
+#   cd atlas                                   # a checkout of github.com/dawarich-app/atlas
+#   docker compose -f compose.yml -f /path/to/compose.gridpin.yaml up -d caddy app gridpin
+#
+# GRIDPIN_IMAGE picks the country (ghcr.io/gridpin/gridpin:<country code>). A sheet holds addresses, not shops or
+# cafes: a category search in Atlas gets an empty list, a search by name or address works.
+services:
+  app:
+    environment:
+      PHOTON_URL: ${GRIDPIN_PHOTON_URL:-http://gridpin:8080/photon}
+  gridpin:
+    image: ${GRIDPIN_IMAGE:-ghcr.io/gridpin/gridpin:rs}
+    # the GridPin images are built for linux/amd64; on Apple silicon Docker runs them under emulation
+    platform: linux/amd64
+    # object numbers (osm_type and osm_id) on every answer: Atlas builds the id of a result from them, and without
+    # them every result shares the empty id
+    command: ["--ids"]
+    restart: unless-stopped

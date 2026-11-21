@@ -48,8 +48,8 @@ def test_resolve_accepts_code_and_english_name_in_any_case():
 
 def test_resolve_unknown_country_lists_what_is_available():
     with pytest.raises(sheets.SheetError) as err:
-        sheets.resolve("pl")
-    assert "unknown country 'pl'" in str(err.value)
+        sheets.resolve("jp")
+    assert "unknown country 'jp'" in str(err.value)
     assert all(code in str(err.value) for code in sheets.SHEETS)
 
 

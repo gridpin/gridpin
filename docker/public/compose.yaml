@@ -1,0 +1,31 @@
+# GridPin on the internet behind a key: the geocoder and Caddy, which only gets the certificate and passes
+# requests on. Made by setup.sh, which writes .env (country, domain) and the key file; nothing here leaves
+# your machine but the certificate request Caddy makes to Let's Encrypt for your domain.
+#
+#   ./setup.sh                      # asks for the country and the domain, makes the key, starts both
+#   docker compose up -d            # later starts
+#
+# The engine's port is not published: only Caddy listens on 80/443.
+services:
+  gridpin:
+    image: ghcr.io/gridpin/gridpin:${GRIDPIN_COUNTRY:?set GRIDPIN_COUNTRY in .env}
+    command: ["--require-key", "--key-file", "/run/secrets/gridpin_key"]
+    secrets: [gridpin_key]
+    restart: unless-stopped
+    expose: ["8080"]
+  caddy:
+    # Caddy 2.11.9 (Apache-2.0), pinned by digest
+    image: caddy@sha256:4e2425f6009577e7c651010f16679c28f7d12df3e7b1914f941a7a3370746b3c
+    environment:
+      GRIDPIN_DOMAIN: ${GRIDPIN_DOMAIN:?set GRIDPIN_DOMAIN in .env}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [gridpin]
+    restart: unless-stopped
+secrets:
+  gridpin_key:
+    file: ./gridpin.key
+volumes:
+  caddy_data:

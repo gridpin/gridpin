@@ -1,0 +1,55 @@
+{
+ "table": "zensus2022_1km_excerpt",
+ "file": "zensus2022_1km_excerpt.csv",
+ "prefix": "zensus",
+ "key": {
+  "column": "GRD_ID",
+  "kind": "cell:eu1km",
+  "vintage": null
+ },
+ "take": {
+  "population": {
+   "as": "population",
+   "unit": "persons",
+   "missing": [
+    "–"
+   ]
+  },
+  "mean_age": {
+   "as": "mean_age",
+   "unit": "years",
+   "missing": [
+    "–"
+   ]
+  },
+  "owner_occupied_pct": {
+   "as": "owner_occupied_pct",
+   "unit": "percent of flats",
+   "missing": [
+    "–"
+   ]
+  },
+  "vacancy_pct": {
+   "as": "vacancy_pct",
+   "unit": "percent of flats",
+   "missing": [
+    "–"
+   ]
+  },
+  "net_rent_eur_m2": {
+   "as": "net_rent_eur_m2",
+   "unit": "EUR per m2 a month",
+   "missing": [
+    "–"
+   ]
+  }
+ },
+ "edition": "Zensus 2022 (reference day 2022-05-15), grid cells",
+ "publisher": "Statistische Ämter des Bundes und der Länder",
+ "source_url": "https://www.zensus2022.de/DE/Ergebnisse-des-Zensus/gitterzellen.html",
+ "read": "2026-11-19",
+ "licence": "Datenlizenz Deutschland – Namensnennung – Version 2.0 (dl-de/by-2-0)",
+ "attribution": "Statistische Ämter des Bundes und der Länder, Zensus 2022, dl-de/by-2-0, www.govdata.de/dl-de/by-2-0",
+ "coverage": "partial",
+ "caveat": "A value of the grid cell the address lies in; a cell absent from the table has no residents in the census. Not a value of the household or the person at the address. This file is a four-row excerpt for the example; the full table comes from the publisher."
+}

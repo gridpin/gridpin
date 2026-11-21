@@ -19,22 +19,24 @@ pub const CLASSES: &[(u8, &str)] = &[
     (26, "municipality_guard"), // optional municipality/region vocabulary
     (23, "city_tail"),          // optional tail grammar and exact-city guard
     (27, "commune_regions"), // optional city -> "REGION lat lon;…" (homonyms held by the tail's region)
-    (1, "commune_alias"),    // key → value
-    (2, "city_alias"),       // key → value
-    (3, "abbrev2"),          // key="a b" → full word
-    (4, "capitals"),         // list
+    (28, "known_houses"), // optional "street|commune" -> house numbers an Overture place stands at (prep/known_houses.py)
+    (29, "unfolded_words"), // optional query word written without "ł" -> the sheet's word (prep/unfolded_words.py)
+    (1, "commune_alias"),   // key → value
+    (2, "city_alias"),      // key → value
+    (3, "abbrev2"),         // key="a b" → full word
+    (4, "capitals"),        // list
     (5, "street_types_cyr"), // list (type padding/rotation — Cyrillic)
     (16, "street_types_latin"), // list (type padding — Latin)
     (17, "street_types_extra"), // list (type recognition only: nl/rs/uz…)
-    (6, "affix_extra"),      // list
-    (7, "noise"),            // list
-    (8, "noise_after"),      // list
-    (9, "region_markers"),   // list
-    (10, "countries_mid"),   // list
-    (11, "countries_tail"),  // list
-    (12, "place_junk"),      // list
-    (13, "place_prefix"),    // list
-    (14, "fr_ord_cities"),   // list
+    (6, "affix_extra"),     // list
+    (7, "noise"),           // list
+    (8, "noise_after"),     // list
+    (9, "region_markers"),  // list
+    (10, "countries_mid"),  // list
+    (11, "countries_tail"), // list
+    (12, "place_junk"),     // list
+    (13, "place_prefix"),   // list
+    (14, "fr_ord_cities"),  // list
     (15, "place_type_strip"), // list
 ];
 
@@ -44,6 +46,15 @@ pub struct Rules {
     /// Normalized city name -> "REGION lat lon;REGION lat lon…": where a city of that name lies in
     /// each region, so a tail naming the region can hold its homonyms (US, 21.10.2026).
     pub commune_regions: HashMap<String, String>,
+    /// Normalized "street|commune" -> the house numbers an Overture place stands at, space-separated: a cityless
+    /// homonym with a known house goes first (Poland, 14.11.2026; prep/known_houses.py). Older engines skip class 28.
+    pub known_houses: HashMap<String, String>,
+    /// The same table by street: normalized street -> its known houses, for a cityless query whose known house lies
+    /// in another commune than its top answer.
+    pub known_by_street: HashMap<String, Vec<KnownHouse>>,
+    /// A query word written without a letter normalization does not fold ("lodz") -> the sheet's word ("łodz"); read
+    /// before the query is parsed (Poland, 14.11.2026; prep/unfolded_words.py). Older engines skip class 29.
+    pub unfolded_words: HashMap<String, String>,
     pub recipient_prefixes: HashSet<String>,
     pub commune_alias: HashMap<String, String>,
     pub city_alias: Vec<(String, String)>,
@@ -96,6 +107,37 @@ impl Rules {
             }
             27 => {
                 self.commune_regions.insert(key, val);
+            }
+            28 => {
+                if let Some((street, commune)) = key.split_once('|') {
+                    // by the street and by each of its endings ("aleje jerozolimskie" -> also "jerozolimskie";
+                    // "legionów józefa piłsudskiego" -> also "józefa piłsudskiego", "piłsudskiego"): a query loses
+                    // the type word to the type rules and often writes the surname alone. An ending is taken when its
+                    // last word is longer than three letters.
+                    let words: Vec<&str> = street.split(' ').collect();
+                    let endings = (1..words.len())
+                        .map(|i| words[i..].join(" "))
+                        .filter(|e| e.rsplit(' ').next().is_some_and(|w| w.chars().count() > 3));
+                    let mut names: Vec<String> = vec![street.to_string()];
+                    names.extend(endings);
+                    for name in &names {
+                        let houses = self.known_by_street.entry(name.clone()).or_default();
+                        for item in val.split(' ').filter(|v| !v.is_empty()) {
+                            let (number, places, notable, near) = known_item(item);
+                            houses.push(KnownHouse {
+                                commune: commune.to_string(),
+                                number: number.to_string(),
+                                places,
+                                notable,
+                                near,
+                            });
+                        }
+                    }
+                }
+                self.known_houses.insert(key, val);
+            }
+            29 => {
+                self.unfolded_words.insert(key, val);
             }
             1 => {
                 self.commune_alias.insert(key, val);
@@ -419,6 +461,9 @@ fn defaults() -> Rules {
         municipality_guard: HashMap::new(),
         city_tail: HashMap::new(),
         commune_regions: HashMap::new(),
+        known_houses: HashMap::new(),
+        known_by_street: HashMap::new(),
+        unfolded_words: HashMap::new(),
         recipient_prefixes: HashSet::new(),
         commune_alias: HashMap::new(),
         city_alias: Vec::new(),
@@ -513,6 +558,29 @@ pub fn rules() -> &'static Rules {
 /// The rule set carried by one index section. A file whose section is absent, empty or
 /// truncated falls back to the built-in defaults rather than to a partial rule set.
 /// The returned reference lives as long as the process, like the index's mapping.
+/// A known house of a street (rules class 28): its commune, its number, the Overture places at its address, those
+/// of a notable kind, and the notable places within 50 m whatever their address (prep/known_houses.py).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownHouse {
+    pub commune: String,
+    pub number: String,
+    pub places: u32,
+    pub notable: u32,
+    pub near: u32,
+}
+
+/// One house of a `known_houses` value: "<number>:<places>:<notable>:<near>" (prep/known_houses.py; near: the notable
+/// places within 50 m whatever their address). An older table wrote fewer counts: the missing ones are one place and
+/// no notable one.
+pub fn known_item(item: &str) -> (&str, u32, u32, u32) {
+    let mut parts = item.split(':');
+    let number = parts.next().unwrap_or(item);
+    let places = parts.next().and_then(|p| p.parse().ok()).unwrap_or(1);
+    let notable = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let near = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    (number, places, notable, near)
+}
+
 pub fn from_section(bytes: &[u8]) -> &'static Rules {
     if bytes.len() < 4 {
         return defaults_static();

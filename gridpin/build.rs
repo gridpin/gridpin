@@ -31,18 +31,24 @@ fn main() {
     println!("cargo:rustc-env=GRIDPIN_GIT_SHA={ident}");
 
     // Re-run when HEAD moves (branch switch) AND when the CURRENT branch's ref moves (a commit does
-    // NOT change .git/HEAD's content — it stays `ref: refs/heads/<branch>` — so watching HEAD alone
-    // leaves the SHA stale after a commit, -cargo). Read HEAD from whichever `.git` layout
-    // exists (`../.git` in the exported public tree, `../../.git` in the monorepo) and watch the ref
-    // file it points at. A missing path is silently ignored by cargo.
-    for git_dir in ["../.git", "../../.git"] {
-        let head = Path::new(git_dir).join("HEAD");
-        if let Ok(content) = std::fs::read_to_string(&head) {
-            println!("cargo:rerun-if-changed={}", head.display());
-            if let Some(ref_path) = content.strip_prefix("ref: ").map(str::trim) {
-                println!("cargo:rerun-if-changed={git_dir}/{ref_path}");
-            }
-            println!("cargo:rerun-if-changed={git_dir}/packed-refs");
+    // NOT change HEAD's content — it stays `ref: refs/heads/<branch>` — so watching HEAD alone
+    // leaves the SHA stale after a commit, -cargo). Ask git where these files are instead of
+    // guessing `../.git`: in a linked worktree `.git` is a FILE, HEAD lives in
+    // `.git/worktrees/<name>/` and the branch ref in the common directory, so the guessed paths
+    // matched nothing and a commit left the previous stamp, `-dirty` included, in the next build.
+    // The index is watched too: staging or committing anywhere in the tree re-evaluates `-dirty`.
+    // Outside a checkout git answers nothing and nothing is watched, as before.
+    let mut watched = vec![
+        "HEAD".to_string(),
+        "packed-refs".to_string(),
+        "index".to_string(),
+    ];
+    if let Some(reference) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        watched.push(reference);
+    }
+    for name in watched {
+        if let Some(path) = git(&["rev-parse", "--git-path", &name]) {
+            println!("cargo:rerun-if-changed={path}");
         }
     }
 
@@ -52,6 +58,17 @@ fn main() {
     // STALE clean SHA and pass the strict provenance gate despite a dirty build. Watch every source
     // file so `-dirty` is recomputed on any edit. `Cargo.toml`/`build.rs` are watched implicitly.
     watch_tree(Path::new("src"));
+}
+
+/// One line of git's answer, or None outside a checkout or when git fails.
+fn git(args: &[&str]) -> Option<String> {
+    Command::new("git")
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Emit `rerun-if-changed` for every file under `dir`, recursively, so any source edit re-runs the

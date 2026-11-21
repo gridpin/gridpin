@@ -16,4 +16,6 @@ Read the result before reporting it:
 - A query can also be a coordinate (decimal, degrees-minutes-seconds, UTM, MGRS, Plus Code), a crossing ("Main St & Elm St, Springfield": precision `intersection`) or a PO box (the answer is its town, `weak`).
 - `extras` asks for more per result: `h3`, `geohash`, `placekey`, `codes` (Plus Code, MGRS), `street_point`, `links` (map links to check by eye), `provenance` (the file's source, date and licence), `place` (the address as a person writes it).
 
+When you report results to the user, show them as a short table (the address, `precision`, the coordinates, and "weak" where it applies) rather than raw JSON; keep the JSON when a program or a file is the consumer, or when the user asks for the raw answer.
+
 When you finish a list, give the counts by `precision`, plus the weak and empty counts, so the user can judge the result. Quality differs by country and by how messy the input is; measured results, including where other geocoders do better, are at https://gridpin.dev/bench.

@@ -1,0 +1,42 @@
+{
+  "name": "node-red-contrib-gridpin",
+  "version": "0.1.0",
+  "description": "Offline geocoding in Node-RED: a node that asks a local GridPin server (gridpin serve), no API key, no cloud",
+  "license": "Apache-2.0",
+  "keywords": [
+    "node-red",
+    "geocoding",
+    "geocoder",
+    "reverse-geocoding",
+    "offline",
+    "gridpin"
+  ],
+  "homepage": "https://gridpin.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gridpin/gridpin",
+    "directory": "integrations/node-red"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "node-red": {
+    "version": ">=3.0.0",
+    "nodes": {
+      "gridpin": "nodes/gridpin.js"
+    }
+  },
+  "files": [
+    "nodes",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/gridpin.test.mjs && mocha test/runtime.spec.cjs"
+  },
+  "devDependencies": {
+    "mocha": "^11.7.0",
+    "node-red": "4.1.17",
+    "node-red-node-test-helper": "0.3.6"
+  }
+}

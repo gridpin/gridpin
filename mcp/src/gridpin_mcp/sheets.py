@@ -21,10 +21,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-RELEASE = "v0.9.0"
+RELEASE = "v0.10.0"
 BASE_URL = "https://dl.gridpin.dev"
 # SHA-256 of sheets-receipt.json for RELEASE; the pins below are taken from that file.
-RECEIPT_SHA256 = "4870456f4396f1fd0457491fa3fc9eedbf2507fd38e6c40a837c986912fd5d41"
+RECEIPT_SHA256 = "0f7ee39d71c45043a3528e70315cbf3b6b54b15f009c3779d80906114f8411cd"
 
 CHUNK = 1 << 20
 # Free space required beyond the sheet itself, so a download never fills the disk.
@@ -53,8 +53,8 @@ SHEETS = {
               "234515843c54b6c4feb93ab83c7b023a3e14beec8357c6d570eeed0f66f35400"),
         Sheet("br", "Brazil", "brazil.bin", 676851417,
               "016e102debb05aafad0ae409c3a2acec478b60bb48b74d03210b80dc52d42a6d"),
-        Sheet("de", "Germany", "germany.bin", 213315143,
-              "c0ac3d0cbf3dbd480bff6aebd717e2df96e9f0a2eb4e83aeffde736fa42b18af"),
+        Sheet("de", "Germany", "germany.bin", 255661278,
+              "b48640c112ec83c77c3a514ec5fb2d28fe965fcf9c44de96982acfa532ee27eb"),
         Sheet("es", "Spain", "spain.bin", 185426996,
               "c671b9a46089e32580189ee3c5a65e024779691a50ab26e77f5639023994819b"),
         Sheet("mx", "Mexico", "mexico.bin", 155577589,
@@ -69,6 +69,10 @@ SHEETS = {
               "9e358bd6a940b290e01cd52081e476e2799513f16dd934dc6a5bc89ba4fb5388"),
         Sheet("au", "Australia", "australia.bin", 130385568,
               "6f19f33536894ff5b0d3444cee6d47ccc57a77a5170a3bcb01244114e68b3867"),
+        Sheet("pl", "Poland", "poland.bin", 106180784,
+              "c9e1f914ea2f627257ede5b221eb106b3173e12f6a549ce2312ecf40d74c76f7"),
+        Sheet("nz", "New Zealand", "new-zealand.bin", 28970578,
+              "d1918f73bba4d6f365d25e0abef7c9f3e7efba848d38c14a52c32696f1a1e2af"),
     )
 }
 

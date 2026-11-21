@@ -13,7 +13,7 @@ right far less often than the rest, so counting it would pass a column that does
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import Any, Iterable, List, Sequence
 
 from ._open import SheetLike, geocoder
 
@@ -45,7 +45,7 @@ def share_at_level(values: Sequence, sheet: SheetLike, level: str = "house") -> 
     return sum(ok) / len(ok) if ok else 1.0
 
 
-def pandera_check(sheet: SheetLike, level: str = "house", at_least: float = 1.0):
+def pandera_check(sheet: SheetLike, level: str = "house", at_least: float = 1.0) -> Any:
     """A pandera Check: the share of the column reaching `level` is at least `at_least`."""
     import pandera as pa
 
@@ -53,7 +53,7 @@ def pandera_check(sheet: SheetLike, level: str = "house", at_least: float = 1.0)
                     name=f"geocodes_to_{level}", error=f"fewer than {at_least:.0%} of the addresses reach {level}")
 
 
-def _column_values(data) -> list:
+def _column_values(data: Any) -> List[Any]:
     """The values a pandera check receives: a pandas Series, or `PolarsData(lazyframe, key)` under pandera.polars."""
     if hasattr(data, "lazyframe") and hasattr(data, "key"):
         return data.lazyframe.select(data.key).collect().to_series().to_list()

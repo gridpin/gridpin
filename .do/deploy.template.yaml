@@ -1,0 +1,25 @@
+# DigitalOcean App Platform template (published as .do/deploy.template.yaml; the "Deploy to DigitalOcean" button
+# reads it there). The key is left empty on purpose: paste one when the form asks (openssl rand -base64 32). Without
+# it the server refuses to start (GRIDPIN_REQUIRE_KEY=1), so a forgotten key never gives an open server.
+spec:
+  name: gridpin-rs
+  services:
+    - name: gridpin
+      image:
+        registry_type: GHCR
+        registry: gridpin
+        repository: gridpin
+        tag: rs
+      http_port: 8080
+      instance_size_slug: apps-s-1vcpu-0.5gb
+      instance_count: 1
+      health_check:
+        http_path: /health
+      envs:
+        - key: GRIDPIN_REQUIRE_KEY
+          value: "1"
+          scope: RUN_TIME
+        - key: GRIDPIN_SERVE_KEY
+          value: ""
+          type: SECRET
+          scope: RUN_TIME

@@ -9,7 +9,7 @@ sheet's sources (`gridpin meta <sheet>`); they name places, not people.
 from __future__ import annotations
 
 import random
-from typing import Optional
+from typing import Any, Optional
 
 from ._open import SheetLike, geocoder
 
@@ -25,7 +25,7 @@ class GridPinProvider:
     Other keyword arguments narrow the area, as in `gridpin sample`: city, postcode, near, bbox, region.
     """
 
-    def __init__(self, country: SheetLike, n: int = 1000, seed: Optional[int] = None, **area):
+    def __init__(self, country: SheetLike, n: int = 1000, seed: Optional[int] = None, **area: Any) -> None:
         self._rows = geocoder(country).sample(n, seed=seed, **area)
         if not self._rows:
             raise ValueError("no address in this area of the sheet")

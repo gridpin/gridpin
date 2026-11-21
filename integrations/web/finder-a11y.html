@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Address finder: accessibility check</title></head>
+<body>
+<h1>Address finder: accessibility check</h1>
+<p>Runs axe-core (WCAG 2.0, 2.1, 2.2 A and AA) on each state of the finder. Needs <code>npm install axe-core</code> in
+this folder and <code>gridpin serve</code> on the endpoint below. The result is in <code>window.result</code>.</p>
+<form>
+  <gridpin-address-finder endpoint="http://127.0.0.1:8090"></gridpin-address-finder>
+  <button type="submit">Continue</button>
+</form>
+<script src="node_modules/axe-core/axe.min.js"></script>
+<script type="module">
+import "./gridpin-address-finder.js";
+const tags = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"];
+const el = document.querySelector("gridpin-address-finder");
+const postcode = () => el.querySelector('input[autocomplete="postal-code"]');
+const check = async (state) => {
+  const r = await axe.run(el, { runOnly: { type: "tag", values: tags } });
+  return { state, violations: r.violations.map((v) => `${v.id} (${v.impact}): ${v.nodes.length}`), passes: r.passes.length };
+};
+const out = [await check("start")];
+el.querySelector("button").click();
+out.push(await check("postcode error"));
+postcode().value = new URLSearchParams(location.search).get("postcode") || "10117";
+await el.find();
+out.push(await check("list shown"));
+el.querySelector('input[type="radio"]').checked = true;
+el.use();
+out.push(await check("address chosen, fields filled"));
+postcode().value = "00000";
+await el.find();
+out.push(await check("no address found"));
+const status = () => el.querySelector('[role="status"]').textContent;
+const behaviour = { noneStatus: status() };
+postcode().value = new URLSearchParams(location.search).get("postcode") || "10117";
+await el.find();
+behaviour.focusAfterFind = document.activeElement.tagName;
+behaviour.foundStatus = status();
+behaviour.radiosOutsideForm = [...el.querySelectorAll('input[type="radio"]')].every((r) => r.form === null);
+el.querySelector('input[type="radio"]').checked = true;
+el.use();
+behaviour.submitted = [...new FormData(document.querySelector("form")).keys()];
+behaviour.autocomplete = [...el.querySelectorAll("input[autocomplete]")].map((i) => i.getAttribute("autocomplete"));
+el.setAttribute("endpoint", "http://127.0.0.1:1");
+await el.find();
+behaviour.downStatus = status();
+behaviour.manualShownWhenDown = !el.querySelector('[id$="-manual"]').hidden;
+out.push(await check("server down"));
+out.push({ behaviour });
+window.result = out;
+document.body.insertAdjacentHTML("beforeend", `<pre id="result">${JSON.stringify(out, null, 1)}</pre>`);
+</script>
+</body></html>

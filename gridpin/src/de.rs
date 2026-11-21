@@ -81,12 +81,25 @@ fn umlauts_to_digraphs(raw: &str) -> String {
     out
 }
 
+/// "ae", "oe", "ue" written for an umlaut never follow a vowel ("muenchen", "fuerth"); after a
+/// vowel the "e" is a letter of the name ("neuenburg", "bauer", "aue"). Folding those made
+/// "Neuenburg/Rhein" the Bavarian "Neunburg vorm Wald" once Bavaria joined the sheet (15.11.2026).
 fn ascii_digraphs_to_german(normalized: &str) -> String {
-    normalized
-        .replace("ae", "a")
-        .replace("oe", "o")
-        .replace("ue", "u")
-        .replace("ss", "ß")
+    let chars: Vec<char> = normalized.chars().collect();
+    let mut out = String::with_capacity(normalized.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        let after_vowel = i > 0 && matches!(chars[i - 1], 'a' | 'e' | 'i' | 'o' | 'u' | 'y');
+        if matches!(ch, 'a' | 'o' | 'u') && chars.get(i + 1) == Some(&'e') && !after_vowel {
+            out.push(ch);
+            i += 2;
+            continue;
+        }
+        out.push(ch);
+        i += 1;
+    }
+    out.replace("ss", "ß")
 }
 
 /// Preserve the second half of a German house-number range for the suffix
@@ -1339,6 +1352,21 @@ pub(crate) fn street_variants(phrase: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_digraph_after_a_vowel_is_a_letter_of_the_name_not_an_umlaut() {
+        assert_eq!(ascii_digraphs_to_german("muenchen"), "munchen");
+        assert_eq!(ascii_digraphs_to_german("fuerth"), "furth");
+        assert_eq!(ascii_digraphs_to_german("koeln"), "koln");
+        assert_eq!(ascii_digraphs_to_german("haenel strasse"), "hanel straße");
+        assert_eq!(
+            ascii_digraphs_to_german("neuenburg rhein"),
+            "neuenburg rhein"
+        );
+        assert_eq!(ascii_digraphs_to_german("bauerweg"), "bauerweg");
+        assert_eq!(ascii_digraphs_to_german("aue"), "aue");
+        assert_eq!(ascii_digraphs_to_german("neuenkirchen"), "neuenkirchen");
+    }
 
     #[test]
     fn orthography_is_bidirectional_and_composes() {

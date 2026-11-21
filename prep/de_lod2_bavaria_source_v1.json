@@ -1,0 +1,56 @@
+{
+ "schema": "gridpin-de-lod2-bavaria-source-card-v1",
+ "land": "DE-BY",
+ "provider": "Bayerische Vermessungsverwaltung (Landesamt für Digitalisierung, Breitband und Vermessung, LDBV)",
+ "attribution": "Bayerische Vermessungsverwaltung – www.geodaten.bayern.de",
+ "license": "CC BY 4.0",
+ "license_url": "https://creativecommons.org/licenses/by/4.0/deed.de",
+ "product": {
+  "name": "lod2",
+  "title": "3D-Gebäudemodelle (LoD2)",
+  "catalog_url": "https://geodaten.bayern.de/opengeodata/json/opengeodata_produkte.json",
+  "catalog_license_field": "CC BY 4.0|https://creativecommons.org/licenses/by/4.0/deed.de",
+  "catalog_snapshot": {
+   "path": "code/eval/work/bavaria_lod2_20261115/live/produkte.json",
+   "bytes": 231596,
+   "sha256": "904a3356a59ee83723076be134a457c957582be2012ae388df2740eb7acfea24",
+   "accessed_at": "2026-11-15"
+  }
+ },
+ "terms_snapshot": {
+  "url": "https://www.geodaten.bayern.de/odd/m/3/html/nutzungsbedingungen.html",
+  "path": "code/eval/work/bavaria_lod2_20261115/live/nutzungsbedingungen.html",
+  "bytes": 24851,
+  "sha256": "85f0f8409d049797b32f1de068495658f20336defc560481b90acf26b100a682",
+  "accessed_at": "2026-11-15",
+  "required_attribution_form": "Die Namensnennung der Bayerischen Vermessungsverwaltung als Rechteinhaberin hat in folgender Weise zu erfolgen: \"Bayerische Vermessungsverwaltung – www.geodaten.bayern.de\""
+ },
+ "release": {
+  "metalink_url": "https://geodaten.bayern.de/odd/a/lod2/citygml/meta/metalink/09.meta4",
+  "metalink_path": "code/data/de_by_lod2/09_20261110.meta4",
+  "metalink_bytes": 5724489,
+  "metalink_sha256": "f708a9f9b702fe0b0610b5ac9e2f51b1aefff8a41899735f758e797df5b7630d",
+  "published": "2026-11-10T22:10:04Z",
+  "tiles": 18297,
+  "tiles_accepted": 18297,
+  "fetch_ledger_sha256": "30ba6df4a00b9dd3ceaf0b362ff1f844094fe59f586ee6647751d4e123d789c8"
+ },
+ "canon": {
+  "path": "code/data/de_by_lod2.parquet",
+  "sha256": "898a4ed968fe1875fa079c0cd3d5cf052ef64fab92b2014deacafa882459f0e6",
+  "rows": 3576775,
+  "communes": 2072,
+  "non_bavarian_ags": 0
+ },
+ "transformations": [
+  "address read from the building attributes (xAL thoroughfare and locality) of the LoD2 CityGML tiles",
+  "point: area-weighted centroid of the building footprint, reprojected from ETRS89/UTM32 (EPSG:25832) to WGS84",
+  "street name and house number split; listed numbers expanded; '91/2' read as house 9 1/2",
+  "one row per address; of duplicate addresses the largest building is kept",
+  "normalized to the GridPin canonical address schema and indexed by GridPin; no postcodes"
+ ],
+ "warnings": [
+  "no postcode: the product carries none",
+  "the footprint and the address come from ALKIS, so a third-party point that is also ALKIS-derived is not an independent truth for these rows"
+ ]
+}

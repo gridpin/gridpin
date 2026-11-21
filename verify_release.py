@@ -184,7 +184,7 @@ def attestation_problems(directory: pathlib.Path, listed: dict[str, str],
     return problems
 
 
-CURRENT_RELEASE = "v0.9.0"
+CURRENT_RELEASE = "v0.10.0"
 # Changed only by the publication step, together with the site country row.
 PUBLISHED_RELEASE = "v0.9.0"
 # One catalogue for the standalone verifier and the private release tools.
@@ -222,6 +222,18 @@ RELEASE_COMPOSITIONS["v0.8.0"] = RELEASE_COMPOSITIONS["v0.7.1"] + (
 )
 # 0.9.0: the same twelve sheets as 0.8.0 (sheets frozen, owner 2026-11-07); new engine and integrations (§304).
 RELEASE_COMPOSITIONS["v0.9.0"] = RELEASE_COMPOSITIONS["v0.8.0"]
+# 0.10.0: Poland (ANSWERS §339, §342) and a places layer for every country, one file each (§333). The France layer of
+# 0.10.0 is the new build (fr_poi_next.bin, §337) under the same public name; the July file stays with the earlier releases.
+# Germany 0.10.0 is the sheet with Bavaria (LoD2, ANSWERS §339, §355): de_next.bin under the same public name, pipeline
+# de-next; the September de.bin stays with the earlier releases. New Zealand (§380, §381) joins with its places layer.
+_POI_COUNTRIES = ("au", "br", "ca", "de", "es", "it", "mx", "nl", "nz", "pl", "rs", "us")
+_NEXT_0100 = {"fr_poi.bin": ("fr_poi.bin", "fr_poi_next.bin", "fr", "poi", "fr-poi-next"),
+              "germany.bin": ("germany.bin", "de_next.bin", "de", "addresses", "de-next")}
+RELEASE_COMPOSITIONS["v0.10.0"] = tuple(
+    _NEXT_0100.get(row[0], row) for row in RELEASE_COMPOSITIONS["v0.9.0"]
+) + (("poland.bin", "pl.bin", "pl", "addresses", "pl"), ("new-zealand.bin", "nz.bin", "nz", "addresses", "nz")) + tuple(
+    (f"{cc}_poi.bin", f"{cc}_poi.bin", cc, "poi", f"{cc}-poi") for cc in _POI_COUNTRIES
+)
 LEGACY_RELEASE_BINDINGS = {
     "inputs-2026-08-15.manifest.json": "v0.1.0",
     "inputs-2026-08-18.manifest.json": "v0.1.0",

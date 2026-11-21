@@ -25,6 +25,8 @@ EXAMPLES: Dict[str, str] = {
     "fr": "8 Boulevard du Port, Amiens",
     "it": "Via del Corso 300, Roma",
     "br": "Avenida Paulista 1578, São Paulo",
+    "pl": "Rynek Główny 1, Kraków",
+    "nz": "1 Lambton Quay, Wellington",
 }
 # A point for the reverse tab: where each example address resolves.
 POINTS: Dict[str, tuple] = {
@@ -34,6 +36,7 @@ POINTS: Dict[str, tuple] = {
     "mx": (19.4290, -99.1622),
     "rs": (44.8155, 20.4594), "nl": (52.3771, 4.8980), "es": (40.4194, -3.6916), "de": (50.1107, 8.6819),
     "fr": (49.8974, 2.2901), "it": (41.9056, 12.4785), "br": (-23.5620, -46.6557),
+    "pl": (50.0614, 19.9365), "nz": (-41.2784, 174.7795),
 }
 COLUMNS = ["precision", "street", "housenumber", "commune", "postcode", "lat", "lon", "distance_m"]
 

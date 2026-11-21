@@ -584,3 +584,150 @@ fn every_csv_cell_of_with_is_the_json_field_of_its_own_column() {
     );
     assert_eq!(cell("gp_iso_mode"), "structured");
 }
+
+fn valhalla(bin: &Path, q: &str) -> std::process::Output {
+    Command::new(BIN)
+        .args([
+            "query",
+            bin.to_str().unwrap(),
+            q,
+            "-k",
+            "1",
+            "--format",
+            "valhalla",
+        ])
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_valhalla_location_is_the_street_point_with_the_house_on_display() {
+    let (_d, bin) = sheet("valhalla-both", &rows(40.0));
+    let out = valhalla(&bin, "grand rue 5 ville");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let loc = &line["locations"][0];
+    let hit = query(&bin, "grand rue 5 ville", Some("street_point"));
+    // the route goes to the street in front of the house; the house is handed back on display
+    assert_eq!(loc["lat"], hit["extras"]["street_point"]["lat"]);
+    assert_eq!(loc["lon"], hit["extras"]["street_point"]["lon"]);
+    assert_eq!(
+        (&loc["display_lat"], &loc["display_lon"]),
+        (&hit["lat"], &hit["lon"])
+    );
+    // Valhalla does not read `street` yet (valhalla/valhalla#6467): no field that does nothing
+    assert!(loc.get("street").is_none(), "{loc}");
+    assert_eq!(line["locations"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn without_houses_across_the_house_itself_is_the_location() {
+    let (_d, bin) = sheet("valhalla-one-sided", &rows(40.0));
+    let out = valhalla(&bin, "quai seul 3 ville");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let loc =
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["locations"][0].clone();
+    let hit = query(&bin, "quai seul 3 ville", None);
+    assert_eq!((&loc["lat"], &loc["lon"]), (&hit["lat"], &hit["lon"]));
+    assert!(
+        loc.get("display_lat").is_none() && loc.get("display_lon").is_none(),
+        "{loc}"
+    );
+}
+
+#[test]
+fn a_weak_or_missing_answer_is_no_location() {
+    let (_d, bin) = sheet("valhalla-refusals", &rows(40.0));
+    for (q, why) in [("ville", "weak"), ("zzzz qqqq", "no answer")] {
+        let out = valhalla(&bin, q);
+        assert!(!out.status.success(), "{q}: a location was written");
+        assert!(
+            out.stdout.is_empty(),
+            "{q}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(why),
+            "{q}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// `bench --by` (plan K8.1): the same figures for each value of a column, slices adding up to the whole, a slice
+/// under 300 rows marked a probe; `bench --answers` (K8.8): answers of another engine judged on the same truth.
+#[test]
+fn bench_slices_by_a_column_and_judges_answers_from_a_file() {
+    let (d, bin) = sheet("bench-by", &rows(40.0));
+    let truth = d.join("truth.csv");
+    std::fs::write(
+        &truth,
+        "id,address,lat,lon,kind\n\
+         a,grand rue 1 ville,43.7301797,7.42,school\n\
+         b,grand rue 1 ville,43.7391797,7.42,school\n\
+         c,nowhere 1,43.73,7.42,\n\
+         d,ville,43.73,7.42,church\n",
+    )
+    .unwrap();
+    let run = |extra: &[&str]| -> serde_json::Value {
+        let mut args = vec!["bench", bin.to_str().unwrap(), truth.to_str().unwrap()];
+        args.extend_from_slice(extra);
+        let out = Command::new(BIN).args(&args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let plain = run(&[]);
+    let by = run(&["--by", "kind"]);
+    assert_eq!(by["all"], plain, "the whole is the plain summary");
+    assert_eq!(by["by"]["school"]["rows"], 2);
+    assert_eq!(by["by"]["school"]["within_150m"], 1);
+    assert_eq!(by["by"]["(empty)"]["rows"], 1);
+    assert_eq!(by["by"]["school"]["probe"], true);
+    let sum: u64 = ["school", "church", "(empty)"]
+        .iter()
+        .map(|k| by["by"][k]["rows"].as_u64().unwrap())
+        .sum();
+    assert_eq!(sum, 4);
+
+    let answers = d.join("answers.csv");
+    // a is on the house, b 1 km off, c not answered, d absent; e is not in the input; a twice (the first counts)
+    std::fs::write(
+        &answers,
+        "id,lat,lon\na,43.7301797,7.42\nb,43.7391797,7.43\nc,,\ne,1,1\na,0,0\n",
+    )
+    .unwrap();
+    let judged = run(&["--answers", answers.to_str().unwrap()]);
+    assert_eq!(judged["all"]["rows"], 4);
+    assert_eq!(judged["all"]["answered"], 2);
+    assert_eq!(judged["all"]["within_150m"], 1);
+    assert!(
+        judged["all"].get("match_rate").is_none(),
+        "no levels in a file of points"
+    );
+    assert_eq!(judged["answer_rows_for_input"], 3);
+    assert_eq!(judged["ids_not_in_input"], 1);
+    assert_eq!(judged["duplicate_ids"], 1);
+    let missing_id = Command::new(BIN)
+        .args([
+            "bench",
+            bin.to_str().unwrap(),
+            truth.to_str().unwrap(),
+            "--by",
+            "nosuch",
+        ])
+        .output()
+        .unwrap();
+    assert!(!missing_id.status.success());
+}

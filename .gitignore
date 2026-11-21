@@ -40,3 +40,10 @@ public-bench-work/
 .venv-langchain/
 .venv-spark/
 integrations/qgis/gridpin_geocoder.zip
+.venv-orch-*/
+integrations/java/build/
+integrations/node-red/node_modules/
+integrations/node-red/package-lock.json
+.venv-photos/
+gridpin-tui/target/
+integrations/web/node_modules/

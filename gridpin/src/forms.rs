@@ -17,6 +17,7 @@ pub enum PointKind {
     Mgrs,
     PlusCode,
     Geohash,
+    Digipin,
 }
 
 impl PointKind {
@@ -28,6 +29,7 @@ impl PointKind {
             PointKind::Mgrs => "input_mgrs",
             PointKind::PlusCode => "input_plus_code",
             PointKind::Geohash => "input_geohash",
+            PointKind::Digipin => "input_digipin",
         }
     }
 }
@@ -62,7 +64,26 @@ pub fn point(q: &str) -> Option<(f64, f64, PointKind)> {
             return Some((lat, lon, PointKind::Geohash));
         }
     }
+    if digipin_text(t) {
+        if let Some((lat, lon)) = codes::digipin_decode(t) {
+            return Some((lat, lon, PointKind::Digipin));
+        }
+    }
     None
+}
+
+/// A whole query that is a DIGIPIN: ten symbols in a row, or in groups of 3, 3 and 4 joined by a hyphen or a space
+/// (the form before 2026-05-04), with at least one digit and one letter, so a number or a word is never one. Read
+/// after the geohash: a lowercase string that is both stays a geohash, as it was.
+fn digipin_text(t: &str) -> bool {
+    let groups: Vec<&str> = t.split(['-', ' ']).collect();
+    let shape = match groups.as_slice() {
+        [one] => one.len() == 10,
+        [a, b, c] => a.len() == 3 && b.len() == 3 && c.len() == 4,
+        _ => false,
+    };
+    let s: String = groups.concat();
+    shape && s.bytes().any(|b| b.is_ascii_digit()) && s.bytes().any(|b| b.is_ascii_alphabetic())
 }
 
 /// "48.8566, 2.3522", "48.8566 2.3522", "48.8566N 2.3522E", "-33.85 151.21": two numbers, each with a decimal
@@ -414,6 +435,30 @@ pub fn crossing(q: &str) -> Option<Crossing> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_digipin_is_read_only_as_the_whole_query() {
+        use super::{point, PointKind};
+        let kind = |q: &str| point(q).map(|p| p.2);
+        assert_eq!(kind("4T396F42L7"), Some(PointKind::Digipin));
+        assert_eq!(kind("39J-49L-L8T4"), Some(PointKind::Digipin));
+        assert_eq!(kind("39J 49L L8T4"), Some(PointKind::Digipin));
+        let (lat, lon, _) = point("39J49LL8T4").unwrap();
+        assert!((lat - 28.622793).abs() < 1e-6 && (lon - 77.213049).abs() < 1e-6);
+        // a number, a word, a code with a foreign letter, another grouping, or a code inside an address: not a DIGIPIN
+        for q in [
+            "2345678923",
+            "FLJKMPTCFL",
+            "39J49LL8TA",
+            "39J4-9LL-8T4",
+            "39J49LL8T4 Delhi",
+            "Flat 39J49LL8T4",
+        ] {
+            assert_ne!(kind(q), Some(PointKind::Digipin), "{q}");
+        }
+        // a lowercase string that is also a geohash stays a geohash
+        assert_eq!(kind("4t396f42k7"), Some(PointKind::Geohash));
+    }
+
     use super::*;
 
     #[test]

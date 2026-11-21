@@ -2,11 +2,8 @@
 //!
 //! Three dialects on one port. The Google path (`/maps/api/geocode/json`, see `google.rs`) answers in the shape
 //! of the Google Geocoding API. The native API (`/v1/geocode`, `/v1/reverse`) answers `{"results": [...]}` with
-//! exactly the hits `gridpin batch` writes. The Nominatim-compatible paths (`/search`, `/reverse`, `/status`)
-//! answer in the shape Nominatim documents (`docs/api/Output.md`, checked 2026-11-01), so a client written for
-//! Nominatim (geopy, Leaflet Control Geocoder) only needs a new base URL. Fields we do not have are left out,
-//! never invented: no `osm_type` / `osm_id`, no polygons. `extratags=1` carries `match_level` and
-//! `match_status`, which Nominatim has no field for.
+//! exactly the hits `gridpin batch` writes. The Nominatim-compatible paths (`/search`, `/reverse`, `/status`, see
+//! `nominatim.rs`) answer in the shape Nominatim documents. Fields we do not have are left out, never invented.
 //!
 //! HTTP is a deliberately small HTTP/1.1 subset on `std::net`, with no dependency: GET, POST and OPTIONS,
 //! a body only with `Content-Length`, one request per connection (`Connection: close`), bounded header and
@@ -23,8 +20,17 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Map, Value};
 
 use crate::aliases;
+use crate::ban;
+use crate::census;
 use crate::extras::Extras;
 use crate::google;
+use crate::nominatim;
+pub(crate) use crate::nominatim::half_width;
+pub use crate::nominatim::{
+    display_name, nominatim_list, nominatim_place, place_id, Dialect, Show,
+};
+use crate::pelias;
+use crate::photon;
 use crate::query::{self, Hit, Index};
 
 /// Request header block limit (request line plus headers).
@@ -50,6 +56,11 @@ pub struct Engine {
     pub aliases: Option<crate::aliases::Aliases>,
     /// `--sheets`: more country sheets beside `addr`, each with its country code and its answer flag
     pub others: Vec<Sheet>,
+    /// `--ids`: answers of the Nominatim and Photon paths carry `osm_type`/`osm_id`, a number made from the answer
+    /// (`locator.rs`), for clients that will not take an answer without one
+    pub ids: bool,
+    /// `--postcode-layer`: full postcodes to streets (Brazil's eight-digit CEP), asked when a query is only a code
+    pub postcodes: Option<crate::postcode_layer::PostcodeLayer>,
 }
 
 /// One more country sheet of a server that answers several countries.
@@ -87,7 +98,7 @@ fn country_flag(cc: &str) -> &'static str {
     Box::leak(format!("country_{cc}").into_boxed_str())
 }
 
-fn meta_of(index: &Index, key: &str) -> String {
+pub(crate) fn meta_of(index: &Index, key: &str) -> String {
     index
         .meta()
         .iter()
@@ -126,7 +137,7 @@ impl Engine {
     }
 
     /// Every sheet of the server, the main one first. With one sheet its pick carries no flag.
-    fn picks(&self) -> Vec<Pick<'_>> {
+    pub(crate) fn picks(&self) -> Vec<Pick<'_>> {
         let several = !self.others.is_empty();
         std::iter::once(Pick {
             index: &self.addr,
@@ -146,7 +157,7 @@ impl Engine {
     }
 
     /// Does the server have a sheet of this country (lower case)?
-    fn serves(&self, cc: &str) -> bool {
+    pub(crate) fn serves(&self, cc: &str) -> bool {
         self.country == cc || self.others.iter().any(|o| o.country == cc)
     }
 
@@ -240,7 +251,7 @@ impl Engine {
 }
 
 /// Great-circle distance in metres, to compare the nearest answers of two sheets.
-fn metres(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+pub(crate) fn metres(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
     let a = ((p2 - p1) / 2.0).sin().powi(2)
         + p1.cos() * p2.cos() * ((lon2 - lon1).to_radians() / 2.0).sin().powi(2);
@@ -280,6 +291,8 @@ impl Engine {
             attribution: meta("attribution"),
             aliases: None,
             others: Vec::new(),
+            ids: false,
+            postcodes: None,
             addr,
             poi,
         })
@@ -319,8 +332,112 @@ pub trait Gate: Send + Sync {
 pub struct NoGate;
 impl Gate for NoGate {}
 
+/// The shortest shared key the open server takes: 24 characters (the setup script makes 43 from 32 random bytes).
+pub const MIN_KEY_CHARS: usize = 24;
+/// The environment variable a host's secret sets the key in; the command line never carries it (`ps` shows arguments).
+pub const KEY_ENV: &str = "GRIDPIN_SERVE_KEY";
+/// `1` here is `--require-key`: a host template sets it, so a secret left unset cannot start an open server.
+pub const REQUIRE_KEY_ENV: &str = "GRIDPIN_REQUIRE_KEY";
+/// The Google-compatible path, whose clients pass the key only as `key=` in the address, as Google's own API takes it.
+const GOOGLE_PATH: &str = "/maps/api/geocode/json";
+
+/// One shared key for a server on the open internet (ANSWERS §359): every request but `/health` carries
+/// `Authorization: Bearer <key>` (on the Google-compatible path also `key=`), otherwise 401 and the engine does not see
+/// it. It counts nothing, limits nothing and logs nothing: several keys, daily limits and a log are `gridpin-pro serve`.
+pub struct KeyGate {
+    key: Vec<u8>,
+}
+
+impl KeyGate {
+    /// The gate of `key`; refuses a key shorter than `MIN_KEY_CHARS` or one with spaces or control characters.
+    pub fn new(key: &str) -> Result<KeyGate> {
+        if key.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            bail!("the key has a space or a control character; make a random one: openssl rand -base64 32");
+        }
+        if key.chars().count() < MIN_KEY_CHARS {
+            bail!(
+                "the key is shorter than {MIN_KEY_CHARS} characters; make a random one: openssl rand -base64 32"
+            );
+        }
+        Ok(KeyGate {
+            key: key.as_bytes().to_vec(),
+        })
+    }
+
+    fn accepts(&self, given: &str) -> bool {
+        same_key(&self.key, given.as_bytes())
+    }
+}
+
+/// Equal keys, compared in a time that depends only on the length of the expected key, not on where they differ.
+fn same_key(expected: &[u8], given: &[u8]) -> bool {
+    let mut diff = u8::from(expected.len() != given.len());
+    for (i, e) in expected.iter().enumerate() {
+        diff |= e ^ given.get(i).copied().unwrap_or(!e);
+    }
+    diff == 0
+}
+
+/// The token of `Bearer <token>`: the scheme in any case, one space, the rest as it stands.
+fn bearer_token(header: &str) -> Option<&str> {
+    let (scheme, token) = header.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("bearer").then_some(token)
+}
+
+impl Gate for KeyGate {
+    fn before(&self, req: &Request) -> Option<Response> {
+        if req.path == "/health" {
+            return None;
+        }
+        if req
+            .authorization
+            .as_deref()
+            .and_then(bearer_token)
+            .is_some_and(|t| self.accepts(t))
+        {
+            return None;
+        }
+        if req.path == GOOGLE_PATH {
+            if req.param("key").is_some_and(|k| self.accepts(k)) {
+                return None;
+            }
+            return Some(Response::json(
+                200,
+                &json!({"results": [], "status": "REQUEST_DENIED", "error_message": "The provided API key is invalid."}),
+            ));
+        }
+        // one answer for any path, so a refused request learns nothing of the routes or the sheet
+        Some(Response::error(401, "send Authorization: Bearer <key>"))
+    }
+}
+
+/// The key of `gridpin serve`: from `GRIDPIN_SERVE_KEY` (`env_key`) or the first line of `--key-file`, never both;
+/// none is an open server unless `require` (`--require-key`, `GRIDPIN_REQUIRE_KEY=1`), which refuses to start.
+pub fn key_gate(
+    env_key: Option<String>,
+    key_file: Option<&std::path::Path>,
+    require: bool,
+) -> Result<Option<KeyGate>> {
+    let env_key = env_key.filter(|k| !k.is_empty());
+    let key = match (env_key, key_file) {
+        (Some(_), Some(_)) => bail!("both {KEY_ENV} and --key-file are set; keep one"),
+        (Some(k), None) => Some(k),
+        (None, Some(path)) => {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("cannot read the key file {}", path.display()))?;
+            Some(text.lines().next().unwrap_or("").to_string())
+        }
+        (None, None) => None,
+    };
+    match key {
+        Some(k) => KeyGate::new(&k).map(Some),
+        None if require => bail!("no key: set {KEY_ENV} or --key-file (--require-key is on)"),
+        None => Ok(None),
+    }
+}
+
 impl Request {
-    fn param(&self, name: &str) -> Option<&str> {
+    pub(crate) fn param(&self, name: &str) -> Option<&str> {
         self.query
             .iter()
             .find(|(k, _)| k == name)
@@ -335,7 +452,7 @@ pub struct Response {
 }
 
 impl Response {
-    fn json(status: u16, value: &Value) -> Response {
+    pub(crate) fn json(status: u16, value: &Value) -> Response {
         Response {
             status,
             content_type: "application/json; charset=utf-8",
@@ -352,7 +469,7 @@ impl Response {
     pub fn error(status: u16, message: &str) -> Response {
         Response::json(status, &json!({ "error": message }))
     }
-    fn text(status: u16, body: String) -> Response {
+    pub(crate) fn text(status: u16, body: String) -> Response {
         Response {
             status,
             content_type: "text/plain; charset=utf-8",
@@ -469,234 +586,83 @@ fn reason(status: u16) -> &'static str {
         200 => "OK",
         204 => "No Content",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         411 => "Length Required",
         413 => "Payload Too Large",
+        422 => "Unprocessable Content",
         414 => "URI Too Long",
+        429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
         _ => "Internal Server Error",
     }
 }
 
 pub fn write_response(out: &mut impl Write, resp: &Response) -> std::io::Result<()> {
+    write_response_allowing(out, resp, None)
+}
+
+/// The headers a browser asks to send (`Access-Control-Request-Headers` of a preflight), allowed back as asked, the
+/// way public Nominatim answers (13.11.2026: `content-type,user-agent` asked, the same allowed). Only a list of
+/// header names is repeated; anything else falls back to `Content-Type`, so the request cannot write a header of its
+/// own into the answer.
+pub fn allowed_headers(asked: Option<&str>) -> &str {
+    match asked.map(str::trim) {
+        Some(list)
+            if !list.is_empty()
+                && list.len() <= 512
+                && list
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_, ".contains(&b))
+                && list.bytes().any(|b| b.is_ascii_alphanumeric()) =>
+        {
+            list
+        }
+        _ => "Content-Type",
+    }
+}
+
+/// `write_response` with the header names a preflight asked for (see `allowed_headers`).
+pub fn write_response_allowing(
+    out: &mut impl Write,
+    resp: &Response,
+    asked_headers: Option<&str>,
+) -> std::io::Result<()> {
     write!(
         out,
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\
-         Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\
+         Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: {}\r\n{}\
          Connection: close\r\n\r\n",
         resp.status,
         reason(resp.status),
         resp.content_type,
-        resp.body.len()
+        resp.body.len(),
+        allowed_headers(asked_headers),
+        // every 401 of the server is a missing or wrong key (RFC 9110 §11.6.1)
+        if resp.status == 401 {
+            "WWW-Authenticate: Bearer\r\n"
+        } else {
+            ""
+        }
     )?;
     out.write_all(&resp.body)?;
     out.flush()
 }
 
-/// Half-width of the Nominatim `boundingbox` by precision: a door, a street, a town.
-pub(crate) fn half_width(precision: &str) -> f64 {
-    match precision {
-        "house" | "interp" | "near" | "poi" | "intersection" => 0.0005,
-        "city" => 0.05,
-        _ => 0.005,
-    }
-}
-
-fn place_type(precision: &str) -> &'static str {
-    match precision {
-        "house" | "interp" | "near" => "house",
-        "city" => "city",
-        "poi" => "poi",
-        _ => "street",
-    }
-}
-
-fn place_rank(precision: &str) -> u32 {
-    match precision {
-        "house" | "interp" | "near" | "poi" => 30,
-        "city" => 16,
-        _ => 26,
-    }
-}
-
-/// A stable id from the answer itself (FNV-1a over coordinates and address), kept below 2^53 so every JSON
-/// reader holds it exactly. Like Nominatim's own `place_id`, it is not meant to outlive the sheet release.
-pub fn place_id(h: &Hit) -> u64 {
-    let key = format!(
-        "{:.7},{:.7},{},{}",
-        h.lat,
-        h.lon,
-        h.street,
-        h.housenumber.as_deref().unwrap_or("")
-    );
-    let mut x: u64 = 0xcbf29ce484222325;
-    for b in key.bytes() {
-        x ^= u64::from(b);
-        x = x.wrapping_mul(0x100000001b3);
-    }
-    x & ((1 << 53) - 1)
-}
-
-/// "1600 Pennsylvania Avenue Northwest, Washington, 20500" — the parts the answer has, comma-separated.
-pub fn display_name(h: &Hit) -> String {
-    let street = match &h.housenumber {
-        Some(n) if !h.street.is_empty() => format!("{n} {}", h.street),
-        _ => h.street.clone(),
-    };
-    [
-        street,
-        h.commune.clone(),
-        h.region.clone().unwrap_or_default(),
-        h.postcode.clone(),
-    ]
-    .into_iter()
-    .filter(|s| !s.is_empty())
-    .collect::<Vec<_>>()
-    .join(", ")
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Dialect {
-    Json,
-    JsonV2,
-    GeoJson,
-}
-
-impl Dialect {
-    /// `format=`; absent means `jsonv2` (Nominatim's documented default for search). XML and the rest are refused.
-    pub fn parse(format: Option<&str>) -> std::result::Result<Dialect, String> {
-        match format.unwrap_or("jsonv2") {
-            "json" => Ok(Dialect::Json),
-            "jsonv2" => Ok(Dialect::JsonV2),
-            "geojson" => Ok(Dialect::GeoJson),
-            other => Err(format!(
-                "format={other} is not supported: use json, jsonv2 or geojson"
-            )),
-        }
-    }
-}
-
-/// The optional blocks of a Nominatim answer: `addressdetails=1`, `extratags=1`.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub struct Show {
-    pub address_details: bool,
-    pub extra_tags: bool,
-}
-
-/// One answer as a Nominatim place object (`json` / `jsonv2`) or as GeoJSON feature properties.
-pub fn nominatim_place(
-    h: &Hit,
-    dialect: Dialect,
-    show: Show,
-    country: &str,
-    licence: &str,
-) -> Value {
-    let w = half_width(h.precision);
-    let mut o = Map::new();
-    o.insert("place_id".into(), json!(place_id(h)));
-    if dialect != Dialect::GeoJson {
-        o.insert("licence".into(), json!(licence));
-        o.insert("lat".into(), json!(format!("{:.7}", h.lat)));
-        o.insert("lon".into(), json!(format!("{:.7}", h.lon)));
-        o.insert(
-            "boundingbox".into(),
-            json!([
-                format!("{:.7}", h.lat - w),
-                format!("{:.7}", h.lat + w),
-                format!("{:.7}", h.lon - w),
-                format!("{:.7}", h.lon + w)
-            ]),
-        );
-    }
-    let class_key = if dialect == Dialect::Json {
-        "class"
-    } else {
-        "category"
-    };
-    o.insert(class_key.into(), json!("place"));
-    o.insert("type".into(), json!(place_type(h.precision)));
-    if dialect != Dialect::Json {
-        o.insert("place_rank".into(), json!(place_rank(h.precision)));
-    }
-    // the f32 as it prints (0.94), not its widened f64 (0.9399999976158142)
-    o.insert(
-        "importance".into(),
-        json!(h.confidence.to_string().parse::<f64>().unwrap_or(0.0)),
-    );
-    o.insert("display_name".into(), json!(display_name(h)));
-    if show.extra_tags {
-        let (level, status) = query::match_level(h);
-        o.insert(
-            "extratags".into(),
-            json!({ "match_level": level, "match_status": status.to_string() }),
-        );
-    }
-    if show.address_details {
-        let mut a = Map::new();
-        if let Some(n) = &h.housenumber {
-            a.insert("house_number".into(), json!(n));
-        }
-        for (key, value) in [
-            ("road", &h.street),
-            ("city", &h.commune),
-            ("postcode", &h.postcode),
-        ] {
-            if !value.is_empty() {
-                a.insert(key.into(), json!(value));
-            }
-        }
-        if let Some(r) = &h.region {
-            a.insert("state".into(), json!(r));
-        }
-        if !country.is_empty() {
-            a.insert("country_code".into(), json!(country));
-        }
-        o.insert("address".into(), Value::Object(a));
-    }
-    Value::Object(o)
-}
-
-fn geojson_feature(h: &Hit, show: Show, country: &str, licence: &str) -> Value {
-    let w = half_width(h.precision);
-    json!({
-        "type": "Feature",
-        "properties": nominatim_place(h, Dialect::GeoJson, show, country, licence),
-        "bbox": [h.lon - w, h.lat - w, h.lon + w, h.lat + w],
-        "geometry": { "type": "Point", "coordinates": [h.lon, h.lat] }
-    })
-}
-
-/// A list of answers as Nominatim returns them for `/search`.
-pub fn nominatim_list(
-    hits: &[Hit],
-    dialect: Dialect,
-    show: Show,
-    country: &str,
-    licence: &str,
-) -> Value {
-    match dialect {
-        Dialect::GeoJson => json!({
-            "type": "FeatureCollection",
-            "licence": licence,
-            "features": hits.iter().map(|h| geojson_feature(h, show, country, licence)).collect::<Vec<_>>()
-        }),
-        _ => Value::Array(
-            hits.iter()
-                .map(|h| nominatim_place(h, dialect, show, country, licence))
-                .collect(),
-        ),
-    }
-}
-
-fn flag(req: &Request, name: &str, default: bool) -> bool {
+pub(crate) fn flag(req: &Request, name: &str, default: bool) -> bool {
     match req.param(name) {
         Some(v) => v == "1" || v.eq_ignore_ascii_case("true"),
         None => default,
     }
 }
 
-fn count(req: &Request, name: &str, default: usize) -> std::result::Result<usize, Response> {
+pub(crate) fn count(
+    req: &Request,
+    name: &str,
+    default: usize,
+) -> std::result::Result<usize, Response> {
     match req.param(name) {
         None => Ok(default),
         Some(v) => match v.parse::<usize>() {
@@ -709,29 +675,15 @@ fn count(req: &Request, name: &str, default: usize) -> std::result::Result<usize
     }
 }
 
-fn coordinate(req: &Request, name: &str) -> std::result::Result<f64, Response> {
+pub(crate) fn coordinate(req: &Request, name: &str) -> std::result::Result<f64, Response> {
     req.param(name)
         .ok_or_else(|| Response::error(400, &format!("missing {name}")))?
         .parse::<f64>()
         .map_err(|_| Response::error(400, &format!("{name} must be a number")))
 }
 
-/// Free-form `q`, or the structured search fields joined as one free-form query.
-fn search_text(req: &Request) -> Option<String> {
-    if let Some(q) = req.param("q") {
-        return Some(q.to_string());
-    }
-    let parts: Vec<&str> = ["street", "city", "county", "state", "postalcode", "country"]
-        .iter()
-        .filter_map(|k| req.param(k))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    (!parts.is_empty()).then(|| parts.join(", "))
-}
-
 /// Run an engine call; a panic inside it is counted and answers as empty.
-fn guarded<T>(counters: &Counters, empty: T, f: impl FnOnce() -> T) -> T {
+pub(crate) fn guarded<T>(counters: &Counters, empty: T, f: impl FnOnce() -> T) -> T {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| {
         counters.panics.fetch_add(1, Ordering::Relaxed);
         empty
@@ -742,13 +694,19 @@ fn guarded<T>(counters: &Counters, empty: T, f: impl FnOnce() -> T) -> T {
 /// is read as its address) among the countries `asked` allows; on a server of several sheets the hits carry
 /// `country_<cc>`. The choice travels with the call, never in a thread-local: `POST /v1/geocode` answers on the rayon
 /// pool, whose threads saw no `country=` (revision 0.9.0: 4 answers of 200 instead of 181).
-fn geocode<'a>(
+pub(crate) fn geocode<'a>(
     engine: &'a Engine,
     counters: &Counters,
     q: &str,
     k: usize,
     asked: &[String],
 ) -> (Vec<Hit>, Pick<'a>) {
+    if let Some(layer) = &engine.postcodes {
+        let hits = layer.hits(q, k);
+        if !hits.is_empty() {
+            return (hits, engine.pick(q, asked));
+        }
+    }
     let mut chosen = None;
     let hits = aliases::answer(engine.aliases.as_ref(), q, |text| {
         let p = engine.pick(text, asked);
@@ -761,6 +719,31 @@ fn geocode<'a>(
     })
     .0;
     (hits, chosen.unwrap_or_else(|| engine.pick(q, asked)))
+}
+
+/// The answers to one line nearest a point (`near=` of the native API, `lat`/`lon` of Photon): the engine's own bias
+/// toward the point; an alias is read as its address and marked, the sheet chosen as `geocode` chooses it.
+pub(crate) fn geocode_near<'a>(
+    engine: &'a Engine,
+    counters: &Counters,
+    q: &str,
+    k: usize,
+    lat: f64,
+    lon: f64,
+    asked: &[String],
+) -> std::result::Result<(Vec<Hit>, Pick<'a>), String> {
+    let alias = engine.aliases.as_ref().and_then(|table| table.find(q));
+    let line = alias.map_or(q, |alias| alias.address.as_str());
+    let p = engine.pick(line, asked);
+    let mut hits = guarded(counters, Ok(Vec::new()), || {
+        query::query_cascade_near(p.index, p.poi, line, k, lat, lon)
+    })?;
+    if alias.is_some() {
+        hits.iter_mut()
+            .for_each(|h| h.flags.push(aliases::ALIAS_FLAG));
+    }
+    p.mark(&mut hits);
+    Ok((hits, p))
 }
 
 /// The hits of the native API: as they are, and with `alias_name` when the query was a name.
@@ -778,12 +761,15 @@ fn native_hits(engine: &Engine, q: &str, hits: &[Hit]) -> Value {
 }
 
 /// `with=` of a request read against the sheet; a bad spec is a 400.
-fn extras_of(engine: &Engine, raw: Option<&str>) -> std::result::Result<Option<Extras>, Response> {
+pub(crate) fn extras_of(
+    engine: &Engine,
+    raw: Option<&str>,
+) -> std::result::Result<Option<Extras>, Response> {
     Extras::new(raw, &engine.addr).map_err(|e| Response::error(400, &e.to_string()))
 }
 
 /// `with=` read against the sheet that answered (its provenance card); the spec was checked by `extras_of` before.
-fn extras_on(raw: Option<&str>, p: &Pick) -> Option<Extras> {
+pub(crate) fn extras_on(raw: Option<&str>, p: &Pick) -> Option<Extras> {
     Extras::new(raw, p.index).ok().flatten()
 }
 
@@ -810,7 +796,13 @@ fn results_with(
 /// `extras` on each place of a Nominatim or Google answer, in hit order: the array itself, the
 /// `features[i].properties` of GeoJSON, or the `results` of Google (which also gets its own `plus_code`
 /// field when codes are asked for). A single place object (Nominatim reverse) takes it directly.
-fn attach_extras(answer: &mut Value, hits: &[Hit], extras: &Extras, idx: &Index, q: Option<&str>) {
+pub(crate) fn attach_extras(
+    answer: &mut Value,
+    hits: &[Hit],
+    extras: &Extras,
+    idx: &Index,
+    q: Option<&str>,
+) {
     let places: Vec<&mut Value> = match answer {
         Value::Array(items) => items.iter_mut().collect(),
         Value::Object(o) if o.contains_key("features") => o["features"]
@@ -846,7 +838,7 @@ fn attach_extras(answer: &mut Value, hits: &[Hit], extras: &Extras, idx: &Index,
     }
 }
 
-fn too_long(q: &str) -> Option<Response> {
+pub(crate) fn too_long(q: &str) -> Option<Response> {
     (q.len() > query::MAX_QUERY_BYTES)
         .then(|| Response::error(414, &format!("query over {} bytes", query::MAX_QUERY_BYTES)))
 }
@@ -880,14 +872,25 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     (
         "GET",
         "/v1/suggest",
-        "streets that start as the typed text: q, k",
+        "streets that start as the typed text: q, k, near (lat,lon: nearby streets first)",
     ),
     (
         "GET",
         "/v1/exists",
         "does an address exist: yes, maybe or no and why",
     ),
+    (
+        "GET",
+        "/v1/addresses",
+        "the addresses of a postcode, optionally of one house number: postcode, number, limit",
+    ),
     ("GET", "/v1/explain", "why the engine answered as it did"),
+    (
+        "GET",
+        "/geocoding/v5/{mode}/{query}.json",
+        "Mapbox Geocoding v5 search and reverse: mode mapbox.places, query text or lon,lat; limit, proximity, \
+         autocomplete, country, types",
+    ),
     ("GET", "/search", "Nominatim-compatible search"),
     ("GET", "/search.php", "Nominatim-compatible search"),
     ("GET", "/reverse", "Nominatim-compatible reverse"),
@@ -896,10 +899,121 @@ pub const ROUTES: &[(&str, &str, &str)] = &[
     ("GET", "/status.php", "Nominatim-compatible status"),
     (
         "GET",
+        "/nominatim/search",
+        "Nominatim-compatible search under its own prefix",
+    ),
+    (
+        "GET",
+        "/nominatim/search.php",
+        "Nominatim-compatible search under its own prefix",
+    ),
+    (
+        "GET",
+        "/nominatim/reverse",
+        "Nominatim-compatible reverse under its own prefix",
+    ),
+    (
+        "GET",
+        "/nominatim/reverse.php",
+        "Nominatim-compatible reverse under its own prefix",
+    ),
+    (
+        "GET",
+        "/nominatim/status",
+        "Nominatim-compatible status under its own prefix",
+    ),
+    (
+        "GET",
+        "/nominatim/status.php",
+        "Nominatim-compatible status under its own prefix",
+    ),
+    (
+        "GET",
         "/maps/api/geocode/json",
         "a subset of the Google Geocoding API shape",
     ),
+    (
+        "GET",
+        "/lookup",
+        "Nominatim-compatible lookup of the numbers of --ids",
+    ),
+    (
+        "GET",
+        "/lookup.php",
+        "Nominatim-compatible lookup of the numbers of --ids",
+    ),
+    (
+        "GET",
+        "/nominatim/lookup",
+        "Nominatim-compatible lookup under its own prefix",
+    ),
+    (
+        "GET",
+        "/nominatim/lookup.php",
+        "Nominatim-compatible lookup under its own prefix",
+    ),
+    ("GET", "/photon/api", "Photon-compatible search"),
+    ("GET", "/photon/api/", "Photon-compatible search"),
+    ("GET", "/photon/reverse", "Photon-compatible reverse"),
+    ("GET", "/photon/reverse/", "Photon-compatible reverse"),
+    ("GET", "/photon/status", "Photon-compatible status"),
+    ("GET", "/pelias/v1/search", "Pelias-compatible search"),
+    (
+        "GET",
+        "/pelias/v1/autocomplete",
+        "Pelias-compatible autocomplete",
+    ),
+    ("GET", "/pelias/v1/reverse", "Pelias-compatible reverse"),
+    ("GET", "/pelias/v1/place", "Pelias-compatible place by gid"),
+    ("GET", "/ban/search", "BAN (Addok)-compatible search"),
+    ("GET", "/ban/search/", "BAN (Addok)-compatible search"),
+    ("GET", "/ban/reverse", "BAN (Addok)-compatible reverse"),
+    ("GET", "/ban/reverse/", "BAN (Addok)-compatible reverse"),
+    (
+        "GET",
+        "/census/geocoder/locations/onelineaddress",
+        "US Census Geocoder-compatible one-line search",
+    ),
+    (
+        "GET",
+        "/census/geocoder/locations/address",
+        "US Census Geocoder-compatible search by parts",
+    ),
+    (
+        "POST",
+        "/census/geocoder/locations/addressbatch",
+        "US Census Geocoder-compatible batch (multipart addressFile, CSV out)",
+    ),
+    (
+        "POST",
+        "/census/geocoder/locations/onelineaddress",
+        "the Census batch posted to the one-line path (tidygeocoder posts to the URL it was given)",
+    ),
+    (
+        "POST",
+        "/census/geocoder/locations/address",
+        "the Census batch posted to the by-parts path (tidygeocoder posts to the URL it was given)",
+    ),
+    (
+        "GET",
+        "/ws/{cep}/json/",
+        "a CEP in the shape of ViaCEP, with lat and lon (needs --postcode-layer)",
+    ),
 ];
+
+/// The path a request is routed by: a ViaCEP path `/ws/<cep>/json/` is one route whatever the code.
+fn route_path(path: &str) -> &str {
+    match path
+        .strip_prefix("/ws/")
+        .map(|rest| rest.split('/').collect::<Vec<_>>())
+    {
+        Some(parts) if matches!(parts.as_slice(), [_, "json"] | [_, "json", ""]) => {
+            "/ws/{cep}/json/"
+        }
+        _ if crate::mapbox::parse_path(path).is_some() => crate::mapbox::ROUTE,
+        _ => path,
+    }
+}
 
 /// Answer one request. Pure apart from the engine call, so the routes are testable without a socket.
 pub fn route(engine: &Engine, counters: &Counters, req: &Request) -> Response {
@@ -912,17 +1026,37 @@ pub fn route(engine: &Engine, counters: &Counters, req: &Request) -> Response {
         };
     }
     let post = req.method == "POST";
-    if req.method != "GET" && !(post && matches!(req.path.as_str(), "/v1/geocode" | "/v1/extract"))
-    {
-        return Response::error(405, "use GET (POST only for /v1/geocode and /v1/extract)");
+    let post_path = matches!(req.path.as_str(), "/v1/geocode" | "/v1/extract")
+        || req.path.starts_with("/census/geocoder/locations/");
+    if req.method != "GET" && !(post && post_path) {
+        return Response::error(
+            405,
+            "use GET (POST only for /v1/geocode, /v1/extract and the Census batch)",
+        );
     }
     // `country=` of the native paths matters only to a server of several sheets; one sheet answers as before, whatever
     // is asked. The Nominatim and Google paths read their own parameters (`countrycodes`, a structured `country` that
     // is a country name, `components=country:`), see `search` and `google_geocode`.
     let foreign = matches!(
         req.path.as_str(),
-        "/search" | "/search.php" | "/reverse" | "/reverse.php" | "/maps/api/geocode/json"
-    );
+        "/search"
+            | "/search.php"
+            | "/reverse"
+            | "/reverse.php"
+            | "/nominatim/search"
+            | "/nominatim/search.php"
+            | "/nominatim/reverse"
+            | "/nominatim/reverse.php"
+            | "/lookup"
+            | "/lookup.php"
+            | "/nominatim/lookup"
+            | "/nominatim/lookup.php"
+            | "/photon/api"
+            | "/photon/api/"
+            | "/photon/reverse"
+            | "/photon/reverse/"
+            | "/maps/api/geocode/json"
+    ) || route_path(&req.path) == crate::mapbox::ROUTE;
     let mut asked = Vec::new();
     if let Some(cc) = req
         .param("country")
@@ -938,7 +1072,7 @@ pub fn route(engine: &Engine, counters: &Counters, req: &Request) -> Response {
         asked.push(cc);
     }
     let asked = asked.as_slice();
-    let result = match req.path.as_str() {
+    let result = match route_path(&req.path) {
         "/" => Ok(Response::text(200, home(engine))),
         "/health" => Ok(Response::json(200, &health(engine, counters))),
         "/ui" => Ok(Response {
@@ -952,6 +1086,7 @@ pub fn route(engine: &Engine, counters: &Counters, req: &Request) -> Response {
         "/v1/reverse" => v1_reverse(engine, counters, req, asked),
         "/v1/suggest" => v1_suggest(engine, counters, req),
         "/v1/exists" => v1_exists(engine, counters, req, asked),
+        "/v1/addresses" => v1_addresses(engine, counters, req),
         "/v1/explain" => req
             .param("q")
             .ok_or_else(|| Response::error(400, "missing q"))
@@ -964,45 +1099,89 @@ pub fn route(engine: &Engine, counters: &Counters, req: &Request) -> Response {
                     }),
                 )
             }),
-        "/search" | "/search.php" => search(engine, counters, req).and_then(|r| jsonp(req, r)),
-        "/reverse" | "/reverse.php" => reverse(engine, counters, req).and_then(|r| jsonp(req, r)),
-        "/status" | "/status.php" => Ok(status(engine, req)),
+        "/search" | "/search.php" | "/nominatim/search" | "/nominatim/search.php" => {
+            nominatim::search(engine, counters, req).and_then(|r| nominatim::jsonp(req, r))
+        }
+        "/reverse" | "/reverse.php" | "/nominatim/reverse" | "/nominatim/reverse.php" => {
+            nominatim::reverse(engine, counters, req).and_then(|r| nominatim::jsonp(req, r))
+        }
+        "/status" | "/status.php" | "/nominatim/status" | "/nominatim/status.php" => {
+            Ok(nominatim::status(engine, req))
+        }
         "/maps/api/geocode/json" => Ok(google_geocode(engine, counters, req)),
+        "/lookup" | "/lookup.php" | "/nominatim/lookup" | "/nominatim/lookup.php" => {
+            nominatim::lookup(engine, counters, req).and_then(|r| nominatim::jsonp(req, r))
+        }
+        "/photon/api" | "/photon/api/" => Ok(photon::api(engine, counters, req)),
+        "/photon/reverse" | "/photon/reverse/" => Ok(photon::reverse(engine, counters, req)),
+        "/photon/status" => Ok(photon::status(engine)),
+        crate::mapbox::ROUTE => Ok(crate::mapbox::geocoding(engine, counters, req)),
+        "/pelias/v1/search" => Ok(pelias::search(engine, counters, req)),
+        "/pelias/v1/autocomplete" => Ok(pelias::autocomplete(engine, counters, req)),
+        "/pelias/v1/reverse" => Ok(pelias::reverse(engine, counters, req)),
+        "/pelias/v1/place" => Ok(pelias::place(engine, counters, req)),
+        "/ban/search" | "/ban/search/" => Ok(ban::search(engine, counters, req)),
+        "/ban/reverse" | "/ban/reverse/" => Ok(ban::reverse(engine, counters, req)),
+        // tidygeocoder posts the batch to the URL it was given, so each `locations` path takes the batch by POST
+        "/census/geocoder/locations/addressbatch"
+        | "/census/geocoder/locations/onelineaddress"
+        | "/census/geocoder/locations/address"
+            if post =>
+        {
+            Ok(census::batch(engine, counters, req))
+        }
+        "/census/geocoder/locations/onelineaddress" => Ok(census::oneline(engine, counters, req)),
+        "/census/geocoder/locations/address" => Ok(census::address(engine, counters, req)),
+        p if p.starts_with("/census/geocoder/geographies/") => Ok(census::geographies()),
+        "/ws/{cep}/json/" => viacep(engine, &req.path),
         _ => Err(Response::error(404, "no such path; see / for the list")),
     };
     result.unwrap_or_else(|r| r)
 }
 
-/// Nominatim's `json_callback`: the answer wrapped as `name(…)` for a client that loads it as a script — the search box
-/// of ipyleaflet and leafmap (leaflet-search sends `json_callback` by default, ANSWERS §300). The name is a dotted
-/// JavaScript identifier and nothing else, so the parameter cannot inject a script; an error is answered as JSON.
-fn jsonp(req: &Request, r: Response) -> std::result::Result<Response, Response> {
-    let Some(name) = req.param("json_callback") else {
-        return Ok(r);
-    };
-    let identifier = |part: &str| {
-        let mut chars = part.chars();
-        chars
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
-            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-    };
-    if name.len() > 128 || !name.split('.').all(identifier) {
-        return Err(Response::error(
-            400,
-            "json_callback must be a JavaScript name",
-        ));
+/// `/ws/<cep>/json/` in the shape of ViaCEP (viacep.com.br, read 17.11.2026): eight digits or the 400 ViaCEP gives a
+/// malformed code; a code the layer lacks is `{"erro": "true"}` with 200, as ViaCEP answers. Fields the layer does not
+/// hold (bairro, ibge, ddd…) are empty strings, the point is added as `lat` and `lon`. A code of several streets
+/// answers the street with most houses; `/v1/geocode?q=<cep>&k=5` lists them all.
+fn viacep(engine: &Engine, path: &str) -> std::result::Result<Response, Response> {
+    let layer = engine.postcodes.as_ref().ok_or_else(|| {
+        Response::error(
+            404,
+            "no postcode layer: start the server with --postcode-layer",
+        )
+    })?;
+    let raw = path
+        .trim_start_matches("/ws/")
+        .split('/')
+        .next()
+        .unwrap_or("");
+    let code: String = raw.chars().filter(|c| *c != '-').collect();
+    if code.len() != 8 || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(Response::error(400, "a CEP is eight digits"));
     }
-    let mut body = Vec::with_capacity(r.body.len() + name.len() + 2);
-    body.extend_from_slice(name.as_bytes());
-    body.push(b'(');
-    body.extend_from_slice(&r.body);
-    body.push(b')');
-    Ok(Response {
-        status: r.status,
-        content_type: "application/javascript; charset=utf-8",
-        body,
-    })
+    let Some(r) = layer.lookup(&code).into_iter().next() else {
+        return Ok(Response::json(200, &json!({ "erro": "true" })));
+    };
+    Ok(Response::json(
+        200,
+        &json!({
+            "cep": crate::postcode_layer::display(r.code),
+            "logradouro": r.street,
+            "complemento": "",
+            "unidade": "",
+            "bairro": r.district,
+            "localidade": r.city,
+            "uf": r.region,
+            "estado": "",
+            "regiao": "",
+            "ibge": "",
+            "gia": "",
+            "ddd": "",
+            "siafi": "",
+            "lat": r.lat,
+            "lon": r.lon,
+        }),
+    ))
 }
 
 /// The page of `/ui`: drop a CSV, get it back geocoded; one file, no outside resource (the CSV code is inlined).
@@ -1036,7 +1215,7 @@ fn home(engine: &Engine) -> String {
          GET  /v1/geocode?q=...&k=1[&near=lat,lon]   {{\"results\": [...]}}\n\
          POST /v1/geocode  {{\"queries\": [...], \"k\": 1}}   {{\"results\": [[...], ...]}}  (a query: text or {{\"street\", \"housenumber\", \"city\", \"region\", \"postcode\"}})\n\
          GET  /v1/reverse?lat=...&lon=...&k=1\n\
-         GET  /v1/suggest?q=...&k=8   streets that start as the typed text, for an address field\n\
+         GET  /v1/suggest?q=...&k=8   streets that start as the typed text, for an address field (near=lat,lon: nearby first)\n\
          GET  /ui   a page: drop a CSV, get it back geocoded\n\
          POST /v1/extract  {{\"text\": \"...\", \"verify\": false}}   addresses found in a free text\n\
          (every path takes with=h3,geohash,placekey,codes,street_point,links,provenance: an `extras` object per answer)\n\
@@ -1052,6 +1231,26 @@ fn home(engine: &Engine) -> String {
 }
 
 fn health(engine: &Engine, counters: &Counters) -> Value {
+    let mut out = health_core(engine, counters);
+    if let Some(layer) = &engine.postcodes {
+        let meta = |k: &str| {
+            layer
+                .meta
+                .iter()
+                .find(|(key, _)| key == k)
+                .map_or("", |(_, v)| v.as_str())
+                .to_string()
+        };
+        out["postcode_layer"] = json!({
+            "rows": layer.len(),
+            "country": meta("country"),
+            "release": meta("release"),
+        });
+    }
+    out
+}
+
+fn health_core(engine: &Engine, counters: &Counters) -> Value {
     json!({
         "status": if counters.ready.load(Ordering::Acquire) { "ok" } else { "warming" },
         "engine": env!("CARGO_PKG_VERSION"),
@@ -1103,21 +1302,17 @@ fn v1_geocode(
                     Some((a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))
                 })
                 .ok_or_else(|| Response::error(400, "near must be LAT,LON"))?;
-            let alias = engine.aliases.as_ref().and_then(|table| table.find(q));
-            let line = alias.map_or(q, |alias| alias.address.as_str());
-            let p = engine.pick(line, asked);
-            let mut hits = guarded(counters, Ok(Vec::new()), || {
-                query::query_cascade_near(p.index, p.poi, line, k, lat, lon)
-            })
-            .map_err(|e| Response::error(400, &e))?;
-            if alias.is_some() {
-                hits.iter_mut()
-                    .for_each(|h| h.flags.push(aliases::ALIAS_FLAG));
-            }
-            p.mark(&mut hits);
-            (hits, p)
+            geocode_near(engine, counters, q, k, lat, lon, asked)
+                .map_err(|e| Response::error(400, &e))?
         }
     };
+    // `format=valhalla` is the only format of this path; any other value is left unread, as before it existed
+    if req.param("format") == Some("valhalla") {
+        return Ok(match crate::valhalla::location(&hits, pick.index) {
+            Ok(line) => Response::json(200, &line),
+            Err(why) => Response::error(422, &why),
+        });
+    }
     if let Some(e) = extras_on(req.param("with"), &pick) {
         return Ok(results_with(engine, &e, Some(q), &hits, pick.index));
     }
@@ -1451,6 +1646,116 @@ fn v1_geocode_many(
 
 /// Streets that start as the typed text does, for an address field (`<gridpin-address>`). Nothing is kept: no
 /// session, no count per caller; the answer depends on `q` and `k` only.
+/// Rows of a postcode read before the number filter: a postcode with more houses than this asks for a number.
+const ADDRESSES_SCAN: u64 = 20_000;
+
+fn same_number(asked: &str, house: &str) -> bool {
+    let norm = |s: &str| {
+        s.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_lowercase()
+    };
+    let (a, h) = (norm(asked), norm(house));
+    // "27" finds 27, 27a and 27 bis; "27a" finds 27a only
+    !a.is_empty()
+        && (h == a
+            || (h.starts_with(&a) && !h[a.len()..].starts_with(|c: char| c.is_ascii_digit())))
+}
+
+/// `GET /v1/addresses?postcode=&number=&limit=`: the houses of a postcode, for an address finder (postcode, then a
+/// list to choose from). `more` says the list was cut: ask for the house number.
+fn v1_addresses(
+    engine: &Engine,
+    counters: &Counters,
+    req: &Request,
+) -> std::result::Result<Response, Response> {
+    let postcode = req
+        .param("postcode")
+        .map(|p| p.trim().to_uppercase())
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| Response::error(400, "missing postcode"))?;
+    if let Some(r) = too_long(&postcode) {
+        return Err(r);
+    }
+    let typed = req.param("number").map(str::trim).filter(|n| !n.is_empty());
+    if let Some(r) = typed.and_then(too_long) {
+        return Err(r);
+    }
+    // "4", "16a", or the street with it ("Goethestraße 4", "4 Main St"): where a postcode covers many streets, the
+    // street words narrow the list; the number is the word that starts with a digit
+    let (number, street_words) = match typed {
+        None => (None, Vec::new()),
+        Some(t) => {
+            let words: Vec<&str> = t.split_whitespace().collect();
+            let number = words
+                .iter()
+                .find(|w| w.starts_with(|c: char| c.is_ascii_digit()))
+                .copied();
+            let rest: Vec<String> = words
+                .iter()
+                .filter(|w| Some(**w) != number)
+                .map(|w| crate::norm::normalize(w))
+                .filter(|w| !w.is_empty())
+                .collect();
+            (number, rest)
+        }
+    };
+    let limit = count(req, "limit", 20)?;
+    let area = crate::query::Area {
+        postcode: Some(postcode),
+        ..Default::default()
+    };
+    let rows = guarded(counters, (Vec::new(), false), || {
+        let Ok((filter, _)) = engine.addr.house_filter(&area) else {
+            return (Vec::new(), false);
+        };
+        let (rows, _) = engine.addr.houses(&filter, Some(ADDRESSES_SCAN));
+        let mut kept: Vec<_> = rows
+            .into_iter()
+            .filter(|r| number.is_none_or(|n| same_number(n, &r.housenumber)))
+            .filter(|r| {
+                street_words.is_empty() || {
+                    let street = crate::norm::normalize(&r.street);
+                    street_words.iter().all(|w| street.contains(w.as_str()))
+                }
+            })
+            .collect();
+        let more = kept.len() > limit;
+        kept.truncate(limit);
+        (kept, more)
+    });
+    let (rows, more) = rows;
+    // the sheet's own order: "12 Main Street" where it writes the number first, "Hauptstraße 12" elsewhere
+    let number_first = engine.addr.number_first();
+    let addresses: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let parts = if number_first {
+                [r.housenumber.as_str(), r.street.as_str()]
+            } else {
+                [r.street.as_str(), r.housenumber.as_str()]
+            };
+            let street = parts
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let label = [street.as_str(), r.postcode.as_str(), r.commune.as_str()]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ");
+            json!({"label": label, "lat": r.lat, "lon": r.lon, "street": r.street, "housenumber": r.housenumber,
+                   "postcode": r.postcode, "commune": r.commune, "region": r.region})
+        })
+        .collect();
+    Ok(Response::json(
+        200,
+        &json!({ "addresses": addresses, "more": more }),
+    ))
+}
+
 fn v1_suggest(
     engine: &Engine,
     counters: &Counters,
@@ -1463,12 +1768,26 @@ fn v1_suggest(
         return Err(r);
     }
     let k = count(req, "k", 8)?;
-    let found = guarded(counters, Vec::new(), || engine.addr.suggest(q, k));
+    // near=lat,lon: streets near the user first; a point that is not two numbers in range is an error, not ignored
+    let near = match req.param("near") {
+        None => None,
+        Some(v) => Some(
+            v.split_once(',')
+                .and_then(|(a, b)| {
+                    Some((a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))
+                })
+                .filter(|(lat, lon)| (-90.0..=90.0).contains(lat) && (-180.0..=180.0).contains(lon))
+                .ok_or_else(|| Response::error(400, "near: lat,lon in degrees"))?,
+        ),
+    };
+    let found = guarded(counters, Vec::new(), || {
+        engine.addr.suggest_near(q, k, near)
+    });
     Ok(Response::json(200, &json!({ "suggestions": found })))
 }
 
 /// The nearest addresses of a point on every path (native, Nominatim, Google): see `Engine::reverse_pick`.
-fn reverse_hits<'a>(
+pub(crate) fn reverse_hits<'a>(
     engine: &'a Engine,
     counters: &Counters,
     lat: f64,
@@ -1496,68 +1815,6 @@ fn v1_reverse(
         return Ok(results_with(engine, &e, None, &hits, pick.index));
     }
     Ok(Response::json(200, &json!({ "results": hits })))
-}
-
-/// The countries a Nominatim search allows: `countrycodes=` (ISO codes, comma-separated) and, on a server of several
-/// sheets, the structured `country=`, which Nominatim documents as a country name ("Serbia"; a code is read too).
-/// `None` allows every sheet; `Some(empty)` means no sheet of this server is allowed, and the answer is empty.
-fn search_countries(engine: &Engine, req: &Request) -> Option<Vec<String>> {
-    let mut allowed: Option<Vec<String>> = req.param("countrycodes").and_then(|codes| {
-        let codes: Vec<String> = codes
-            .split(',')
-            .map(|c| c.trim().to_ascii_lowercase())
-            .filter(|c| !c.is_empty())
-            .collect();
-        (!codes.is_empty()).then_some(codes)
-    });
-    let structured = req.param("q").is_none() && !engine.others.is_empty();
-    if let Some(name) = req
-        .param("country")
-        .map(str::trim)
-        .filter(|n| structured && !n.is_empty())
-    {
-        let code = crate::country_names::code_of(name).or_else(|| {
-            let lower = name.to_ascii_lowercase();
-            (lower.len() == 2 && engine.serves(&lower)).then_some(lower)
-        });
-        // a name the shared table does not know restricts nothing: it stays in the text of the query
-        if let Some(cc) = code {
-            allowed = Some(match allowed {
-                Some(codes) => codes.into_iter().filter(|c| *c == cc).collect(),
-                None => vec![cc],
-            });
-        }
-    }
-    allowed.map(|codes| codes.into_iter().filter(|c| engine.serves(c)).collect())
-}
-
-fn search(
-    engine: &Engine,
-    counters: &Counters,
-    req: &Request,
-) -> std::result::Result<Response, Response> {
-    let dialect = Dialect::parse(req.param("format")).map_err(|e| Response::error(400, &e))?;
-    let q = search_text(req).ok_or_else(|| Response::error(400, "missing q"))?;
-    if let Some(r) = too_long(&q) {
-        return Err(r);
-    }
-    let limit = count(req, "limit", 10)?;
-    let show = Show {
-        address_details: flag(req, "addressdetails", false),
-        extra_tags: flag(req, "extratags", false),
-    };
-    extras_of(engine, req.param("with"))?;
-    let (hits, pick) = match search_countries(engine, req) {
-        Some(codes) if codes.is_empty() => (Vec::new(), engine.picks()[0]),
-        Some(codes) => geocode(engine, counters, &q, limit, &codes),
-        None => geocode(engine, counters, &q, limit, &[]),
-    };
-    // the country and the licence of the sheet that answered, not of the main sheet
-    let mut answer = nominatim_list(&hits, dialect, show, pick.country, pick.attribution);
-    if let Some(e) = extras_on(req.param("with"), &pick) {
-        attach_extras(&mut answer, &hits, &e, pick.index, Some(&q));
-    }
-    Ok(Response::json(200, &answer))
 }
 
 /// `GET /maps/api/geocode/json`: `address` or `latlng`, with `components` narrowing a forward query. A
@@ -1623,60 +1880,6 @@ fn google_geocode(engine: &Engine, counters: &Counters, req: &Request) -> Respon
     answer(&hits, Some(&line), &pick)
 }
 
-fn reverse(
-    engine: &Engine,
-    counters: &Counters,
-    req: &Request,
-) -> std::result::Result<Response, Response> {
-    let dialect = Dialect::parse(req.param("format")).map_err(|e| Response::error(400, &e))?;
-    let (lat, lon) = (coordinate(req, "lat")?, coordinate(req, "lon")?);
-    let show = Show {
-        address_details: flag(req, "addressdetails", true),
-        extra_tags: flag(req, "extratags", false),
-    };
-    extras_of(engine, req.param("with"))?;
-    let (hits, pick) =
-        reverse_hits(engine, counters, lat, lon, 1, &[]).map_err(|e| Response::error(400, &e))?;
-    let Some(hit) = hits.first() else {
-        // Nominatim's own answer when nothing is there (src/nominatim_api/v1/format_json.py)
-        return Ok(Response::json(
-            200,
-            &json!({ "error": "Unable to geocode" }),
-        ));
-    };
-    let mut answer = match dialect {
-        Dialect::GeoJson => nominatim_list(
-            std::slice::from_ref(hit),
-            dialect,
-            show,
-            pick.country,
-            pick.attribution,
-        ),
-        _ => nominatim_place(hit, dialect, show, pick.country, pick.attribution),
-    };
-    if let Some(e) = extras_on(req.param("with"), &pick) {
-        attach_extras(&mut answer, std::slice::from_ref(hit), &e, pick.index, None);
-    }
-    Ok(Response::json(200, &answer))
-}
-
-fn status(engine: &Engine, req: &Request) -> Response {
-    if req.param("format") == Some("json") {
-        Response::json(
-            200,
-            &json!({
-                "status": 0,
-                "message": "OK",
-                "data_updated": engine.release,
-                "software_version": format!("gridpin {}", env!("CARGO_PKG_VERSION")),
-                "database_version": engine.release,
-            }),
-        )
-    } else {
-        Response::text(200, "OK".into())
-    }
-}
-
 fn handle(engine: &Engine, counters: &Counters, gate: &dyn Gate, stream: TcpStream) {
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
@@ -1685,18 +1888,23 @@ fn handle(engine: &Engine, counters: &Counters, gate: &dyn Gate, stream: TcpStre
         Err(_) => return,
     });
     let t0 = std::time::Instant::now();
-    let resp = match read_request(&mut reader) {
+    let (resp, asked) = match read_request(&mut reader) {
         Ok(req) => {
             let resp = gate
                 .before(&req)
                 .unwrap_or_else(|| route(engine, counters, &req));
             gate.after(&req, &resp, t0.elapsed().as_secs_f64() * 1000.0);
-            resp
+            let asked = req
+                .headers
+                .iter()
+                .find(|(name, _)| name == "access-control-request-headers")
+                .map(|(_, value)| value.clone());
+            (resp, asked)
         }
-        Err((status, message)) => Response::error(status, &message),
+        Err((status, message)) => (Response::error(status, &message), None),
     };
     let mut out = stream;
-    let _ = write_response(&mut out, &resp);
+    let _ = write_response_allowing(&mut out, &resp, asked.as_deref());
 }
 
 /// Queries that send the engine down its fallback paths at start-up. Two of them build a table over every
@@ -1814,127 +2022,6 @@ pub fn probe(url: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    const HIDE: Show = Show {
-        address_details: false,
-        extra_tags: false,
-    };
-    const DETAILS: Show = Show {
-        address_details: true,
-        extra_tags: false,
-    };
-
-    fn hit(precision: &'static str, number: Option<&str>) -> Hit {
-        Hit {
-            lat: 38.8976751,
-            lon: -77.036547,
-            precision,
-            score: 7.0,
-            confidence: 0.95,
-            street: "PENNSYLVANIA Avenue Northwest".into(),
-            housenumber: number.map(String::from),
-            commune: "Washington".into(),
-            postcode: "20500".into(),
-            flags: vec![],
-            region: None,
-            distance_m: None,
-        }
-    }
-
-    #[test]
-    fn a_place_carries_coordinates_as_strings_and_a_box_that_widens_with_precision() {
-        let house = nominatim_place(
-            &hit("house", Some("1600")),
-            Dialect::Json,
-            HIDE,
-            "us",
-            "lic",
-        );
-        assert_eq!(house["lat"], "38.8976751");
-        assert_eq!(house["lon"], "-77.0365470");
-        assert_eq!(house["licence"], "lic");
-        assert_eq!(house["class"], "place");
-        assert_eq!(house["type"], "house");
-        assert_eq!(
-            house["display_name"],
-            "1600 PENNSYLVANIA Avenue Northwest, Washington, 20500"
-        );
-        let bbox = |v: &Value| -> f64 {
-            let b: Vec<f64> = v["boundingbox"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|x| x.as_str().unwrap().parse().unwrap())
-                .collect();
-            assert!(b[0] < b[1] && b[2] < b[3], "{b:?}");
-            b[1] - b[0]
-        };
-        let street = nominatim_place(&hit("street", None), Dialect::Json, HIDE, "us", "lic");
-        let city = nominatim_place(&hit("city", None), Dialect::Json, HIDE, "us", "lic");
-        assert!(bbox(&house) < bbox(&street) && bbox(&street) < bbox(&city));
-        assert_eq!(street["type"], "street");
-        assert_eq!(
-            street["display_name"],
-            "PENNSYLVANIA Avenue Northwest, Washington, 20500"
-        );
-    }
-
-    #[test]
-    fn no_osm_reference_is_invented_and_jsonv2_renames_class() {
-        let v1 = nominatim_place(
-            &hit("house", Some("1600")),
-            Dialect::Json,
-            HIDE,
-            "us",
-            "lic",
-        );
-        assert!(v1.get("osm_id").is_none() && v1.get("osm_type").is_none());
-        let v2 = nominatim_place(
-            &hit("house", Some("1600")),
-            Dialect::JsonV2,
-            HIDE,
-            "us",
-            "lic",
-        );
-        assert!(v2.get("class").is_none());
-        assert_eq!(v2["category"], "place");
-        assert_eq!(v2["place_rank"], 30);
-    }
-
-    #[test]
-    fn address_details_only_when_asked_and_without_empty_parts() {
-        let none = nominatim_place(&hit("street", None), Dialect::Json, HIDE, "us", "lic");
-        assert!(none.get("address").is_none());
-        let a =
-            &nominatim_place(&hit("street", None), Dialect::Json, DETAILS, "us", "lic")["address"];
-        assert_eq!(a["road"], "PENNSYLVANIA Avenue Northwest");
-        assert_eq!(a["country_code"], "us");
-        assert!(a.get("house_number").is_none());
-        let a = &nominatim_place(
-            &hit("house", Some("1600")),
-            Dialect::Json,
-            DETAILS,
-            "us",
-            "lic",
-        )["address"];
-        assert_eq!(a["house_number"], "1600");
-    }
-
-    #[test]
-    fn extratags_carry_the_match_level_only_when_asked() {
-        let house = hit("house", Some("1600"));
-        assert!(nominatim_place(&house, Dialect::Json, HIDE, "us", "lic")
-            .get("extratags")
-            .is_none());
-        let show = Show {
-            address_details: false,
-            extra_tags: true,
-        };
-        let tags = &nominatim_place(&house, Dialect::JsonV2, show, "us", "lic")["extratags"];
-        assert_eq!(tags["match_level"], "PointAddress");
-        // Nominatim's extratags are strings, so the status is one too
-        assert_eq!(tags["match_status"], "M");
-    }
-
     #[test]
     fn a_batch_entry_is_a_line_or_fields_with_the_names_of_batch_jsonl() {
         assert!(matches!(
@@ -1976,30 +2063,6 @@ mod tests {
         assert_eq!(number.as_deref(), Some("7b"));
         assert!(Asked::parse(&json!({"street": "  ", "city": "Ville"})).is_err());
         assert!(Asked::parse(&json!(5)).is_err());
-    }
-
-    #[test]
-    fn geojson_is_a_feature_collection_with_point_and_bbox() {
-        let v = nominatim_list(
-            &[hit("house", Some("1600"))],
-            Dialect::GeoJson,
-            HIDE,
-            "us",
-            "lic",
-        );
-        assert_eq!(v["type"], "FeatureCollection");
-        let f = &v["features"][0];
-        assert_eq!(f["geometry"]["coordinates"][0], -77.036547);
-        assert_eq!(f["bbox"].as_array().unwrap().len(), 4);
-        assert!(f["properties"].get("lat").is_none());
-    }
-
-    #[test]
-    fn place_ids_are_stable_and_safe_for_json_numbers() {
-        let a = place_id(&hit("house", Some("1600")));
-        assert_eq!(a, place_id(&hit("house", Some("1600"))));
-        assert_ne!(a, place_id(&hit("house", Some("1602"))));
-        assert!(a < (1 << 53));
     }
 
     #[test]
@@ -2048,9 +2111,21 @@ mod tests {
     }
 
     #[test]
-    fn formats_other_than_json_are_refused_and_jsonv2_is_the_default() {
-        assert_eq!(Dialect::parse(None).unwrap(), Dialect::JsonV2);
-        assert_eq!(Dialect::parse(Some("json")).unwrap(), Dialect::Json);
-        assert!(Dialect::parse(Some("xml")).is_err());
+    fn a_preflight_gets_back_the_header_names_it_asked_for_and_nothing_else() {
+        assert_eq!(allowed_headers(None), "Content-Type");
+        assert_eq!(allowed_headers(Some("")), "Content-Type");
+        assert_eq!(
+            allowed_headers(Some("content-type,user-agent")),
+            "content-type,user-agent"
+        );
+        assert_eq!(allowed_headers(Some(" X-Foo, x_bar ")), "X-Foo, x_bar");
+        // anything but a list of names cannot become a header of the answer
+        for bad in ["a\r\nSet-Cookie: x=1", "a: b", "a;b", "a\u{7f}"] {
+            assert_eq!(allowed_headers(Some(bad)), "Content-Type", "{bad:?}");
+        }
+        // separators alone name no header
+        assert_eq!(allowed_headers(Some(" , ")), "Content-Type");
+        assert_eq!(allowed_headers(Some(&"a".repeat(513))), "Content-Type");
+        assert_eq!(allowed_headers(Some(&"a".repeat(512))).len(), 512);
     }
 }

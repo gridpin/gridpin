@@ -19,8 +19,9 @@ without an error (maturin, setuptools) and a name check misses a file in the wro
     python3 .github/thirdparty_licenses.py --artifacts gridpin gridpin/target/wheels/*.whl
 
 A wheel must carry LICENSE and THIRDPARTY.yml in .dist-info/licenses/, byte for byte the files in
-the crate directory, and nothing at the top of site-packages; an sdist must carry both at its
-root. Needs Python 3.11+ (tomllib); no third-party module is required.
+the crate directory, and nothing at the top of site-packages; a wheel of the gridpin package also
+carries its types (gridpin/py.typed, gridpin/_gridpin.pyi); an sdist must carry both license files at
+its root. Needs Python 3.11+ (tomllib); no third-party module is required.
 """
 from __future__ import annotations
 
@@ -48,6 +49,9 @@ NOT_FOUND = re.compile(r"""^    text: (["']?)NOT FOUND\1$""")
 
 # License files every built artifact carries, compared with the crate directory's copies.
 LICENSE_FILES = ("LICENSE", "THIRDPARTY.yml")
+# Type files a wheel of the gridpin package carries (PEP 561): a type checker reads the package's own types only
+# when py.typed is installed next to them, and maturin leaves a missing file out without a word.
+TYPE_FILES = ("gridpin/py.typed", "gridpin/_gridpin.pyi")
 
 
 def read_bundle(path: pathlib.Path) -> tuple[str | None, list[dict]]:
@@ -120,6 +124,9 @@ def check_artifact(artifact: pathlib.Path, crate_dir: pathlib.Path) -> list[str]
                 found = [n for n in names if re.fullmatch(r"[^/]+\.dist-info/licenses/" + re.escape(name), n)]
                 problems += _one_equal(artifact, f".dist-info/licenses/{name}", [z.read(n) for n in found],
                                        crate_dir / name)
+            if "gridpin/__init__.py" in names:
+                problems += [f"{artifact.name}: no {name} (types of the package)" for name in TYPE_FILES
+                             if name not in names]
     elif artifact.name.endswith(".tar.gz"):
         with tarfile.open(artifact) as t:
             files = {m.name: m for m in t.getmembers() if m.isfile()}

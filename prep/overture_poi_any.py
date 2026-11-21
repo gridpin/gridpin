@@ -31,14 +31,23 @@ def main(argv=None):
     a = p.parse_args(argv)
     out = pathlib.Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    rows = duckdb.connect().execute(
-        """SELECT name_primary, lat, lon, coalesce(nullif(locality, ''), ?) AS grp, coalesce(brand_name, '') AS brand,
+    from duck import cap_spill
+
+    con = cap_spill(duckdb.connect())
+    # the extract of the free places layer (prep/overture_places_layer.py) has no operating_status: it keeps every place
+    # (ANSWERS §385, 20.11.2026); the filter applies only where the column is there, and the run says which it was
+    columns = {r[0] for r in con.execute("DESCRIBE SELECT * FROM read_parquet(?)", [a.parquet]).fetchall()}
+    open_only = "AND coalesce(operating_status, 'open') = 'open'" if "operating_status" in columns else ""
+    rows = con.execute(
+        f"""SELECT name_primary, lat, lon, coalesce(nullif(locality, ''), ?) AS grp, coalesce(brand_name, '') AS brand,
                   coalesce(categorie, '') AS cat
            FROM read_parquet(?) WHERE confidence >= ? AND length(name_primary) BETWEEN 2 AND 120
-             AND coalesce(operating_status, 'open') = 'open'
+             {open_only}
            ORDER BY grp, confidence DESC, name_primary""",
         [a.cc.upper(), a.parquet, a.min_confidence],
     ).fetchall()
+    if not open_only:
+        print("the extract has no operating_status: closed places are not filtered out", file=sys.stderr)
     cc = a.cc.lower()
     with open(out / f"{cc}_poi_places.csv", "w", newline="") as f:
         w = csv.writer(f)

@@ -40,7 +40,7 @@ def geocode_pl(df: "pl.DataFrame", column: str, sheet: SheetLike, poi: Optional[
 
 @pl.api.register_dataframe_namespace("gridpin")
 class GridPinNamespace:
-    def __init__(self, df: "pl.DataFrame"):
+    def __init__(self, df: "pl.DataFrame") -> None:
         self._df = df
 
     def geocode(self, column: str, sheet: SheetLike, poi: Optional[str] = None) -> "pl.DataFrame":

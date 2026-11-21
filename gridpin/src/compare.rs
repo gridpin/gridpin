@@ -101,6 +101,19 @@ pub fn decide(a: Reading, b: Reading) -> Same {
                     "same street and number, but an answer is weak: not confirmed as one house".to_string(),
                     None,
                 ),
+                // the nearest door answers with the number of a neighbour, not the one written: two lines with different
+                // numbers the sheet lacks meet at one neighbour ("Avenida Carlos III 21" and "… 31, Toledo"), so with a
+                // "near" answer it is one house only when both lines wrote the same number (19.11.2026, plan M M7: 26 of
+                // 283 such pairs in Poland, 15 of 395 in Spain said "house")
+                "house"
+                    if (x.precision == "near" || y.precision == "near")
+                        && !(a.house_number.is_some() && a.house_number == b.house_number) =>
+                (
+                    "street",
+                    "same street; an answer is the nearest door, not the number written: not confirmed as one house"
+                        .to_string(),
+                    None,
+                ),
                 "house" => ("house", "same street, number and commune; neither answer is weak".to_string(), None),
                 "different" if weak => (
                     "unknown",
@@ -283,6 +296,34 @@ mod tests {
             level(exact_low, strong("Main St", Some("12"), "Ames")),
             "house"
         );
+    }
+
+    #[test]
+    fn the_nearest_door_never_confirms_one_house() {
+        let strong = |precision, number| Some(hit("Main St", Some(number), "Ames", precision, 0.9));
+        // a written number the sheet lacks answers with a neighbour's number: on either side it is only the street
+        assert_eq!(level(strong("house", "21"), strong("near", "21")), "street");
+        assert_eq!(level(strong("near", "21"), strong("house", "21")), "street");
+        assert_eq!(level(strong("near", "21"), strong("near", "21")), "street");
+        // near misses: an interpolated number is the one written, and a registry house is a house
+        assert_eq!(
+            level(strong("interp", "21"), strong("house", "21")),
+            "house"
+        );
+        assert_eq!(level(strong("house", "21"), strong("house", "21")), "house");
+        let same = decide(
+            reading(strong("house", "21"), "x", Some(21), None),
+            reading(strong("near", "21"), "x", Some(31), None),
+        );
+        assert_eq!(same.level, "street");
+        assert!(same.reason.contains("nearest door"), "{}", same.reason);
+        // both lines wrote the same number the sheet lacks: one house, met at the same neighbour
+        let written = |n| reading(strong("near", "21"), "x", n, None);
+        assert_eq!(decide(written(Some(31)), written(Some(31))).level, "house");
+        // near misses of the written number: another number, or none written on one side
+        assert_eq!(decide(written(Some(31)), written(Some(33))).level, "street");
+        assert_eq!(decide(written(Some(31)), written(None)).level, "street");
+        assert_eq!(decide(written(None), written(None)).level, "street");
     }
 
     #[test]

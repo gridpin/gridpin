@@ -1,0 +1,42 @@
+<script type="text/javascript">
+  RED.nodes.registerType("gridpin", {
+    category: "function",
+    color: "#e2d96e",
+    defaults: {
+      name: { value: "" },
+      server: { value: "http://127.0.0.1:8080", required: true },
+      k: { value: 1, required: true, validate: RED.validators.number() },
+    },
+    inputs: 1,
+    outputs: 1,
+    icon: "font-awesome/fa-map-marker",
+    label: function () { return this.name || "gridpin"; },
+  });
+</script>
+
+<script type="text/html" data-template-name="gridpin">
+  <div class="form-row"><label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name"></div>
+  <div class="form-row"><label for="node-input-server"><i class="fa fa-server"></i> Server</label>
+    <input type="text" id="node-input-server" placeholder="http://127.0.0.1:8080"></div>
+  <div class="form-row"><label for="node-input-k"><i class="fa fa-list-ol"></i> Answers</label>
+    <input type="number" id="node-input-k" min="1"></div>
+</script>
+
+<script type="text/html" data-help-name="gridpin">
+  <p>Geocodes with a local GridPin server (<code>gridpin serve sheet.bin</code>): nothing goes to a cloud service.</p>
+  <h3>Input</h3>
+  <dl class="message-properties">
+    <dt>payload <span class="property-type">string | array | object</span></dt>
+    <dd>an address; an array of addresses (one request); or <code>{lat, lon}</code> for the nearest addresses.</dd>
+  </dl>
+  <h3>Output</h3>
+  <dl class="message-properties">
+    <dt>payload <span class="property-type">array</span></dt>
+    <dd>up to <i>Answers</i> hits (lat, lon, precision, street, housenumber, commune, postcode, weak); for an array
+    input, one array per address. An empty array: no answer.</dd>
+    <dt>gridpin <span class="property-type">object</span></dt>
+    <dd><code>asked</code>, <code>weak</code> (answers to check before use), <code>empty</code>.</dd>
+  </dl>
+  <p>Addresses travel only in the body of a POST. A stopped server or an error answer is reported to the Catch node.</p>
+</script>

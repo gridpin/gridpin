@@ -210,6 +210,51 @@ pub fn named_town(idx: &Index, q: &str) -> Option<NamedTown> {
     unknown
 }
 
+thread_local! {
+    /// Set while `town_off_sheet` reads the line: the town lookups it makes run the cascade again, which must not
+    /// read its own line once more.
+    static READING_TOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The town the line `q` names when the sheet knows none of its segments ("Karolinenstraße 2, 86150 Augsburg" on a
+/// sheet without Bavaria), else `None`. Cheap for the common line: a segment whose words start a commune of the
+/// sheet settles it without a lookup; only a line whose segments are all unknown is read by `named_town`.
+pub fn town_off_sheet(idx: &Index, q: &str) -> Option<NamedTown> {
+    let segments: Vec<&str> = q
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if segments.len() < 2 || READING_TOWN.with(std::cell::Cell::get) {
+        return None;
+    }
+    for s in &segments[1..] {
+        if crate::country_names::code_of(s).is_some() {
+            continue;
+        }
+        let Some(written) = town_words(s) else {
+            continue;
+        };
+        let name = normalize(&written);
+        let words: Vec<&str> = name.split(' ').collect();
+        if (1..=words.len()).any(|n| idx.has_commune(&words[..n].join(" ")))
+            || idx.names_commune(&name)
+        {
+            return None;
+        }
+    }
+    READING_TOWN.with(|r| r.set(true));
+    let town = named_town(idx, q);
+    READING_TOWN.with(|r| r.set(false));
+    town.filter(|t| !t.on_sheet)
+}
+
+/// The answer is not in the town the line names, and the sheet does not know that town: the city verdict
+/// `unresolved` of `field_verdicts_of`, the reason `town_not_on_sheet` of `exists`.
+pub fn outside_off_sheet_town(t: &NamedTown, h: &Hit) -> bool {
+    !t.on_sheet && !town_is_the_street(t, h) && !in_named_town(t, h)
+}
+
 fn leading_number(s: &str) -> Option<u32> {
     let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()

@@ -2,8 +2,11 @@
 
 pub mod abbrev;
 pub mod aliases;
+mod ban;
 pub mod bench;
 pub mod builder;
+pub mod cells;
+mod census;
 pub mod cite;
 pub mod cluster;
 pub mod codes;
@@ -25,21 +28,33 @@ pub mod google;
 pub mod grammar;
 pub mod index;
 pub mod iso20022;
+pub mod keyed;
 mod levenshtein;
+pub mod locator;
+pub mod mapbox;
+pub mod match_tables;
+pub mod md;
 pub mod ml;
+mod nominatim;
 pub mod norm;
 pub mod outcome;
+pub mod parts;
+mod pelias;
+mod photon;
 pub mod places;
 pub mod points;
+pub mod postcode_layer;
 pub mod postcodes;
 pub mod publish;
 pub mod query;
 pub mod receipt;
+pub mod repeats;
 pub mod rules;
 pub mod serve;
 pub mod sheets;
 pub mod slice;
 pub mod tabular;
+pub mod valhalla;
 pub mod verdict;
 
 #[cfg(feature = "python")]

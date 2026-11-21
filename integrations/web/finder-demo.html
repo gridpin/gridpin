@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GridPin address finder</title>
+<style>
+body{font:16px/1.5 system-ui,sans-serif;max-width:36rem;margin:2rem auto;padding:0 1rem;color:#1f2933;background:#fff}
+.gp-field{margin:0 0 1rem}label{display:block;font-weight:600;margin:0 0 .25rem}
+input[type=text],input:not([type]){font:inherit;padding:.4rem .5rem;border:2px solid #1f2933;width:100%;box-sizing:border-box}
+fieldset{border:0;padding:0;margin:0 0 1rem}legend{font-weight:700;font-size:1.15rem;margin:0 0 .5rem}
+button{font:inherit;padding:.45rem .9rem;border:2px solid #1f2933;background:#00703c;color:#fff;cursor:pointer}
+.gp-link{background:none;border:0;color:#1d4e89;text-decoration:underline;padding:0}
+.gp-radio{margin:.35rem 0}.gp-radio label{display:inline;font-weight:400}
+.gp-error{color:#b10e1e;font-weight:700;margin:.25rem 0}.gp-status{min-height:1.5em}
+:focus-visible{outline:3px solid #fd0;outline-offset:2px}
+</style></head>
+<body>
+<h1>Delivery address</h1>
+<form>
+  <gridpin-address-finder endpoint="http://127.0.0.1:8090" name-prefix="delivery-"
+    text-postcode="Postcode (PLZ)"></gridpin-address-finder>
+  <button type="submit">Continue</button>
+</form>
+<script type="module" src="gridpin-address-finder.js"></script>
+</body></html>
