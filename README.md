@@ -78,11 +78,11 @@ Homebrew: `brew install gridpin/gridpin/gridpin`; Scoop: `scoop bucket add gridp
 then `scoop install gridpin`. Other targets (Intel macOS, Windows arm) build from source:
 
 ```console
-$ base=https://github.com/gridpin/gridpin/releases/download/v0.9.0
+$ base=https://github.com/gridpin/gridpin/releases/download/v0.10.0
 $ curl -fsSLO "$base/gridpin-aarch64-apple-darwin.tar.gz"
 $ curl -fsSLO "$base/gridpin-release-signers"
-$ curl -fsSLO https://dl.gridpin.dev/v0.9.0/attestation.json
-$ curl -fsSLO https://dl.gridpin.dev/v0.9.0/attestation.json.sig
+$ curl -fsSLO https://dl.gridpin.dev/v0.10.0/attestation.json
+$ curl -fsSLO https://dl.gridpin.dev/v0.10.0/attestation.json.sig
 # the trust root comes from the OTHER channel — see "Verifying a release" for why
 $ ssh-keygen -Y verify -f gridpin-release-signers -I gridpin-release \
     -n gridpin-g02 -s attestation.json.sig < attestation.json \
@@ -207,18 +207,32 @@ All files are free; download only the file of the country your addresses are in 
 
 | File | What's inside | Data license | Size |
 |---|---|---|---|
-| [`australia.bin`](https://dl.gridpin.dev/v0.9.0/australia.bin) | **Australia.** 11.92M addresses in all states and territories, including the external territories. Source: Overture / G-NAF (Geoscape Australia). | Open G-NAF EULA | 130 MB |
-| [`brazil.bin`](https://dl.gridpin.dev/v0.9.0/brazil.bin) | **Brazil.** 67.19M addresses in 26 states and the Federal District. Source: Overture / IBGE CNEFE 2022. | CC0 1.0 (IBGE public data) | 677 MB |
-| [`canada.bin`](https://dl.gridpin.dev/v0.9.0/canada.bin) | **Canada.** 16.94M addresses in all provinces and territories. Source: Overture / Statistics Canada NAR, Adresses Québec, Yukon. | open data (per source) | 183 MB |
-| [`france.bin`](https://dl.gridpin.dev/v0.9.0/france.bin) | **France.** 26.1M addresses. Source: BAN, the national registry. | Licence Ouverte | 365 MB |
-| [`germany.bin`](https://dl.gridpin.dev/v0.9.0/germany.bin) | **Germany.** 22.84M addresses in 16 of 16 Länder; Bavaria without postcodes. Source: Overture / OpenAddresses, 15 Länder; Bavaria: LoD2 building models (LDBV); BNetzA postcode witness. | dl-de/by-2-0 · dl-de/zero-2-0 · CC BY 4.0 (per source) | 256 MB |
-| [`italy.bin`](https://dl.gridpin.dev/v0.9.0/italy.bin) | **Italy.** 25.9M addresses. Source: Overture / ANNCSU. | CC BY 4.0 | 247 MB |
-| [`mexico.bin`](https://dl.gridpin.dev/v0.9.0/mexico.bin) | **Mexico.** 14.14M addresses in all 32 states, from an address layer surveyed in 2009–2010. Source: Overture / INEGI address layer, Correos de México postal codes. | open data (per source) | 156 MB |
-| [`netherlands.bin`](https://dl.gridpin.dev/v0.9.0/netherlands.bin) | **Netherlands.** 9.9M addresses. Source: Overture / NGR (BAG). | Public Domain Mark 1.0 | 103 MB |
-| [`serbia.bin`](https://dl.gridpin.dev/v0.9.0/serbia.bin) | **Serbia.** 2.6M addresses. Source: Overture / RGZ. | data.gov.rs Terms | 32 MB |
-| [`spain.bin`](https://dl.gridpin.dev/v0.9.0/spain.bin) | **Spain.** 15.27M addresses in all 52 postal provinces, including Ceuta and Melilla. Source: Overture / CartoCiudad (IGN/CNIG). | CC BY 4.0 | 185 MB |
-| [`usa.bin`](https://dl.gridpin.dev/v0.9.0/usa.bin) | **United States.** 95.33M point addresses plus 34.52M points from address ranges, in 50 states and the District of Columbia. 7 states have address ranges only. Source: Overture / NAD + Census TIGER/Line. | open data (per source) | 1.45 GB |
-| [`fr_poi.bin`](https://dl.gridpin.dev/v0.9.0/fr_poi.bin) | **France, places.** Optional add-on to `france.bin`: places by name, such as "Gare de Lyon, Paris". Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 399 MB |
+| [`australia.bin`](https://dl.gridpin.dev/v0.10.0/australia.bin) | **Australia.** 11.92M addresses in all states and territories, including the external territories. Source: Overture / G-NAF (Geoscape Australia). | Open G-NAF EULA | 130 MB |
+| [`brazil.bin`](https://dl.gridpin.dev/v0.10.0/brazil.bin) | **Brazil.** 67.19M addresses in 26 states and the Federal District. Source: Overture / IBGE CNEFE 2022. | CC0 1.0 (IBGE public data) | 677 MB |
+| [`canada.bin`](https://dl.gridpin.dev/v0.10.0/canada.bin) | **Canada.** 16.94M addresses in all provinces and territories. Source: Overture / Statistics Canada NAR, Adresses Québec, Yukon. | open data (per source) | 183 MB |
+| [`france.bin`](https://dl.gridpin.dev/v0.10.0/france.bin) | **France.** 26.1M addresses. Source: BAN, the national registry. | Licence Ouverte | 365 MB |
+| [`germany.bin`](https://dl.gridpin.dev/v0.10.0/germany.bin) | **Germany.** 22.84M addresses in 16 of 16 Länder; Bavaria without postcodes. Source: Overture / OpenAddresses, 15 Länder; Bavaria: LoD2 building models (LDBV); BNetzA postcode witness. | dl-de/by-2-0 · dl-de/zero-2-0 · CC BY 4.0 (per source) | 256 MB |
+| [`italy.bin`](https://dl.gridpin.dev/v0.10.0/italy.bin) | **Italy.** 25.9M addresses. Source: Overture / ANNCSU. | CC BY 4.0 | 247 MB |
+| [`mexico.bin`](https://dl.gridpin.dev/v0.10.0/mexico.bin) | **Mexico.** 14.14M addresses in all 32 states, from an address layer surveyed in 2009–2010. Source: Overture / INEGI address layer, Correos de México postal codes. | open data (per source) | 156 MB |
+| [`netherlands.bin`](https://dl.gridpin.dev/v0.10.0/netherlands.bin) | **Netherlands.** 9.9M addresses. Source: Overture / NGR (BAG). | Public Domain Mark 1.0 | 103 MB |
+| [`new-zealand.bin`](https://dl.gridpin.dev/v0.10.0/new-zealand.bin) | **New Zealand.** 2.43M addresses in all 16 regions and the Chatham Islands. Source: Overture / LINZ NZ Addresses. | CC BY 4.0 | 29 MB |
+| [`poland.bin`](https://dl.gridpin.dev/v0.10.0/poland.bin) | **Poland.** 8.63M addresses in all 16 voivodeships. Source: Overture / PRG address points (GUGiK). | no licence issued, free use; source named | 106 MB |
+| [`serbia.bin`](https://dl.gridpin.dev/v0.10.0/serbia.bin) | **Serbia.** 2.6M addresses. Source: Overture / RGZ. | data.gov.rs Terms | 32 MB |
+| [`spain.bin`](https://dl.gridpin.dev/v0.10.0/spain.bin) | **Spain.** 15.27M addresses in all 52 postal provinces, including Ceuta and Melilla. Source: Overture / CartoCiudad (IGN/CNIG). | CC BY 4.0 | 185 MB |
+| [`usa.bin`](https://dl.gridpin.dev/v0.10.0/usa.bin) | **United States.** 95.33M point addresses plus 34.52M points from address ranges, in 50 states and the District of Columbia. 7 states have address ranges only. Source: Overture / NAD + Census TIGER/Line. | open data (per source) | 1.45 GB |
+| [`au_poi.bin`](https://dl.gridpin.dev/v0.10.0/au_poi.bin) | **Australia, places.** Optional add-on to `australia.bin`: places by name. Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 131 MB |
+| [`br_poi.bin`](https://dl.gridpin.dev/v0.10.0/br_poi.bin) | **Brazil, places.** Optional add-on to `brazil.bin`: places by name. Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 502 MB |
+| [`ca_poi.bin`](https://dl.gridpin.dev/v0.10.0/ca_poi.bin) | **Canada, places.** Optional add-on to `canada.bin`: places by name. Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 150 MB |
+| [`fr_poi.bin`](https://dl.gridpin.dev/v0.10.0/fr_poi.bin) | **France, places.** Optional add-on to `france.bin`: places by name, such as "Gare de Lyon, Paris". Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 399 MB |
+| [`de_poi.bin`](https://dl.gridpin.dev/v0.10.0/de_poi.bin) | **Germany, places.** Optional add-on to `germany.bin`: places by name. Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 535 MB |
+| [`it_poi.bin`](https://dl.gridpin.dev/v0.10.0/it_poi.bin) | **Italy, places.** Optional add-on to `italy.bin`: places by name. Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 381 MB |
+| [`mx_poi.bin`](https://dl.gridpin.dev/v0.10.0/mx_poi.bin) | **Mexico, places.** Optional add-on to `mexico.bin`: places by name. Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 260 MB |
+| [`nl_poi.bin`](https://dl.gridpin.dev/v0.10.0/nl_poi.bin) | **Netherlands, places.** Optional add-on to `netherlands.bin`: places by name. Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 138 MB |
+| [`nz_poi.bin`](https://dl.gridpin.dev/v0.10.0/nz_poi.bin) | **New Zealand, places.** Optional add-on to `new-zealand.bin`: places by name. Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 24 MB |
+| [`pl_poi.bin`](https://dl.gridpin.dev/v0.10.0/pl_poi.bin) | **Poland, places.** Optional add-on to `poland.bin`: places by name. Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 109 MB |
+| [`rs_poi.bin`](https://dl.gridpin.dev/v0.10.0/rs_poi.bin) | **Serbia, places.** Optional add-on to `serbia.bin`: places by name. Serbia has fewer places than other countries, as in Overture. Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 15 MB |
+| [`es_poi.bin`](https://dl.gridpin.dev/v0.10.0/es_poi.bin) | **Spain, places.** Optional add-on to `spain.bin`: places by name. Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 255 MB |
+| [`us_poi.bin`](https://dl.gridpin.dev/v0.10.0/us_poi.bin) | **United States, places.** Optional add-on to `usa.bin`: places by name. Not needed to geocode addresses. Source: Overture Maps places. | CDLA-Permissive-2.0 · Apache-2.0 · CC0-1.0 (per source) | 1.7 GB |
 
 **Bavaria comes from building models and has no postcodes.** Its addresses are read from the 3D building
 models (LoD2) of the Bavarian surveying office, which carry no postcode, so Bavarian answers have an empty
@@ -226,8 +240,7 @@ models (LoD2) of the Bavarian surveying office, which carry no postcode, so Bava
 street elsewhere with low confidence.
 Per-Land providers and licenses are in [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
 
-POI coverage is per-country (see the table; we ship a layer only where source data is rich
-enough to help). For France, pass the layer and
+Since v0.10.0 every country has a places layer (`<cc>_poi.bin`, see the table). Pass the layer and
 the engine cascades automatically — address index first, POI only on weak results, exact
 addresses never overridden: `gridpin query france.bin "Gare de Lyon, Paris" --poi fr_poi.bin`
 or `gridpin.Geocoder("france.bin", poi="fr_poi.bin")`.
@@ -249,7 +262,7 @@ canonical order. They can differ only when the fields you supply reorder the wor
 order-sensitive POI *name* (splitting "54 Studio" into `street:"studio", number:"54"` re-forms it as
 "Studio 54"); pass such a query as free-form to keep the original word order.
 
-Sizes are for v7 builds (August 2026; Germany repacked 2026-09-10; Spain added 2026-09-28; Brazil added 2026-10-11; the United States added 2026-10-24; Canada added 2026-10-31; Mexico added 2026-11-02; Australia added 2026-11-06); the exact byte sizes are checked against a pinned source of truth in CI. A sheet is smaller than its own raw source: France's registry download is an 885 MB gzip that unpacks to 4.9 GB of CSV, while the finished sheet — the same 26.1M addresses plus every index (typo automata, spatial cells, ranking) — is 365 MB, ready to query.
+Sizes are for v7 builds (August 2026; Germany repacked 2026-09-10; Spain added 2026-09-28; Brazil added 2026-10-11; the United States added 2026-10-24; Canada added 2026-10-31; Mexico added 2026-11-02; Australia added 2026-11-06; Poland, New Zealand and Bavaria added 2026-11-22); the exact byte sizes are checked against a pinned source of truth in CI. A sheet is smaller than its own raw source: France's registry download is an 885 MB gzip that unpacks to 4.9 GB of CSV, while the finished sheet — the same 26.1M addresses plus every index (typo automata, spatial cells, ranking) — is 365 MB, ready to query.
 
 The matching `SHA256SUMS` manifest (covering the
 engine binary and every sheet) is on the [GitHub release](https://github.com/gridpin/gridpin/releases).
@@ -329,9 +342,9 @@ untrusted download. Steps 3–5 below use only `ssh-keygen` and `shasum`, which 
 and only step 6 runs our code.
 
 ```bash
-mkdir gridpin-v0.9.0 && cd gridpin-v0.9.0
+mkdir gridpin-v0.10.0 && cd gridpin-v0.10.0
 mkdir trust data          # two directories on purpose: the checker never sits in what it checks
-gh_base=https://github.com/gridpin/gridpin/releases/download/v0.9.0
+gh_base=https://github.com/gridpin/gridpin/releases/download/v0.10.0
 
 # 1. TRUST ROOT — from GitHub, never from the download host
 curl -fsSL -o trust/gridpin-release-signers "$gh_base/gridpin-release-signers"
@@ -339,8 +352,9 @@ curl -fsSL -o trust/verify_release.py       "$gh_base/verify_release.py"
 
 # 2. Data and proofs — from the download host
 for f in france.bin germany.bin italy.bin netherlands.bin serbia.bin fr_poi.bin spain.bin brazil.bin usa.bin canada.bin mexico.bin \
+         australia.bin poland.bin new-zealand.bin \
          SHA256SUMS attestation.json attestation.json.sig; do
-  curl -fsSL -o "data/$f" "https://dl.gridpin.dev/v0.9.0/$f"
+  curl -fsSL -o "data/$f" "https://dl.gridpin.dev/v0.10.0/$f"
 done
 
 # 3. The key is the one published below — compare by eye, before anything else
@@ -403,6 +417,8 @@ This also matters for GDPR: the addresses you geocode are often customer data, a
 
 ## Status & roadmap
 
+**v0.10.0: Poland and New Zealand added, Bavaria in Germany, a places layer for every country. Client update required.** Poland: one nationwide sheet (`poland.bin`, 106 MB), 8.63M addresses from the PRG address points (GUGiK) in all 16 voivodeships. New Zealand: `new-zealand.bin` (29 MB), 2.43M addresses from LINZ NZ Addresses in all 16 regions and the Chatham Islands, without postcodes. Germany covers all 16 Länder: Bavaria comes from the LoD2 building models and has no postcodes (`germany.bin`, 256 MB, 22.84M addresses). Places: an optional `<cc>_poi.bin` next to each country sheet (Overture places 2026-10-21.0), asked when the address answer is weak. Brazil: a CEP layer (`br_cep.tsv.gz`, `--postcode-layer`). Server: routes in the Photon, Pelias, BAN, US Census and Mapbox formats, Nominatim `/lookup`, `/v1/addresses` and one shared key (`GRIDPIN_SERVE_KEY`). Output: `format --out parts|fhir`, `--with fhir`, `--with method`, DIGIPIN. Integrations: Java, LibreOffice, Power BI and Tableau, Node-RED, Airflow, Dagster and Prefect, Raycast and Alfred, WooCommerce and others (see docs). The other ten address sheets are byte for byte those of v0.9.0.
+
 **v0.9.0: new commands, a richer server and new integrations. Client update required for them.** The country sheets are byte for byte those of v0.8.0, under the new `v0.9.0/` path. Commands: `extract` (addresses in free text, confirmed by the sheet), `explain`, `exists`, `format` (the address as the post writes it, and the ISO 20022 `PstlAdr` element), `cluster`, `slice`, `grammar`, `postcodes`. Server: several country sheets in one server (`--sheets`), `/ui` to geocode a dropped CSV, `/v1/suggest`, `/v1/extract`, the Google Geocoding API format and JSONP. Also: SQLite extension files, `.deb` and `.rpm` packages, static Linux builds (musl), WebAssembly, dbt, ClickHouse, Home Assistant and more (see docs). Each command's limits are written in the documentation.
 
 **v0.8.0: Australia added. Client update required.** One nationwide sheet (`australia.bin`, 130 MB): 11.92M addresses from G-NAF, August 2026 edition, including the external territories. Engine rules for Australian addresses (see docs). Also: a long dash in a house range reads like a hyphen, and a place name before an address is read past, in every country.
@@ -417,7 +433,7 @@ This also matters for GDPR: the addresses you geocode are often customer data, a
 
 **v0.4.0: Brazil added. Client update required.** Brazil is one nationwide sheet covering 26 states and the Federal District; the source counts describe source presence, not address completeness. Spain covers all 52 postal provinces (incl. Ceuta and Melilla). Germany covers 15 of 16 Länder; Bavaria is not covered. Use the 0.4.0 client with this release: older engines do not contain the Brazilian rules. All seven country sheets and the France POI layer use the new immutable `v0.4.0/` path and a new attestation; `v0.1.0/`, `v0.2.0/` and `v0.3.0/` are unchanged.
 
-For an existing Python installation, use `pip install --upgrade gridpin==0.9.0`, not a plain install that may keep an older version.
+For an existing Python installation, use `pip install --upgrade gridpin==0.10.0`, not a plain install that may keep an older version.
 
 Interfaces and file formats may still change before v1.0. Sheets are tied to the engine's format major version — keep the engine build that shipped alongside your sheets; before v1.0 a newer engine may require newer sheets.
 

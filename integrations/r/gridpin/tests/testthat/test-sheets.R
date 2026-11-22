@@ -73,5 +73,5 @@ test_that("a sheet already downloaded by gridpin-mcp (Python) is used without a 
 })
 
 test_that("an unknown country lists the available ones", {
-  expect_error(gp_sheet_path("pl"), "unknown country 'pl'.*us \\(United States\\)")
+  expect_error(gp_sheet_path("aq"), "unknown country 'aq'.*us \\(United States\\)")
 })

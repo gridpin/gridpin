@@ -85,12 +85,13 @@ def test_extract_addresses_through_mcp_finds_the_address_in_a_text(app):
 def test_anticipated_error_reaches_the_model_verbatim(app):
     async def go():
         async with Client(app) as client:
-            return await client.call_tool("geocode", {"query": "x", "country": "Poland"})
+            # a country we do not plan (PRINCIPLES 2.8): Poland was the example until it shipped in 0.10.0
+            return await client.call_tool("geocode", {"query": "x", "country": "Paraguay"})
     result = run(go())
     assert result.is_error
     text = result.content[0].text
     # The SDK prefixes the tool name; a crash would carry nothing after it.
-    assert text.startswith("Error executing tool geocode: unknown country 'Poland'; available: ")
+    assert text.startswith("Error executing tool geocode: unknown country 'Paraguay'; available: ")
     assert "br (Brazil)" in text
 
 
