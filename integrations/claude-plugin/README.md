@@ -4,6 +4,13 @@ Geocode addresses to coordinates and back on your own machine. GridPin reads one
 
 The plugin adds six tools (`list_countries`, `download_sheet`, `geocode`, `reverse`, `batch`, `extract_addresses`) and a skill that tells Claude when to use them and how to read the answer, including when an answer is only approximate.
 
+Install in Claude Code:
+
+```
+/plugin marketplace add gridpin/gridpin
+/plugin install gridpin@gridpin
+```
+
 Try it after installing:
 
 > Geocode the addresses in `customers.csv` and add latitude and longitude columns. Tell me which rows are only street-level.

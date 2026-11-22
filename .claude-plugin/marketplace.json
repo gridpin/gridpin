@@ -1,0 +1,15 @@
+{
+  "name": "gridpin",
+  "owner": { "name": "GridPin", "email": "contact@gridpin.dev" },
+  "metadata": { "description": "GridPin offline geocoder plugins for Claude Code" },
+  "plugins": [
+    {
+      "name": "gridpin",
+      "source": "./integrations/claude-plugin",
+      "description": "Geocode addresses to coordinates and back on your own machine, from one downloadable file per country. No API key, no rate limit, and your addresses never leave the computer.",
+      "version": "0.1.2",
+      "license": "Apache-2.0",
+      "homepage": "https://gridpin.dev/mcp-geocoding"
+    }
+  ]
+}

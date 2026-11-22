@@ -18,7 +18,7 @@ stays on your machine. After you install the package and download a sheet,
 GridPin makes no network requests.
 
 ```bash
-pip install --upgrade gridpin==0.5.0
+pip install --upgrade gridpin
 ```
 
 The wheel contains the engine, not the data: **download a country sheet
@@ -37,10 +37,9 @@ With pandas: `pip install "gridpin[pandas]"`, then `gridpin.sheets.fetch("us")`,
 fetch` use the same cache and checks as `gridpin sheets`. Extras `[pandas]`, `[geopy]`; without them the wheel still has
 no dependencies.
 
-The United States is one nationwide sheet: point addresses in 35 states, Census address ranges
-elsewhere; Canada is one nationwide sheet (all provinces and territories). Germany covers **all 16 Länder; Bavaria has no postcodes**. Spain covers all
-52 postal provinces; Brazil is one nationwide sheet; Mexico is one nationwide sheet; Australia is one nationwide sheet. Client update required:
-use 0.8.0 or newer, because older engines have no Australian rules.
+Each country is one sheet. Limits of the sheets: **Germany's Bavaria and New Zealand have no postcodes**; the
+United States has point addresses in 35 states and Census address ranges elsewhere. Client update required: use
+0.10.0 or newer, because older engines have no rules for Poland and New Zealand.
 
 ```python
 import gridpin
@@ -63,8 +62,8 @@ Three limits worth knowing before you build on this:
 - **Speed:** exact lookups run at ~3,000/s, measured on the France sheet and a
   single arm64 laptop core. Typo-tolerant fuzzy matching is much slower (tens of
   ms/query) — use `geocode_many()` to batch.
-- **POI is France-only today** and opt-in. Address lookup is the core product;
-  the POI layer is younger and never overrides an exact address match.
+- **Places layers** (`<cc>_poi.bin`, one per country) are opt-in. Address lookup is the core product;
+  the places layer is younger and never overrides an exact address match.
 
 - Country files & docs: <https://gridpin.dev/docs>
 - Quality benchmark, including where other geocoders score higher:

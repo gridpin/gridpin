@@ -56,7 +56,9 @@ enum Cmd {
     },
     /// Build an index from a sorted CSV stream (prep/export_build.py)
     Build {
+        /// the input file
         input: PathBuf,
+        /// the file to write
         out: PathBuf,
         /// optional parser model (ml/parser_v0.bin)
         #[arg(long)]
@@ -92,6 +94,7 @@ enum Cmd {
     // as a flag, making addresses west of 0° unreachable for reverse
     #[command(allow_negative_numbers = true)]
     Reverse {
+        /// the country file (.bin)
         index: PathBuf,
         lat: f64,
         lon: f64,
@@ -102,11 +105,12 @@ enum Cmd {
         #[arg(long, value_name = "FIELDS")]
         with: Option<String>,
         /// md: each answer as a heading and a table of its fields, for a reader rather than a program
-        #[arg(long, value_name = "FORMAT", hide = true, value_parser = ["jsonl", "md"])]
+        #[arg(long, value_name = "FORMAT", value_parser = ["jsonl", "md"])]
         format: Option<String>,
     },
     /// Single forward query
     Query {
+        /// the country file (.bin)
         index: PathBuf,
         q: String,
         #[arg(short, default_value_t = 10)]
@@ -134,7 +138,7 @@ enum Cmd {
         aliases: Option<PathBuf>,
         /// a postcode layer (Brazil's eight-digit CEP: `prep/br_cep_layer.py`): a query that is only a code answers
         /// its street from the layer
-        #[arg(long, hide = true)]
+        #[arg(long)]
         postcode_layer: Option<PathBuf>,
         /// extra answer fields: h3[:res], geohash[:len], placekey, codes, street_point, links, provenance, place[:level],
         /// verdict, postal[:cc], crs:EPSG:<code>, exists, area, unit
@@ -152,14 +156,17 @@ enum Cmd {
         /// valhalla: the top answer as one Valhalla route location (lat/lon on the street, display_lat/display_lon at
         /// the house, street); no answer or a weak one is an error; md: each answer as a heading and a table of its
         /// fields, for a reader rather than a program
-        #[arg(long, value_name = "FORMAT", hide = true, value_parser = ["jsonl", "valhalla", "md"])]
+        #[arg(long, value_name = "FORMAT", value_parser = ["jsonl", "valhalla", "md"])]
         format: Option<String>,
     },
     /// Batch mode: JSONL {"q": ...} in -> JSONL {"results": [...]} out, or a CSV/TSV file in -> the same
     /// file with gp_* answer columns out; order preserved
     Batch {
+        /// the country file (.bin)
         index: PathBuf,
+        /// the input file
         input: PathBuf,
+        /// the file to write
         output: PathBuf,
         /// candidates per query (default 10 for JSONL, 1 for CSV/TSV)
         #[arg(short)]
@@ -291,7 +298,7 @@ enum Cmd {
         aliases: Option<PathBuf>,
         /// a postcode layer (Brazil's eight-digit CEP: `prep/br_cep_layer.py`): a query that is only a code answers
         /// its street, and `/ws/<cep>/json/` answers in the shape of ViaCEP
-        #[arg(long, hide = true)]
+        #[arg(long)]
         postcode_layer: Option<PathBuf>,
         /// only GET this http:// URL and exit 0 on status 200 (container health checks)
         #[arg(long, conflicts_with_all = ["poi"])]
@@ -299,19 +306,20 @@ enum Cmd {
         /// a file whose first line is the one shared key every request but /health must carry
         /// (`Authorization: Bearer <key>`); or set GRIDPIN_SERVE_KEY. The key counts and logs nothing: several keys,
         /// limits and a log are gridpin-pro serve
-        #[arg(long, hide = true)]
+        #[arg(long)]
         key_file: Option<PathBuf>,
         /// refuse to start without a key (GRIDPIN_REQUIRE_KEY=1 does the same): a server on the internet must not
         /// start open because a secret was left unset
-        #[arg(long, hide = true)]
+        #[arg(long)]
         require_key: bool,
         /// write osm_type/osm_id on the Nominatim and Photon paths: a number made from each answer, negative so it
         /// is never an OpenStreetMap object (TeslaMate, Dawarich and Atlas take no answer without one); /lookup reads it
-        #[arg(long, hide = true)]
+        #[arg(long)]
         ids: bool,
     },
     /// Addresses in free text (a letter, a delivery note, an answer of a model), each confirmed by the sheet
     Extract {
+        /// the country file (.bin)
         index: PathBuf,
         /// the text file to read (`-`: standard input)
         #[arg(long, conflicts_with = "input")]
@@ -319,6 +327,7 @@ enum Cmd {
         /// a CSV whose column --column holds one text per row
         #[arg(long, requires = "column")]
         input: Option<PathBuf>,
+        /// the column of --input that holds the text
         #[arg(long)]
         column: Option<String>,
         /// also report the addresses with a number the sheet does not have, with a reason
@@ -327,13 +336,17 @@ enum Cmd {
     },
     /// Delivery zones and rounds: k-means of the points of a CSV (lat, lon columns), sizes kept under --max-size
     Cluster {
+        /// the input file
         input: PathBuf,
+        /// the number of zones
         #[arg(long)]
         k: usize,
+        /// the most points in one zone
         #[arg(long)]
         max_size: Option<usize>,
         #[arg(long, default_value_t = 1)]
         seed: u64,
+        /// the file to write
         #[arg(short = 'o', long)]
         out: PathBuf,
         /// also the convex hull of each zone (GeoJSON)
@@ -342,6 +355,7 @@ enum Cmd {
     },
     /// The top answer laid out as the post of the sheet's country writes an address
     Format {
+        /// the country file (.bin)
         index: PathBuf,
         q: String,
         /// the postal layout: a country code of `postal_formats.tsv` (de, fr, us, br, ...), `default` (street,
@@ -361,15 +375,18 @@ enum Cmd {
     Grammar { index: PathBuf },
     /// An outline of each postcode, drawn from the houses' H3 cells (GeoJSON)
     Postcodes {
+        /// the country file (.bin)
         index: PathBuf,
         /// H3 resolution of the cells (9: about 0.1 km²)
         #[arg(long, default_value_t = 9)]
         res: u8,
+        /// the file to write
         #[arg(short = 'o', long)]
         out: PathBuf,
     },
     /// Why the engine answered as it did: the reading, the verdicts, the candidates and what they lost on
     Explain {
+        /// the country file (.bin)
         index: PathBuf,
         q: String,
         /// text (default) or json
@@ -380,6 +397,7 @@ enum Cmd {
     Exists { index: PathBuf, q: String },
     /// How the engine reads an address line: first-hypothesis words, postcode, house number, top answer
     Parse {
+        /// the country file (.bin)
         index: PathBuf,
         q: String,
         /// optional POI layer (second .bin): cascades when the address result is weak
@@ -388,8 +406,8 @@ enum Cmd {
     },
     /// Join two tables by the address their rows name: the pairs of rows whose top answers are one house (or one
     /// street with --level street), the key of `gridpin same`; with --unmatched also the rows without a pair and why
-    #[command(hide = true)]
     Match {
+        /// the country file (.bin)
         index: PathBuf,
         /// the first table (CSV)
         a: PathBuf,
@@ -419,6 +437,7 @@ enum Cmd {
     },
     /// Do two address lines name the same house, street or commune? (`--pairs`: a JSONL file of {"a","b"})
     Same {
+        /// the country file (.bin)
         index: PathBuf,
         /// the two lines; or with --pairs, the input and output JSONL files
         #[arg(num_args = 2)]
@@ -463,7 +482,6 @@ enum Cmd {
     },
     /// The straight-line distance between the rows of two files: row i with row i, the rows sharing --key, or
     /// every row with every row (--matrix). A file without lat and lon columns is geocoded on --sheet
-    #[command(hide = true)]
     Distance {
         a: PathBuf,
         b: PathBuf,
@@ -494,7 +512,6 @@ enum Cmd {
     },
     /// Attach a table by a code: the statistics a publisher gives by tract, statistical area or grid cell, joined
     /// to rows that carry the code (or a point it is computed from), with the year of the boundaries checked
-    #[command(hide = true)]
     Attach {
         /// the rows: a CSV or TSV with the code column, or with gp_lat and gp_lon (or lat and lon)
         rows: PathBuf,
@@ -540,6 +557,7 @@ enum Cmd {
     },
     /// Addresses of a street, a postcode, a circle, a box or a polygon, as a table
     List {
+        /// the country file (.bin)
         index: PathBuf,
         #[command(flatten)]
         area: AreaArgs,
@@ -556,6 +574,7 @@ enum Cmd {
     /// Copy addresses of a region, a box, a polygon or the whole sheet to a file, with the sheet's licence.
     /// For Parquet: DuckDB reads the CSV (see the documentation).
     Export {
+        /// the country file (.bin)
         index: PathBuf,
         #[command(flatten)]
         area: AreaArgs,
@@ -565,19 +584,23 @@ enum Cmd {
         /// csv, jsonl, geojsonl, geojson or gpx (default: from the -o extension, else csv)
         #[arg(long)]
         format: Option<String>,
+        /// the file to write
         #[arg(short = 'o', long)]
         output: PathBuf,
     },
     /// A smaller sheet cut from a sheet by a box, a region, a postcode or a polygon (the source is not changed)
     Slice {
+        /// the country file (.bin)
         index: PathBuf,
         #[command(flatten)]
         area: AreaArgs,
+        /// the file to write
         #[arg(short = 'o', long)]
         out: PathBuf,
     },
     /// A random sample of real addresses, for test data; the same --seed gives the same addresses
     Sample {
+        /// the country file (.bin)
         index: PathBuf,
         #[command(flatten)]
         area: AreaArgs,
@@ -596,6 +619,7 @@ enum Cmd {
     },
     /// How many addresses each grid cell of 0.01 degree holds: where a sheet is dense, thin or empty
     Stats {
+        /// the country file (.bin)
         index: PathBuf,
         #[command(flatten)]
         area: AreaArgs,
@@ -608,6 +632,7 @@ enum Cmd {
     },
     /// Print the provenance/identity record of a sheet (SEC_META, v6+)
     Meta {
+        /// the country file (.bin)
         index: PathBuf,
         /// machine-readable JSON object (safe against values with embedded newlines)
         #[arg(long)]
@@ -616,7 +641,9 @@ enum Cmd {
     /// Replace SEC_META in a current-format sheet without rebuilding data sections.
     /// Older v5/v6 sheets must be rebuilt because v7 changes house_blocks.
     Repack {
+        /// the input file
         input: PathBuf,
+        /// the file to write
         output: PathBuf,
         /// build manifest (JSON): provenance + country/layer identity
         #[arg(long)]
@@ -632,7 +659,9 @@ enum Cmd {
     /// How close the answers come to points you know: a CSV with an address and lat, lon of the truth.
     /// Prints rows, hits within 150 m, median, p95 and the match rate as JSON.
     Bench {
+        /// the country file (.bin)
         index: PathBuf,
+        /// the input file
         input: PathBuf,
         /// the address column, or several joined with ", " (default: the one named address, query or q)
         #[arg(long)]
@@ -651,14 +680,14 @@ enum Cmd {
         output: Option<PathBuf>,
         /// the same figures for each value of this column of the input (state, kind of place); a slice under 300
         /// rows is marked a probe
-        #[arg(long, hide = true)]
+        #[arg(long)]
         by: Option<String>,
         /// judge answers already collected from another engine instead of geocoding: a CSV with id, lat, lon
         /// (no row for an id, or empty lat, lon: no answer); the input needs the same id column
-        #[arg(long, hide = true)]
+        #[arg(long)]
         answers: Option<PathBuf>,
         /// the id column of the input and of --answers (default: id)
-        #[arg(long, hide = true, default_value = "id")]
+        #[arg(long, default_value = "id")]
         id_column: String,
     },
 }
@@ -672,6 +701,7 @@ struct AreaArgs {
     /// a commune by name
     #[arg(long)]
     city: Option<String>,
+    /// a postcode
     #[arg(long)]
     postcode: Option<String>,
     /// a circle: LAT,LON,METERS

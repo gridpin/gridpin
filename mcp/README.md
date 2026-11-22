@@ -70,7 +70,7 @@ Results are the same as the GridPin CLI, Python and DuckDB return. Treat `street
 
 ```console
 $ pip install gridpin-mcp
-$ gridpin-fetch fr          # prints the path, e.g. ~/.cache/gridpin/v0.9.0/france.bin
+$ gridpin-fetch fr          # prints the path, e.g. ~/.cache/gridpin/v0.10.0/france.bin
 ```
 
 ```python
